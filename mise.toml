@@ -1,0 +1,17 @@
+[tools]
+rust = { version = "stable", targets = "x86_64-unknown-none" }
+
+[tasks.iso]
+description = "Build the kernel and package it into a bootable GRUB ISO"
+run = [
+    "cargo build",
+    "mkdir -p target/isodir/boot/grub",
+    "cp target/x86_64-unknown-none/debug/kernel target/isodir/boot/kernel.elf",
+    "cp grub/grub.cfg target/isodir/boot/grub/grub.cfg",
+    "grub2-mkrescue -o target/wipmach.iso target/isodir",
+]
+
+[tasks.qemu]
+description = "Build the ISO and boot it in QEMU, with serial output on the console"
+depends = ["iso"]
+run = "qemu-system-x86_64 -cdrom target/wipmach.iso -display none -serial stdio -no-reboot -no-shutdown"

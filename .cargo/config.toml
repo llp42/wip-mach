@@ -1,0 +1,18 @@
+# Cargo configuration for building the wip-mach hello-world kernel as a
+# freestanding (no_std, no_main) binary for the official x86_64-unknown-none
+# target -- prebuilt by upstream (Tier 2), so no custom target-spec JSON and
+# no -Z build-std needed.
+#
+# Two of its defaults don't fit us and are overridden below:
+# - code-model=kernel assumes a high-half kernel near the top of the 64-bit
+#   address space; we load low, at 1MiB, so we need code-model=small.
+# - it defaults to a position-independent executable; we want a plain static
+#   binary matching linker.ld's fixed load address.
+
+[build]
+target = "x86_64-unknown-none"
+rustflags = [
+    "-C", "code-model=small",
+    "-C", "relocation-model=static",
+    "-C", "link-arg=-Tlinker.ld",
+]

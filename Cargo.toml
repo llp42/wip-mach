@@ -1,0 +1,22 @@
+[package]
+name = "wip-mach"
+version = "0.1.0"
+edition = "2024"
+authors = ["Leonardo Lopes Pereira <leonardolopespereira@outlook.com>"]
+license = "GPL-2.0-or-later"
+description = "A work-in-progress Mach microkernel implementation in Rust"
+repository = "https://github.com/llp42/wip-mach"
+publish = false
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
