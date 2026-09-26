@@ -1,0 +1,4 @@
+# The C half is written to 79 columns, and so is the Rust half; rustfmt's
+# default of 100 would reflow every signature here on the first run.
+edition = "2024"
+max_width = 79

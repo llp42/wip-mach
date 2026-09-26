@@ -1,22 +1,36 @@
-[package]
-name = "wip-mach"
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/kernel"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 authors = ["Leonardo Lopes Pereira <leonardolopespereira@outlook.com>"]
 license = "GPL-2.0-or-later"
-description = "A work-in-progress Mach microkernel implementation in Rust"
 repository = "https://github.com/llp42/wip-mach"
-publish = false
-
-[[bin]]
-name = "kernel"
-path = "src/main.rs"
-test = false
-bench = false
 
 [profile.dev]
+opt-level = 2
+# Line tables only: full DWARF weighs the kernel image down and boots the
+# ABI suite at about 45 s, over the 33-43 s benchmark window.
+debug = "line-tables-only"
+debug-assertions = false
+overflow-checks = false
 panic = "abort"
 
 [profile.release]
 panic = "abort"
 lto = true
+
+# The benchmarks inherit `release`, whose LTO link dominates their build
+# time; they compare structures relative to each other, so they skip it.
+[profile.bench]
+lto = false
+
+# Host unit tests of the portable modules; `test` inherits `dev`, whose
+# checks are off for the kernel's boot-time budget.  Cargo forces
+# `panic=unwind` on test targets, so the `dev` setting does not carry over.
+[profile.test]
+debug-assertions = true
+overflow-checks = true

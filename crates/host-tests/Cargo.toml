@@ -1,0 +1,10 @@
+[package]
+name = "host-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Host-side unit tests for the portable kernel modules"
+publish = false
+
+[dependencies]

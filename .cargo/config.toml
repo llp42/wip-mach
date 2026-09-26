@@ -1,18 +1,30 @@
-# Cargo configuration for building the wip-mach hello-world kernel as a
-# freestanding (no_std, no_main) binary for the official x86_64-unknown-none
-# target -- prebuilt by upstream (Tier 2), so no custom target-spec JSON and
-# no -Z build-std needed.
+# Cargo configuration for building wip-mach as a freestanding (no_std,
+# no_main) kernel for the official x86_64-unknown-none target -- prebuilt by
+# upstream (Tier 2), so no custom target-spec JSON and no -Z build-std needed.
 #
-# Two of its defaults don't fit us and are overridden below:
-# - code-model=kernel assumes a high-half kernel near the top of the 64-bit
-#   address space; we load low, at 1MiB, so we need code-model=small.
-# - it defaults to a position-independent executable; we want a plain static
-#   binary matching linker.ld's fixed load address.
+# The target's defaults fit the kernel: soft-float, no SSE/MMX, no red zone,
+# code-model=kernel (the kernel lives in the last 2GiB, see
+# VM_MIN_KERNEL_ADDRESS), panic=abort.  It defaults to a position-independent
+# executable; we want a plain static binary for the kernel's `ldscript`
+# high-half layout, whose `_START`, `_START_MAP` and `KERNEL_MAP_SHIFT` come
+# from the --defsym arguments below.
 
 [build]
 target = "x86_64-unknown-none"
+
+# The kernel flags stay on the kernel target: host unit-test builds of the
+# workspace's portable crates link with the host toolchain and must not get
+# `crates/kernel/ldscript` or the defsyms.
+[target.x86_64-unknown-none]
 rustflags = [
-    "-C", "code-model=small",
     "-C", "relocation-model=static",
-    "-C", "link-arg=-Tlinker.ld",
+    "-C", "force-frame-pointers=yes",
+    "-C", "link-arg=-Tcrates/kernel/ldscript",
+    "-C", "link-arg=--defsym=_START=0x1000000",
+    "-C", "link-arg=--defsym=_START_MAP=0x1000000",
+    "-C", "link-arg=--defsym=KERNEL_MAP_SHIFT=0xffffffff80000000",
+    "-C", "link-arg=-z",
+    "-C", "link-arg=max-page-size=0x1000",
+    "-C", "link-arg=-z",
+    "-C", "link-arg=nostart-stop-gc",
 ]

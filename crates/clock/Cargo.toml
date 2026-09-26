@@ -1,0 +1,38 @@
+[package]
+name = "clock"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT"
+description = "The machine clock and Scheme 6 hashed timer wheels"
+repository.workspace = true
+publish = false
+
+[dependencies]
+collections = { path = "../collections" }
+spin = { version = "=0.12.3", default-features = false, features = ["spin_mutex"] }
+
+[dev-dependencies]
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "timers"
+harness = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "deny"
+elided_lifetimes_in_paths = "deny"
+unused_qualifications = "deny"
+trivial_numeric_casts = "deny"
+non_ascii_idents = "deny"
+meta_variable_misuse = "deny"
+let_underscore_drop = "deny"
+macro_use_extern_crate = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+missing_safety_doc = "deny"

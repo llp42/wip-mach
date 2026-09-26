@@ -1,0 +1,12 @@
+[package]
+name = "mach-mig-sys"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The MIG-generated Mach interfaces: native glue and raw bindings"
+repository.workspace = true
+publish = false
+links = "mach_mig"
+
+[dependencies]

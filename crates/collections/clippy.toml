@@ -1,0 +1,9 @@
+# Tests state their expectations with `unwrap`, `expect`, indexing and
+# bare `assert!`; the library itself may not.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+
+# A multi-line block reads better with its statements' own semicolons.
+semicolon-outside-block-ignore-multiline = true

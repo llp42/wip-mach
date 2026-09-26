@@ -1,0 +1,40 @@
+[package]
+name = "kmem"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT"
+description = "Fallible owning heap types over an allocator trait"
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "deny"
+elided_lifetimes_in_paths = "deny"
+unused_qualifications = "deny"
+trivial_numeric_casts = "deny"
+non_ascii_idents = "deny"
+meta_variable_misuse = "deny"
+let_underscore_drop = "deny"
+macro_use_extern_crate = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+unused_results = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+missing_safety_doc = "deny"
+# ADR 0018: an allocation failure is an error, never a panic.
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+# Contradicts rustc's `unreachable_pub`, which this crate follows.
+redundant_pub_crate = "allow"

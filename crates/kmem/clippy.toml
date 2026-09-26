@@ -1,0 +1,6 @@
+# Tests state their expectations with `unwrap`, `expect`, indexing and
+# bare `assert!`; the library itself may not.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true

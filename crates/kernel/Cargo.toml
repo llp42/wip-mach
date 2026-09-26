@@ -1,0 +1,41 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "A work-in-progress Mach microkernel implementation in Rust"
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+clock = { path = "../clock" }
+collections = { path = "../collections" }
+intrusive-collections = { version = "=0.10.3", default-features = false }
+kmem = { path = "../kmem" }
+mach-mig-sys = { path = "../mach-mig-sys" }
+spin = { version = "=0.12.3", default-features = false, features = ["spin_mutex", "once"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "deny"
+elided_lifetimes_in_paths = "deny"
+unused_qualifications = "deny"
+trivial_numeric_casts = "deny"
+non_ascii_idents = "deny"
+meta_variable_misuse = "deny"
+let_underscore_drop = "deny"
+macro_use_extern_crate = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+missing_safety_doc = "deny"

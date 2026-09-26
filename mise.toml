@@ -1,5 +1,18 @@
+[tool_alias]
+mimo = "github:XiaomiMiMo/MiMo-Code"
+
 [tools]
 rust = { version = "stable", targets = "x86_64-unknown-none" }
+"cargo:cargo-llvm-cov" = "0.9.1"
+mimo = "0.1.15"
+
+[tasks."build::dev"]
+description = "Build the kernel with the dev profile"
+run = "cargo build"
+
+[tasks."build::release"]
+description = "Build the kernel with the release profile"
+run = "cargo build --release"
 
 [tasks.iso]
 description = "Build the kernel and package it into a bootable GRUB ISO"
@@ -10,6 +23,63 @@ run = [
     "cp grub/grub.cfg target/isodir/boot/grub/grub.cfg",
     "grub2-mkrescue -o target/wipmach.iso target/isodir",
 ]
+
+[tasks."test::clock"]
+description = "Run the host unit tests of the clock crate"
+run = "cargo test -p clock --target x86_64-unknown-linux-gnu"
+
+[tasks."test::collections"]
+description = "Run the host unit tests of the collections crate"
+run = "cargo test -p collections --target x86_64-unknown-linux-gnu"
+
+[tasks."test::kmem"]
+description = "Run the host unit tests of the kmem crate"
+run = "cargo test -p kmem --target x86_64-unknown-linux-gnu"
+
+[tasks."cov::clock"]
+description = "Fail unless the clock crate is at 100% line, region and function coverage"
+run = "cargo llvm-cov -p clock --target x86_64-unknown-linux-gnu --show-missing-lines --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100"
+
+[tasks."cov::collections"]
+description = "Fail unless the collections crate is at 100% line, region and function coverage"
+run = "cargo llvm-cov -p collections --target x86_64-unknown-linux-gnu --show-missing-lines --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100"
+
+[tasks."cov::kmem"]
+description = "Fail unless the kmem crate is at 100% line, region and function coverage"
+run = "cargo llvm-cov -p kmem --target x86_64-unknown-linux-gnu --show-missing-lines --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100"
+
+[tasks."test::lock"]
+description = "Run the host unit tests of the lock crate"
+run = "cargo test -p lock --target x86_64-unknown-linux-gnu"
+
+[tasks."loom::lock"]
+description = "Model-check the lock crate's protocols with loom"
+env = { RUSTFLAGS = "--cfg loom" }
+run = "cargo test -p lock --target x86_64-unknown-linux-gnu --release"
+
+[tasks."cov::lock"]
+description = "Fail unless the lock crate is at 100% line, region and function coverage"
+run = "cargo llvm-cov -p lock --target x86_64-unknown-linux-gnu --show-missing-lines --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100"
+
+[tasks."bench::clock"]
+description = "Benchmark the clock crate's timeouts and accounting timers"
+run = "cargo bench -p clock --target x86_64-unknown-linux-gnu --bench timers"
+
+[tasks."bench::lock"]
+description = "Benchmark the lock crate's spin and sleeping locks"
+run = "cargo bench -p lock --target x86_64-unknown-linux-gnu"
+
+[tasks."test::unit"]
+description = "Run the host unit tests of the portable kernel modules"
+run = "cargo test --workspace --target x86_64-unknown-linux-gnu"
+
+[tasks."test::abi"]
+description = "Hurd smoke test: fetch the pinned Debian GNU/Hurd image, swap in the kernel, boot it on serial, run the fixed commands and halt"
+run = "hurd-smoke/run.sh"
+
+[tasks.test-boot-script]
+description = "Run the boot-script differential suite against GNU Mach's kern/boot_script.c"
+run = ["boot-script-tests/run.sh"]
 
 [tasks.qemu]
 description = "Build the ISO and boot it in QEMU, with serial output on the console"
