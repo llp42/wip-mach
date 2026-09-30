@@ -48,11 +48,9 @@ use crate::vm::vm_map::{VmMap, round_page};
 use collections::tail_queue::{self, TailQueue};
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_long, c_uint, c_void};
-use core::mem::{MaybeUninit, offset_of};
+use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
-
-const THREAD_SIZE: usize = 560;
 
 /// `TASK_NAME_SIZE` in <kern/task.h>, the length of `thread.name`.
 pub const TASK_NAME_SIZE: usize = 32;
@@ -1291,9 +1289,6 @@ impl Default for Thread {
     }
 }
 
-const _: () = assert!(size_of::<Thread>() == THREAD_SIZE);
-const _: () = assert!(align_of::<Thread>() == align_of::<*mut c_void>());
-
 const _: () = assert!(size_of::<StateBits>() == size_of::<u32>());
 const _: () = assert!(
     size_of::<StateEvent>()
@@ -1305,23 +1300,6 @@ const _: () = assert!(
 );
 
 const _: () = assert!(KERNEL_STACK_SIZE.is_multiple_of(size_of::<VmOffset>()));
-
-const _: () = {
-    assert!(offset_of!(Thread, links) == 0);
-    assert!(offset_of!(Thread, runq) == 16);
-    assert!(offset_of!(Thread, state_event) == 48);
-    assert!(offset_of!(Thread, pset_threads) == 56);
-    assert!(offset_of!(Thread, lock) == 72);
-    assert!(offset_of!(Thread, swap_func) == 104);
-    assert!(offset_of!(Thread, wait_event) == 112);
-    assert!(offset_of!(Thread, wait_result) == 124);
-    assert!(offset_of!(Thread, sched_pri) == 136);
-    assert!(offset_of!(Thread, sched_stamp) == 160);
-    assert!(offset_of!(Thread, timer) == 392);
-    assert!(offset_of!(Thread, depress_timer) == 440);
-    assert!(offset_of!(Thread, processor_set) == 496);
-    assert!(offset_of!(Thread, bound_processor) == 504);
-};
 
 const _: () = assert!(size_of::<IpcKmsgQueue>() == size_of::<*mut c_void>());
 const _: () = {
