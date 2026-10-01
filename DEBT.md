@@ -46,11 +46,13 @@ deletes its entry; a change that opens one adds it.
 - **ADR**: ADR 0014.
 - **Where**: `ipc/`, `vm/` above the pmap, and the task, thread,
   scheduler and device-dispatch modules of `kern/` and `device/`; the
-  mechanisms `kern/rcu.rs`, `kern/rdxtree.rs`, `kern/boot_script.rs`
-  and `kern/elf_load.rs`.
+  mechanisms `kern/rcu.rs`, `kern/rdxtree.rs` and `kern/boot_script.rs`.
 - **Done when**: `crates/wip-mach` exists and holds the
   machine-independent core, and each mechanism has moved to its own
   crate or has been found to fail the split test.
+- **Recorded outcomes**: `elf_load` passes the split test and lives in
+  `crates/elf-load` as original MIT code with isolated x86 / x86_64
+  readers.
 
 ## Host tests compile kernel sources through a shim
 
@@ -126,7 +128,7 @@ deletes its entry; a change that opens one adds it.
 
 - **ADR**: ADR 0026; ADR 0027.
 - **Where**: `kernel/src/main.rs` allows the `cast_*` lints and
-  `inline_always` crate-wide to mirror the C; 239 `#[allow]`
+  `inline_always` crate-wide to mirror the C; 210 `#[allow]`
   attributes across `crates/`; `kernel` does not deny
   `allow_attributes`.
 - **Done when**: no `#[allow(` or `#![allow(` remains in `crates/`, and
@@ -154,17 +156,6 @@ deletes its entry; a change that opens one adds it.
 - **Where**: `spin` (the kernel, in 9 files, and `clock`'s
   `CriticalLock`).
 - **Done when**: no `Cargo.toml` in the workspace names `spin`.
-
-## `KmemCache` hot fields left the first cache line
-
-- **ADR**: ADR 0027.
-- **Where**: `kern/slab.rs` — `active_slabs` is now a three-word
-  `rb_tree` head (ADR 0051), so `flags` and `bufctl_dist` sit past
-  offset 64 in the `align(64)` record. The C field order that kept
-  them in line 0 is no longer free.
-- **Done when**: the cache's field order is re-tuned or the line
-  split is measured not to matter, and the comment at `KmemCache`
-  stops claiming the C packing.
 
 ## `cargo deny` does not run
 

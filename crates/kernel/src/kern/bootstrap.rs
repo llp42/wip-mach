@@ -19,7 +19,7 @@
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::x86_64::model_dep::{boot_modules, kernel_cmdline};
 use crate::arch::x86_64::multiboot::MultibootModule;
-use crate::arch::x86_64::pcb::{set_user_regs, user_stack_low};
+use crate::arch::x86_64::pcb::{self, set_user_regs, user_stack_low};
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::user_access;
 use crate::ipc::ipc_port;
@@ -28,7 +28,7 @@ use crate::ipc::{IpcPort, IpcSpace};
 use crate::kern::boot_script::{self, Command, Host, Script};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
-use crate::kern::elf_load::{self, ExecInfo, ExecSectype};
+use elf_load::{self, ExecSectype};
 use crate::kern::host;
 use crate::kern::lock::SimpleLock;
 use crate::kern::printf;
@@ -43,7 +43,7 @@ use alloc::ffi::CString;
 use alloc::format;
 use alloc::vec::Vec;
 use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
-use core::mem::{MaybeUninit, size_of};
+use core::mem::size_of;
 use core::ptr::{
     self, NonNull, addr_of_mut, null_mut, with_exposed_provenance_mut,
 };
@@ -160,7 +160,8 @@ unsafe extern "C" fn user_bootstrap_compat() {
     // SAFETY: the launcher handed this thread the box and never touches it
     // again.
     let module = unsafe { (*thread).saved.other }.cast::<MultibootModule>();
-    let exec_info = unsafe { load_bootstrap(module.cast()) };
+    // SAFETY: the launcher handed this thread the live module.
+    let exec_info = load_bootstrap(unsafe { &*module });
     // SAFETY: the box came from the launcher, and the image was already
     // copied into the task.
     unsafe { drop(Box::from_raw(module)) };
@@ -526,118 +527,138 @@ fn port_name(port: u32) -> CString {
     CString::new(format!("{port}")).expect("a decimal holds no NUL")
 }
 
-/// Reads `size` bytes of a module image at `file_ofs` for the ELF loader.
-///
-/// # Safety
-///
-/// `handle` must be the live module record the caller loaded from, `buf`
-/// writable for `size` bytes, and `out_actual` writable.
-unsafe fn boot_read(
-    handle: *mut c_void,
-    file_ofs: VmOffset,
-    buf: *mut c_void,
-    size: VmSize,
-    out_actual: *mut VmSize,
-) -> c_int {
-    let module = unsafe { &*handle.cast::<MultibootModule>() };
-    let Some(source) = module.image_at(file_ofs, size) else {
-        return -1;
-    };
-    unsafe {
-        ptr::copy_nonoverlapping(source.cast::<u8>(), buf.cast::<u8>(), size);
-        *out_actual = size;
-    }
-    0
+/// The module image the ELF loader reads from and places into.
+struct ModuleImage<'a> {
+    module: &'a MultibootModule,
 }
 
-/// Places one executable section of a module in the current task.
-///
-/// # Safety
-///
-/// `handle` must be the live module record the caller loaded from; the
-/// routine runs on the task that receives the image and may block.
-unsafe fn read_exec(
-    handle: *mut c_void,
-    file_ofs: VmOffset,
-    file_size: VmSize,
-    mem_addr: VmOffset,
-    mem_size: VmSize,
-    section_type: ExecSectype,
-) -> c_int {
-    let module = unsafe { &*handle.cast::<MultibootModule>() };
-    let Some(source) = module.image_at(file_ofs, file_size) else {
-        return -1;
-    };
-    if !section_type.contains(ExecSectype::ALLOC) {
-        return 0;
-    }
+/// The module image does not cover the requested file range.
+#[derive(Clone, Copy, Debug)]
+struct ShortImage;
 
-    let map = unsafe { (*current_task()).map }.cast::<VmMap>();
-    let mut start_page = trunc_page(mem_addr);
-    let end_page = round_page(mem_addr.wrapping_add(mem_size));
-    let page_count = end_page - start_page;
-    if let Some(mut map) = NonNull::new(map) {
-        let result = unsafe {
-            vm_user::allocate(map.as_mut(), &mut start_page, page_count, false)
+impl elf_load::ElfImage for ModuleImage<'_> {
+    type Error = ShortImage;
+
+    fn read_at(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> Result<usize, Self::Error> {
+        // A range the module does not cover is a short read, not an
+        // error: the loader classifies it as an unrecognized image.
+        let Some(source) = self
+            .module
+            .image_at(offset as VmOffset, buf.len())
+        else {
+            return Ok(0);
         };
-        if let Err(error) = result {
-            kpanic!(
-                "read_exec",
-                "cannot allocate the bootstrap section: {:x}",
-                error.as_kern_return()
-            );
-        }
-    }
-
-    if file_size > 0 {
+        // SAFETY: `image_at` covers `buf.len()` bytes at `source`, and
+        // `buf` is writable for that many.
         unsafe {
-            user_access::copyout(source, user_ptr(mem_addr), file_size);
-        }
-    }
-
-    let mem_prot = section_type.protection();
-    if mem_prot != VmProt::ALL
-        && let Some(mut map) = NonNull::new(map)
-    {
-        let result = unsafe {
-            vm_user::protect(
-                map.as_mut(),
-                start_page,
-                page_count,
-                false,
-                mem_prot,
-            )
-        };
-        if let Err(error) = result {
-            kpanic!(
-                "read_exec",
-                "cannot protect the bootstrap section: {:x}",
-                error.as_kern_return()
+            ptr::copy_nonoverlapping(
+                source.cast::<u8>(),
+                buf.as_mut_ptr(),
+                buf.len(),
             );
         }
+        Ok(buf.len())
     }
-    0
+
+    fn place(
+        &mut self,
+        offset: u64,
+        file_len: usize,
+        addr: usize,
+        mem_len: usize,
+        sectype: ExecSectype,
+    ) -> Result<(), Self::Error> {
+        let Some(source) = self
+            .module
+            .image_at(offset as VmOffset, file_len)
+        else {
+            return Err(ShortImage);
+        };
+        if !sectype.contains(ExecSectype::ALLOC) {
+            return Ok(());
+        }
+
+        // SAFETY: runs on the thread that receives the image; its task
+        // and map are live.
+        let map = unsafe { (*current_task()).map }.cast::<VmMap>();
+        let mut start_page = trunc_page(addr);
+        let end_page = round_page(addr.wrapping_add(mem_len));
+        let page_count = end_page - start_page;
+        if let Some(mut map) = NonNull::new(map) {
+            let result = unsafe {
+                vm_user::allocate(map.as_mut(), &mut start_page, page_count, false)
+            };
+            if let Err(error) = result {
+                kpanic!(
+                    "read_exec",
+                    "cannot allocate the bootstrap section: {:x}",
+                    error.as_kern_return()
+                );
+            }
+        }
+
+        if file_len > 0 {
+            // SAFETY: `image_at` covers `file_len` bytes, and the
+            // user address is the segment just allocated above.
+            unsafe {
+                user_access::copyout(source, user_ptr(addr), file_len);
+            }
+        }
+
+        let mem_prot = vm_prot(sectype.protection());
+        if mem_prot != VmProt::ALL
+            && let Some(mut map) = NonNull::new(map)
+        {
+            let result = unsafe {
+                vm_user::protect(
+                    map.as_mut(),
+                    start_page,
+                    page_count,
+                    false,
+                    mem_prot,
+                )
+            };
+            if let Err(error) = result {
+                kpanic!(
+                    "read_exec",
+                    "cannot protect the bootstrap section: {:x}",
+                    error.as_kern_return()
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Loads the image in `handle` into the current task's map, or halts.
-///
-/// # Safety
-///
-/// `handle` must be the live module record the load callbacks read, and
-/// the routine runs on the task that receives the image.
-unsafe fn load_bootstrap(handle: *mut c_void) -> ExecInfo {
-    let mut info = MaybeUninit::<ExecInfo>::uninit();
-    let error = unsafe {
-        elf_load::exec_load(boot_read, read_exec, handle, info.as_mut_ptr())
-    };
-    if error != 0 {
-        kpanic!(
-            "copy_bootstrap",
-            "Cannot load user-bootstrap image: error code {}",
-            error
-        );
+/// The `VmProt` the loader's protection bits name.
+fn vm_prot(prot: elf_load::Prot) -> VmProt {
+    let mut result = VmProt::NONE;
+    if prot.contains(elf_load::Prot::READ) {
+        result |= VmProt::READ;
     }
-    unsafe { info.assume_init() }
+    if prot.contains(elf_load::Prot::WRITE) {
+        result |= VmProt::WRITE;
+    }
+    if prot.contains(elf_load::Prot::EXECUTE) {
+        result |= VmProt::EXECUTE;
+    }
+    result
+}
+
+/// Loads the image of `module` into the current task's map, or halts.
+fn load_bootstrap(module: &MultibootModule) -> elf_load::ExecInfo {
+    let mut image = ModuleImage { module };
+    match elf_load::load(&mut image) {
+        Ok(info) => info,
+        Err(err) => kpanic!(
+            "copy_bootstrap",
+            "Cannot load user-bootstrap image: {err:?}"
+        ),
+    }
 }
 
 /// One environment entry: a name ending in `=`, and a value.
@@ -680,7 +701,7 @@ unsafe fn copyout_bytes(from: *const c_void, to: VmOffset, len: usize) {
 /// the record the ELF loader filled, and every string must outlive the
 /// call.
 unsafe fn build_args_and_stack(
-    info: &ExecInfo,
+    info: &elf_load::ExecInfo,
     argv: &[*const c_char],
     envp: &[EnvVar<'_>],
 ) {
@@ -710,18 +731,25 @@ unsafe fn build_args_and_stack(
                 memory_object: IP_NULL,
                 offset: 0,
                 copy: false,
-                cur_protection: info.stack_prot(),
+                cur_protection: vm_prot(info.stack_prot()),
                 max_protection: VmProt::ALL,
                 inheritance: VmInherit::COPY,
             },
         )
     };
 
+    let regs = pcb::ExecInfo {
+        format: 0,
+        entry: info.entry(),
+        init_dp: 0,
+        interp: 0,
+        stack_prot: 0,
+    };
     let mut arg_pos = unsafe {
         set_user_regs(
             stack_base,
             stack_size,
-            ptr::from_ref(info).cast(),
+            ptr::from_ref(&regs),
             arg_len,
         )
     };
@@ -837,7 +865,10 @@ unsafe fn exec_cmd(
 unsafe extern "C" fn user_bootstrap() {
     let thread = per_cpu::thread();
     let info = unsafe { (*thread).saved.other.cast::<UserBootstrapInfo>() };
-    let exec_info = unsafe { load_bootstrap((*info).module) };
+    // SAFETY: the launcher stored the live module pointer in `info`.
+    let exec_info = load_bootstrap(unsafe {
+        &*(*info).module.cast::<MultibootModule>()
+    });
 
     kprint!("task loaded:");
     let argv = unsafe { &*(*info).argv };

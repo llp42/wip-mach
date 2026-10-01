@@ -1,26 +1,14 @@
 [package]
-name = "kernel"
+name = "elf-load"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
-description = "A work-in-progress Mach microkernel implementation in Rust"
+license = "MIT"
+description = "Load ELF executables: recognize an image and place its segments"
 repository.workspace = true
 publish = false
 
-[[bin]]
-name = "kernel"
-path = "src/main.rs"
-test = false
-bench = false
-
 [dependencies]
-clock = { path = "../clock" }
-collections = { path = "../collections" }
-elf-load = { path = "../elf-load" }
-kmem = { path = "../kmem" }
-mach-mig-sys = { path = "../mach-mig-sys" }
-spin = { version = "=0.12.3", default-features = false, features = ["spin_mutex", "once"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -32,6 +20,10 @@ non_ascii_idents = "deny"
 meta_variable_misuse = "deny"
 let_underscore_drop = "deny"
 macro_use_extern_crate = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+unused_results = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -39,3 +31,13 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 missing_safety_doc = "deny"
+# ADR 0018: a bad image is an error, never a panic.
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+allow_attributes = "deny"
+# The fields are the ELF header's `e_*` and `p_*` members (ADR 0010).
+struct_field_names = "allow"
+# Contradicts rustc's `unreachable_pub`, which this crate follows.
+redundant_pub_crate = "allow"

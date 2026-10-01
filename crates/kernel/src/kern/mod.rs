@@ -8,7 +8,6 @@ pub mod boot_script;
 pub mod bootstrap;
 pub mod console;
 pub mod debug;
-pub mod elf_load;
 pub mod eventcount;
 pub mod exception;
 pub mod gsync;
