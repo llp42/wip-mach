@@ -110,7 +110,7 @@ pub(crate) fn clkstart() {
 
     PITCTL_PORT.write_u8(PIT0_MODE);
 
-    let hz_rate = crate::kern::mach_clock::CLOCK_HZ;
+    let hz_rate = crate::kern::machine::CLOCK_HZ;
 
     // The C computed the interval in `int` and stored it in an `unsigned int`:
     // `(CLKNUM + hz_rate / 2) / hz_rate`.

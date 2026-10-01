@@ -86,11 +86,14 @@ impl HeldLocks {
     }
 
     /// Removes the latest hold of `lock`, wherever it is in the stack,
-    /// and returns whether there was one.
-    pub(super) fn remove(&self, lock: usize) -> bool {
+    /// and returns whether there was one, held as `kind`.
+    pub(super) fn remove(&self, lock: usize, kind: Kind) -> bool {
         let Some(at) = self.position(lock) else {
             return false;
         };
+        if !matches!(self.stack[at].get(), Some(held) if held.kind == kind) {
+            return false;
+        }
         let len = self.len.get();
         for slot in at..len - 1 {
             self.stack[slot].set(self.stack[slot + 1].get());

@@ -13,17 +13,6 @@ deletes its entry; a change that opens one adds it.
 - **Done when**: `kernel` depends on `lock`, those three files are
   gone, and no `spl` identifier remains in `crates/`.
 
-## The kernel runs the legacy clock
-
-- **ADR**: ADRs 0038, 0039 and 0042; ADR 0028.
-- **Where**: `kern/mach_clock.rs` keeps its own timeout wheel, pool and
-  soft clock, and `arch/x86_64/hardclock.rs`, `com.rs`, `kd/esc.rs` and
-  `kern/syscall_subr.rs` arm timeouts through it; nothing calls
-  `Clock::tick`.
-- **Done when**: every timeout is a `clock` `Callout` on a
-  `HashedWheel`, one CPU calls `Clock::tick`, and the legacy wheel is
-  gone.
-
 ## `clock` keeps its own irq-quiet lock
 
 - **ADR**: ADRs 0029 and 0041.
@@ -37,17 +26,20 @@ deletes its entry; a change that opens one adds it.
 ## A waker cancels the sleeper's timeout
 
 - **ADR**: ADR 0028.
-- **Where**: the IPC handoff path in `kern/ipc_sched.rs` resets the
-  woken thread's timer.
+- **Where**: `clear_wait` in `kern/sched_prim.rs` still calls
+  `Thread::stop_timer` on the thread it wakes; the sleeper should stop
+  its own callout on the way out of `thread_block` (continuations make
+  that resume path non-local).
 - **Done when**: no wakeup path touches another thread's timer.
 
-## The IPC timeout conversion overflows
+## `host_adjust_time64` with `MACH_ADJTIME_NSECS_OMIT` returns zero
 
-- **ADR**: ADR 0002.
-- **Where**: the millisecond-to-tick conversion in `kern/ipc_sched.rs`
-  multiplies in 32 bits and wraps above about 11.9 hours.
-- **Done when**: every `u32` millisecond timeout converts to the tick
-  count GNU Mach's arithmetic intends, without wrapping.
+- **ADR**: ADR 0002 (behaviour).
+- **Where**: `host_time::adjust_time` queries the outstanding
+  adjustment as zero; `clock::Clock` has no getter for
+  `Adjustment`, and `set_adjustment` always writes.
+- **Done when**: the query arm returns the outstanding gradual
+  correction the C `timedelta` held.
 
 ## The machine-independent core is still in `kernel`
 
@@ -156,20 +148,13 @@ deletes its entry; a change that opens one adds it.
 - **Done when**: `host_reboot` with `RB_DEBUGGER` parks every CPU,
   prints `debugger requested` and waits for GDB.
 
-## Console code keeps kdb hooks
-
-- **ADR**: ADR 0021.
-- **Where**: `arch/x86_64/kd/mod.rs` and `kd/keyboard.rs`.
-- **Done when**: no `kdb` or `ddb` reference remains in `crates/`.
-
 ## Third-party runtime crates
 
 - **ADR**: ADR 0023.
 - **Where**: `spin` (the kernel, in 9 files, and `clock`'s
   `CriticalLock`) and `intrusive-collections` (`vm/vm_map.rs` and the
-  tree half of `kern/slab.rs`, which use its `RBTree`; `kern/mach_clock.rs`
-  and `arch/x86_64/ioapic.rs`, for the legacy timeout wheel's
-  `Timeout.chain`). While `intrusive-collections` remains, an object with
+  tree half of `kern/slab.rs`, which use its `RBTree`). While
+  `intrusive-collections` remains, an object with
   one of its links is born whole: one struct literal, `Link::new()`
   included, `ptr::write`n into fresh storage, never fields stamped over
   recycled or zeroed memory. Its links carry an unlinked marker, and a
@@ -177,30 +162,22 @@ deletes its entry; a change that opens one adds it.
 - **Done when**: no `Cargo.toml` in the workspace names `spin` or
   `intrusive-collections`.
 
-## No ordered `collections` shape
+## The kernel's trees do not use `collections::rb_tree`
 
-- **ADR**: none, needs an ADR.
+- **ADR**: ADR 0051.
 - **Where**: `vm/vm_map.rs` (the address tree, keyed by first address, and
   the gap tree, keyed by gap size with duplicate keys) and `kern/slab.rs`
-  (`active_slabs`, keyed by buffer base), which use `intrusive-collections`'
-  `RBTree`. They need insertion, removal by node address, and floor and
-  ceiling lookups.
-- **Done when**: `collections` has an ordered shape, those three trees use
-  it, and no `Cargo.toml` in the workspace names `intrusive-collections`.
+  (`active_slabs`, keyed by buffer base) still use `intrusive-collections`'
+  `RBTree`, which `collections::rb_tree` replaces: `insert`, `remove_ptr`,
+  `lower_bound`, `upper_bound`, `front` and `back` cover what they call.
+- **Done when**: those three trees use `rb_tree` and no `Cargo.toml` in the
+  workspace names `intrusive-collections`.
 
 ## `cargo deny` does not run
 
 - **ADR**: ADR 0023.
 - **Where**: there is no `deny.toml`, and no CI to run it.
 - **Done when**: `deny.toml` exists and CI runs `cargo deny check`.
-
-## No `checked` profile
-
-- **ADR**: ADR 0022.
-- **Where**: the workspace `Cargo.toml` has no `[profile.checked]`;
-  `arch/x86_64/apic.rs` waits for one to turn a check into a
-  `debug_assert!`.
-- **Done when**: `[profile.checked]` exists and the ABI suite boots it.
 
 ## Gates are not `mise` tasks
 

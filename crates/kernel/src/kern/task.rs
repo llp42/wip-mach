@@ -28,7 +28,8 @@ use crate::kern::ipc_tt::{
     ipc_thread_terminate,
 };
 use crate::kern::lock::SimpleLock;
-use crate::kern::mach_clock;
+use crate::kern::machine;
+use crate::kern::host_time;
 use crate::kern::processor::{self, ProcessorSet};
 use crate::kern::sched::invalid_pri;
 use crate::kern::sched_prim::{
@@ -523,7 +524,7 @@ pub(crate) unsafe fn create_kernel_task(
 
         addr_of_mut!((*task).total_user_time).write(TimeValue64::default());
         addr_of_mut!((*task).total_system_time).write(TimeValue64::default());
-        mach_clock::record_time_stamp(addr_of_mut!((*task).creation_time));
+        host_time::record_time_stamp(addr_of_mut!((*task).creation_time));
     }
 
     let pset = unsafe { task_processor_set(parent, task) };
@@ -1517,7 +1518,7 @@ pub(crate) unsafe fn consider_collect() {
     // The C's `hz / 1` and the usual arithmetic conversions reinterpret the
     // signed tick rate as unsigned; `hz` is positive and set before the
     // pageout daemon can run.
-    let hz_rate = mach_clock::CLOCK_HZ as c_uint;
+    let hz_rate = machine::CLOCK_HZ as c_uint;
     // SAFETY: this is the collector's own state, and it runs on one thread.
     let mut max_rate = unsafe { TASK_COLLECT_MAX_RATE };
     if max_rate == 0 {

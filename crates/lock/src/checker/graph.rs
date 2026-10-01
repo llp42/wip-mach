@@ -111,6 +111,10 @@ impl Graph {
                 return Err(slot);
             };
             let seen = self.classes[node].load(Ordering::Relaxed);
+            debug_assert!(
+                !seen.is_null(),
+                "published class slot holds no class",
+            );
             // SAFETY: a published node's class came from a `Class`, a
             // `&'static Location`.
             if same(unsafe { &*seen }, class) {
@@ -197,5 +201,22 @@ impl Graph {
             frontier = next;
         }
         false
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use super::{Graph, home};
+    use core::panic::Location;
+    use core::sync::atomic::Ordering;
+
+    #[test]
+    #[should_panic = "published class slot holds no class"]
+    fn probe_of_a_published_slot_with_no_class_panics() {
+        let graph = Box::new(Graph::EMPTY);
+        let class = Location::caller();
+        // A slot published for node 0, whose class was never stored.
+        graph.index[home(class)].store(1, Ordering::Release);
+        let _ = graph.find(class);
     }
 }

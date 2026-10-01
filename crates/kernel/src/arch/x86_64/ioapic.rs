@@ -14,13 +14,12 @@ use crate::arch::x86_64::pio::Port;
 use crate::arch::x86_64::spl;
 use crate::config::{MAX_NCPUS, NINTR};
 use crate::kern::console::{CStrArg, kprint};
-use crate::kern::mach_clock::{self, Timeout};
+use crate::kern::machine;
 use core::arch::asm;
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-use intrusive_collections::LinkedListLink;
 use spin::Mutex;
 
 /// `interrupt_handler_fn` of <i386/ipl.h>: one `ivect` entry, or [`None`]
@@ -437,27 +436,10 @@ fn disable_pic() {
 /// `timer_expiry_callback()` of `i386/i386at/ioapic.c`: mark the measurement
 /// finished.
 ///
-/// # Safety
-///
-/// `arg` must be the address of a live `c_int` done-flag that outlives the
-/// timeout, as `measure_10x_apic_hz()` sets up before arming it.
-unsafe fn timer_expiry_callback(arg: *mut c_void) {
-    // SAFETY: `arg` is the address of the measuring frame's `done` flag, as
-    // `measure_10x_apic_hz()` passed it.
-    unsafe { ptr::write_volatile(arg.cast::<c_int>(), 1) };
-}
-
 /// The body of `timer_measure_10x_apic_hz()` in C: time the LAPIC timer
-/// against ten Mach ticks.
+/// against ten Mach ticks, busy-waiting on the HPET rather than a wheel
+/// (the wheel is not up at calibration).
 fn measure_10x_apic_hz() -> u32 {
-    let mut done: c_int = 0;
-    let mut timer = Timeout {
-        chain: LinkedListLink::new(),
-        fcn: Some(timer_expiry_callback),
-        param: (&raw mut done).cast::<c_void>(),
-        t_time: 0,
-        set: 0,
-    };
     let unit = apic::lapic_ptr();
     let start = u32::MAX;
 
@@ -466,16 +448,17 @@ fn measure_10x_apic_hz() -> u32 {
     // SAFETY: `unit` is the mapped local-APIC page.
     unsafe { apic::reg_write(&raw mut (*unit).init_count, start) };
 
-    // SAFETY: `timer` is a live element that stays at this address until the
-    // timeout expires.
-    unsafe { mach_clock::set_timeout(&raw mut timer, 10) };
-
-    loop {
-        // SAFETY: `done` is written only by the expiry callback, through a
-        // volatile store, so the loop cannot cache it.
-        if unsafe { ptr::read_volatile(&raw const done) } != 0 {
-            break;
-        }
+    let period_ns = apic::hpclock_get_counter_period_nsec();
+    let hz = machine::CLOCK_HZ as u32;
+    // Ten ticks at `CLOCK_HZ`, in HPET counts (saturating).
+    let counts = if period_ns == 0 {
+        0
+    } else {
+        ((10u64 * 1_000_000_000) / u64::from(hz) / u64::from(period_ns))
+            .min(u64::from(u32::MAX)) as u32
+    };
+    let t0 = apic::hpclock_read_counter();
+    while apic::hpclock_read_counter().wrapping_sub(t0) < counts {
         core::hint::spin_loop();
     }
 

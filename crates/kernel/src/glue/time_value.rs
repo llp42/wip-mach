@@ -98,6 +98,26 @@ impl TimeValue64 {
             }
         }
     }
+
+    /// The whole record as nanoseconds since the epoch (or since boot).
+    #[must_use]
+    pub const fn to_nanos(self) -> u64 {
+        let seconds = if self.seconds < 0 { 0 } else { self.seconds as u64 };
+        let nanos =
+            if self.nanoseconds < 0 { 0 } else { self.nanoseconds as u64 };
+        seconds
+            .saturating_mul(1_000_000_000)
+            .saturating_add(nanos)
+    }
+
+    /// The record for `nanos` nanoseconds since the epoch (or since boot).
+    #[must_use]
+    pub const fn from_nanos(nanos: u64) -> Self {
+        Self {
+            seconds: (nanos / 1_000_000_000) as i64,
+            nanoseconds: (nanos % 1_000_000_000) as i64,
+        }
+    }
 }
 
 /// `mapped_time_value_t` of <`mach/time_value.h>`: the clock page the user side

@@ -7,11 +7,14 @@
 //! The clock interrupt, which `i386/i386/hardclock.c` used to define and
 //! `i386/i386/hardclock.h` declares.
 
+use crate::arch::x86_64::clock_platform;
 use crate::arch::x86_64::locore;
 use crate::arch::x86_64::pcb::I386InterruptState;
+use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::trap::EFL_VM;
-use crate::kern::mach_clock;
-use core::ffi::{c_char, c_int};
+use crate::kern::machine;
+use crate::kern::smp::CpuId;
+use core::ffi::{c_char, c_int, c_uint};
 use core::ptr;
 
 /// `SPL0` of <i386/ipl.h>: the base interrupt level.
@@ -31,12 +34,25 @@ pub(crate) unsafe fn hardclock(
     regs: *mut I386InterruptState,
 ) {
     let interrupted_user = ret_addr == ptr::addr_of!(locore::return_to_iret);
-    if interrupted_user {
+    let (usermode, basepri) = if interrupted_user {
         let regs = unsafe { &*regs };
-        let usermode = regs.efl & EFL_VM != 0 || regs.cs & 0x03 != 0;
-        mach_clock::interrupt(mach_clock::TICK, usermode, old_ipl == SPL0);
+        (
+            regs.efl & EFL_VM != 0 || regs.cs & 0x03 != 0,
+            old_ipl == SPL0,
+        )
     } else {
-        mach_clock::interrupt(mach_clock::TICK, false, false);
+        (false, false)
+    };
+
+    let thread = per_cpu::thread();
+    // SAFETY: `thread` is the interrupted thread or null, and this CPU
+    // owns its own accounting.
+    unsafe {
+        machine::tick_accounting(thread, machine::TICK as c_uint, usermode);
+    }
+
+    if per_cpu::cpu_id() == CpuId::BOOT {
+        clock_platform::tick(basepri);
     }
 }
 

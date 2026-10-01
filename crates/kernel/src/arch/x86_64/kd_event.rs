@@ -13,9 +13,7 @@ use super::io_req::{
 };
 use crate::arch::x86_64::spl;
 use crate::device::ds_routines::{device_read_alloc, ds_read_done, iodone};
-use crate::device::r#return::{
-    DeviceError, DeviceSuccess, IoResult, IoResultExt,
-};
+use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
 use crate::kern::console::kprint;
 use crate::utils::kd_queue::{KdEvent, KdEventQueue, Scancode};
 use core::cell::UnsafeCell;
@@ -25,28 +23,17 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// `sizeof x_kdb_enter_str / sizeof x_kdb_enter_str[0]` in C: the most port
-/// commands `x_kdb_enter_init()` accepts.
-const KDB_STR_MAX: usize = 512;
-
 const KDSKBDMODE: c_uint = 0x8004_4b01;
 const KDGKBDTYPE: c_uint = 0x4004_4b02;
 const KDSETLEDS: c_uint = 0x8004_4b05;
 const KB_ASCII: c_int = 2;
 const KB_VANILLAKB: c_int = 0;
 
-const K_X_KDB_ENTER: c_uint = 0x8010_4b10;
-const K_X_KDB_EXIT: c_uint = 0x8010_4b11;
-
 /// The driver's mutable state: the C file's file-scope globals.
 struct State {
     queue: KdEventQueue,
     read_queue: IoReqQueue,
     initialized: bool,
-    x_kdb_enter_str: [c_uint; KDB_STR_MAX],
-    x_kdb_exit_str: [c_uint; KDB_STR_MAX],
-    x_kdb_enter_len: usize,
-    x_kdb_exit_len: usize,
 }
 
 impl State {
@@ -55,10 +42,6 @@ impl State {
             queue: KdEventQueue::new(),
             read_queue: IoReqQueue::new(),
             initialized: false,
-            x_kdb_enter_str: [0; KDB_STR_MAX],
-            x_kdb_exit_str: [0; KDB_STR_MAX],
-            x_kdb_enter_len: 0,
-            x_kdb_exit_len: 0,
         }
     }
 }
@@ -210,11 +193,6 @@ pub(crate) unsafe fn kbdsetstat(
         let val = unsafe { *data };
         crate::arch::x86_64::kd::keyboard::set_leds1(val as u8);
         Ok(DeviceSuccess::Success).as_io_return()
-    } else if flavor == K_X_KDB_ENTER {
-        // SAFETY: `data` holds `count` port commands.
-        unsafe { x_kdb_enter_init(data.cast(), count) }.as_io_return()
-    } else if flavor == K_X_KDB_EXIT {
-        unsafe { x_kdb_exit_init(data.cast(), count) }.as_io_return()
     } else {
         Err(DeviceError::InvalidOperation).as_io_return()
     }
@@ -290,52 +268,4 @@ unsafe fn kbd_read_done(ior: *mut IoReq) -> c_int {
 /// `kd_enqsc()` in C; called at `SPLKD` from the kd interrupt path.
 pub(crate) fn kd_enqsc(sc: Scancode) {
     enqueue_event(state(), &KdEvent::scancode(sc));
-}
-
-/// `x_kdb_enter_init()` in C.
-///
-/// # Safety
-///
-/// `data` must point to at least `count` readable `c_uint`s, as
-/// `kbdsetstat()`'s caller promised for the flavor.
-unsafe fn x_kdb_enter_init(data: *mut c_uint, count: c_uint) -> IoResult {
-    if count as usize > KDB_STR_MAX {
-        return Err(DeviceError::InvalidOperation);
-    }
-    let s = state();
-    // SAFETY: `count` is in bounds and the caller promises that many readable
-    // integers behind `data`.
-    unsafe {
-        ptr::copy_nonoverlapping(
-            data,
-            s.x_kdb_enter_str.as_mut_ptr(),
-            count as usize,
-        );
-    }
-    s.x_kdb_enter_len = count as usize;
-    Ok(DeviceSuccess::Success)
-}
-
-/// `x_kdb_exit_init()` in C.
-///
-/// # Safety
-///
-/// `data` must point to at least `count` readable `c_uint`s, as
-/// `kbdsetstat()`'s caller promised for the flavor.
-unsafe fn x_kdb_exit_init(data: *mut c_uint, count: c_uint) -> IoResult {
-    if count as usize > KDB_STR_MAX {
-        return Err(DeviceError::InvalidOperation);
-    }
-    let s = state();
-    // SAFETY: `count` is in bounds and the caller promises that many readable
-    // integers behind `data`.
-    unsafe {
-        ptr::copy_nonoverlapping(
-            data,
-            s.x_kdb_exit_str.as_mut_ptr(),
-            count as usize,
-        );
-    }
-    s.x_kdb_exit_len = count as usize;
-    Ok(DeviceSuccess::Success)
 }

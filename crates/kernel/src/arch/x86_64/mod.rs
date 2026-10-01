@@ -11,6 +11,7 @@ pub mod autoconf;
 pub mod biosmem;
 pub mod boothdr;
 pub mod busses;
+pub mod clock_platform;
 pub mod com;
 pub mod cpuboot;
 pub mod cswitch;

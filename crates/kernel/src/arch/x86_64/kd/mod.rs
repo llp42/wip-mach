@@ -183,13 +183,13 @@ pub struct ConsDev {
     ///
     /// Called with the chosen entry's own `cn_dev`; the callee may busy
     /// wait when `wait` is nonzero and must be safe to call at any
-    /// interrupt level, since the console can be read from `kdb`.
+    /// interrupt level.
     pub(crate) cn_getc: Option<unsafe fn(u16, c_int) -> c_int>,
     /// # Safety
     ///
     /// Called with the chosen entry's own `cn_dev`; the callee must be
-    /// safe to call at any interrupt level, since the console can be
-    /// written to from `kdb` and from the pending-buffer flush at boot.
+    /// safe to call at any interrupt level, since the console is written
+    /// from the panic path and from the pending-buffer flush at boot.
     pub(crate) cn_putc: Option<unsafe fn(u16, c_int) -> c_int>,
     pub(crate) cn_dev: u16,
     pub(crate) cn_pri: c_short,
@@ -224,7 +224,6 @@ pub struct KbEntry {
 pub(crate) struct State {
     pub(crate) kd_initialized: bool,
     pub(crate) kd_extended: bool,
-    pub(crate) kd_pollc: c_int,
     pub(crate) sit_for_0: bool,
 
     pub(crate) kd_attr: u8,
@@ -256,7 +255,6 @@ impl State {
         Self {
             kd_initialized: false,
             kd_extended: false,
-            kd_pollc: 0,
             sit_for_0: true,
             kd_attr: KA_NORMAL,
             kd_color: KA_NORMAL,

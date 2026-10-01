@@ -23,7 +23,7 @@ use crate::ipc::ipc_port;
 use crate::ipc::{IpcPort, MachMsgHeader, MachMsgType};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::kheap::try_box;
-use crate::kern::mach_clock::CLOCK_HZ;
+use crate::kern::machine::CLOCK_HZ;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, clear_wait, thread_block,
     thread_set_timeout, thread_wakeup_prim,

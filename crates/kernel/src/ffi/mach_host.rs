@@ -29,7 +29,7 @@ use crate::ffi::processor_set_info::{
 use crate::glue::time_value::{TimeValue, TimeValue64};
 use crate::kern::host::{self, Host, processor_ports, processor_set_priv};
 use crate::kern::ipc_host;
-use crate::kern::mach_clock as clock;
+use crate::kern::host_time as clock;
 use crate::kern::machine;
 use crate::kern::processor::{self, Processor, ProcessorSet};
 use crate::kern::syscall_subr;

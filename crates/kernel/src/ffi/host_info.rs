@@ -11,7 +11,6 @@
 
 use crate::config::MAX_NCPUS;
 use crate::kern::host::Host;
-use crate::kern::mach_clock;
 use crate::kern::mach_factor;
 use crate::kern::machine;
 use crate::kern::processor::boot_processor;
@@ -97,7 +96,7 @@ impl From<&Host> for HostBasicInfo {
 
 impl From<&Host> for HostSchedInfo {
     fn from(_host: &Host) -> Self {
-        let tick_rate = mach_clock::TICK;
+        let tick_rate = machine::TICK;
         let min_quantum = sched_prim::min_quantum();
 
         Self {

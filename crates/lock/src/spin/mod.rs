@@ -121,6 +121,11 @@ macro_rules! spin_lock {
             /// Releases the lock, then leaves the lock's section, if it has
             /// one.
             ///
+            /// # Panics
+            ///
+            /// In debug builds, if the running thread does not hold the
+            /// lock, or the lock is free.
+            ///
             /// # Safety
             ///
             /// The running thread holds the lock: it took it with
@@ -128,7 +133,7 @@ macro_rules! spin_lock {
             /// not unlocked it since.
             pub unsafe fn unlock(&self) {
                 #[cfg(debug_assertions)]
-                checker::release::<P>(self.addr());
+                checker::release::<P>(self.addr(), checker::Kind::$kind);
                 unsafe {
                     self.ticket.unlock();
                     $(section::$exit::<P>();)?

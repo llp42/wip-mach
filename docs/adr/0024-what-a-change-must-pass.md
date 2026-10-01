@@ -9,9 +9,8 @@ A change merges only when every gate passes:
   `wip-mach` and any other: host tests in debug and release, loom for
   concurrency protocols, and 100% line, region and function coverage.
 - **`kernel`**: no host tests; it is proven by booting.
-- **Boots**: the ABI suite on `dev`, `checked` and `release`
-  (ADR 0022); the Hurd smoke test (ADR 0002) on `checked` and
-  `release`.
+- **Boots**: the ABI suite on `dev` and `release` (ADR 0022); the
+  Hurd smoke test (ADR 0002) on `dev` and `release`.
 
 Every gate is a `mise` task. CI calls those tasks and runs every gate
 on every PR; the KVM-backed boot gates may move to a nightly run if

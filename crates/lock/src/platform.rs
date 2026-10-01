@@ -57,7 +57,16 @@ impl ThreadRef {
     }
 
     /// Rebuilds a reference from an address taken by [`Self::addr`].
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if `addr` is not aligned to [`Self::ALIGN`]: a
+    /// lock word read as an owner held something else.
     pub(crate) fn from_addr(addr: usize) -> Option<Self> {
+        debug_assert!(
+            addr.is_multiple_of(Self::ALIGN),
+            "lock word names a thread at a misaligned address",
+        );
         NonNull::new(core::ptr::with_exposed_provenance_mut(addr)).map(Self)
     }
 }
@@ -122,4 +131,15 @@ pub unsafe trait Platform: 'static {
     /// checker.
     #[cfg(debug_assertions)]
     fn held_locks() -> &'static HeldLocks;
+}
+
+#[cfg(all(test, not(loom), debug_assertions))]
+mod tests {
+    use super::ThreadRef;
+
+    #[test]
+    #[should_panic = "lock word names a thread at a misaligned address"]
+    fn rebuilding_a_misaligned_address_panics() {
+        let _ = ThreadRef::from_addr(ThreadRef::ALIGN + 1);
+    }
 }

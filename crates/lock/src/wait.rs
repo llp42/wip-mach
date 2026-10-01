@@ -118,6 +118,10 @@ impl<P: Platform> Locked<P> {
                   a second time"
     )]
     fn with_queue<R>(&mut self, f: impl FnOnce(Pin<&mut Queue>) -> R) -> R {
+        debug_assert!(
+            self.bucket.lock.is_locked(),
+            "wait-table queue reached with its bucket lock free",
+        );
         self.bucket.queue.with_mut(|queue| {
             // SAFETY: the bucket lock is held, so this is the only access
             // to the queue, and the bucket is borrowed for `'static`, so
@@ -284,10 +288,17 @@ impl<P: Platform> Drop for Unqueue<'_, P> {
         // An unparker may have taken the waiter since the thread last
         // looked; under the bucket lock, the flag says for sure.
         if !self.woken.load(Ordering::Relaxed) {
-            // SAFETY: under the bucket lock, a clear flag means the waiter
-            // is still on this bucket's queue.
-            locked.with_queue(|queue| unsafe {
-                queue.remove_ptr(self.node);
+            locked.with_queue(|queue| {
+                debug_assert!(
+                    queue.iter().any(|queued| core::ptr::eq(
+                        queued,
+                        self.node.as_ptr()
+                    )),
+                    "unwinding waiter with a clear flag is not on its queue",
+                );
+                // SAFETY: under the bucket lock, a clear flag means the
+                // waiter is still on this bucket's queue.
+                unsafe { queue.remove_ptr(self.node) };
             });
         }
     }
@@ -337,7 +348,13 @@ pub(crate) fn unpark<P: Platform>(
             let thread = waiter.thread;
             // SAFETY: the waiter's thread polls this flag until it is set
             // and only then frees it; nothing touches the waiter after.
-            unsafe { waiter.woken.as_ref() }.store(true, Ordering::Release);
+            let woken = unsafe { waiter.woken.as_ref() };
+            debug_assert!(
+                !woken.load(Ordering::Relaxed),
+                "a queued waiter was woken already: its thread may have \
+                 freed it",
+            );
+            woken.store(true, Ordering::Release);
             P::unpark(thread);
         }
         result
@@ -482,6 +499,82 @@ mod tests {
             "WaitTable { buckets: [Bucket { .. }, Bucket { .. }], .. }"
         );
         assert_eq!(format!("{:?}", Bucket::default()), "Bucket { .. }");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "a queued waiter was woken already"]
+    fn waking_a_waiter_that_is_already_woken_panics() {
+        use super::{Waiter, unpark_one};
+        use crate::platform::Platform;
+        use collections::tail_queue;
+        use core::ptr::NonNull;
+        use core::sync::atomic::AtomicBool;
+
+        // No lock address is this, so no other test's waiter is picked.
+        const KEY: usize = 1;
+        let woken = AtomicBool::new(true);
+        let mut waiter = Waiter {
+            link: tail_queue::Link::new(),
+            key: KEY,
+            token: 0,
+            thread: Host::current(),
+            woken: NonNull::from(&woken),
+        };
+        let node = NonNull::from(&mut waiter);
+        let mut locked = Host::wait_table().bucket(KEY).lock::<Host>();
+        // SAFETY: the waiter outlives its place in the queue, which the
+        // unpark below ends before it panics.
+        locked.with_queue(|queue| unsafe { queue.push_back_ptr(node) });
+        drop(locked);
+        let _ = unpark_one::<Host>(KEY, &mut |_| {});
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "queue reached with its bucket lock free"]
+    fn queue_reached_without_the_bucket_lock_panics() {
+        use super::Locked;
+        use core::marker::PhantomData;
+        use core::mem::ManuallyDrop;
+
+        static FREE: Bucket = Bucket::new();
+        // Never dropped, since dropping would unlock a lock never taken.
+        let mut locked = ManuallyDrop::new(Locked::<Host> {
+            bucket: &FREE,
+            platform: PhantomData,
+            not_send: PhantomData,
+        });
+        locked.with_queue(|_| ());
+    }
+
+    #[test]
+    #[cfg(all(debug_assertions, panic = "unwind"))]
+    #[should_panic = "unwinding waiter with a clear flag is not on its queue"]
+    fn unqueueing_a_waiter_that_is_not_queued_panics() {
+        use super::{Unqueue, Waiter};
+        use crate::platform::Platform;
+        use collections::tail_queue;
+        use core::marker::PhantomData;
+        use core::ptr::NonNull;
+        use core::sync::atomic::AtomicBool;
+
+        // No lock address is this, so no other test's waiter is touched.
+        const KEY: usize = 2;
+        let woken = AtomicBool::new(false);
+        let mut waiter = Waiter {
+            link: tail_queue::Link::new(),
+            key: KEY,
+            token: 0,
+            thread: Host::current(),
+            woken: NonNull::from(&woken),
+        };
+        drop(Unqueue::<Host> {
+            bucket: Host::wait_table().bucket(KEY),
+            node: NonNull::from(&mut waiter),
+            woken: &woken,
+            platform: PhantomData,
+        });
     }
 
     #[test]

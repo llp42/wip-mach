@@ -19,6 +19,8 @@ use crate::arch::x86_64::pmap;
 use crate::arch::x86_64::spl;
 use crate::config::MAX_NCPUS;
 use crate::kern::console::kprint;
+use crate::kern::priority;
+use crate::kern::rcu;
 use crate::kern::debug::{self, kpanic};
 use crate::kern::lock::SimpleLock;
 use crate::kern::processor::{
@@ -34,7 +36,7 @@ use crate::kern::thread::Thread;
 use crate::kern::types::KernError;
 use crate::utils::cell::SyncCell;
 use core::cell::UnsafeCell;
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_int, c_uint, c_void};
 use core::mem::offset_of;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
@@ -43,6 +45,20 @@ use core::sync::atomic::Ordering;
 /// `CPU_STATE_MAX` in <mach/machine.h>: the per-state tick counters every
 /// machine slot carries.
 pub const CPU_STATE_MAX: usize = 3;
+
+/// `HZ` in <`machine/mach_param.h`>: the ticks per second on `x86_64`.
+pub const CLOCK_HZ: c_int = 100;
+const _: () = assert!(CLOCK_HZ as u64 == clock::HZ);
+
+/// The microseconds per tick: `tick` of `kern/mach_clock.c`.
+pub const TICK: c_int = 1_000_000 / CLOCK_HZ;
+
+/// `CPU_STATE_USER` of <`kern/processor.h`>: the `cpu_ticks` user index.
+pub(crate) const CPU_STATE_USER: c_int = 0;
+/// `CPU_STATE_SYSTEM` of <`kern/processor.h`>: the `cpu_ticks` system index.
+pub(crate) const CPU_STATE_SYSTEM: c_int = 1;
+/// `CPU_STATE_IDLE` of <`kern/processor.h`>: the `cpu_ticks` idle index.
+pub(crate) const CPU_STATE_IDLE: c_int = 2;
 
 /// `struct machine_slot` of <mach/machine.h>: what the arch probe records
 /// about each possible CPU.
@@ -136,6 +152,65 @@ pub(crate) fn slot(cpu: CpuId) -> *mut MachineSlot {
         ptr::addr_of_mut!(MACHINE_SLOT)
             .cast::<MachineSlot>()
             .add(cpu.as_usize())
+    }
+}
+
+/// `cpu_idle()` of <kern/processor.h>: whether CPU `cpu` is idle.
+fn cpu_idle(cpu: CpuId) -> bool {
+    processor_at(cpu).state() == ProcessorState::Idle
+}
+
+/// Charge one clock tick to the interrupted context's user/system timers
+/// and this CPU's `cpu_ticks`.
+///
+/// # Safety
+///
+/// `thread` must be the interrupted thread or null, and only this CPU may
+/// write its own `cpu_ticks` slot.
+pub(crate) unsafe fn tick_accounting(
+    thread: *mut Thread,
+    usec: c_uint,
+    usermode: bool,
+) {
+    let my_cpu = per_cpu::cpu_id();
+
+    if usermode {
+        // SAFETY: the clock interrupt runs on the interrupted thread, and
+        // `usermode` says that thread is live.
+        unsafe { (*thread).user_timer.bump(usec) };
+    } else if !thread.is_null() {
+        // SAFETY: the interrupted thread is live and this CPU is the only
+        // writer of its timer.
+        unsafe { (*thread).system_timer.bump(usec) };
+    }
+
+    if usermode {
+        // A tick from user mode interrupted no RCU read section.
+        rcu::note_qs();
+    }
+
+    let state = if usermode {
+        CPU_STATE_USER
+    } else if cpu_idle(my_cpu) {
+        CPU_STATE_IDLE
+    } else {
+        CPU_STATE_SYSTEM
+    };
+
+    // SAFETY: `my_cpu` is the running CPU, so it indexes `machine_slot`, and
+    // `state` is one of the three `CPU_STATE_*` values the `cpu_ticks` array
+    // holds.  Only this CPU's clock interrupt writes its counters.
+    unsafe {
+        let s = slot(my_cpu);
+        let ticks = &mut (*s).cpu_ticks[state as usize];
+        *ticks = ticks.wrapping_add(1);
+    }
+
+    // SAFETY: `thread` is the interrupted thread or null before the
+    // scheduler exists, which is what the C passed; the routine reads it for
+    // the quantum.
+    unsafe {
+        priority::thread_quantum_update(thread, 1, state);
     }
 }
 

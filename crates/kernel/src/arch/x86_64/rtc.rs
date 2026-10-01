@@ -10,7 +10,7 @@
 use crate::arch::x86_64::pio::Port;
 use crate::arch::x86_64::spl;
 use crate::kern::console::kprint;
-use crate::kern::mach_clock;
+use crate::kern::host_time;
 use core::ffi::c_int;
 use core::mem::{align_of, offset_of, size_of};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -381,7 +381,7 @@ pub(crate) unsafe fn readtodc(tp: *mut u64) -> c_int {
 pub(crate) unsafe fn writetodc() -> c_int {
     // SAFETY: the wall clock is the maintained global, read at the level
     // the caller provides.
-    let seconds = unsafe { mach_clock::wallclock() }.seconds;
+    let seconds = host_time::wallclock().seconds;
     unsafe { writetodc_seconds(seconds) }
 }
 

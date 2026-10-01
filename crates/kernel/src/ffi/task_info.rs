@@ -11,7 +11,7 @@
 use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::spl;
 use crate::glue::time_value::{RpcTimeValue, TimeValue, TimeValue64};
-use crate::kern::mach_clock::read_time_stamp;
+use crate::kern::host_time::read_time_stamp;
 use crate::kern::task::{KERNEL_TASK, Task, add_time64, resident_count};
 use crate::kern::timer::read_times;
 use crate::vm::vm_kern::KERNEL_MAP;

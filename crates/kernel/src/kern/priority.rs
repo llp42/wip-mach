@@ -13,7 +13,7 @@
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
 use crate::kern::ast;
-use crate::kern::mach_clock::CPU_STATE_IDLE;
+use crate::kern::machine::CPU_STATE_IDLE;
 use crate::kern::policy::POLICY_TIMESHARE;
 use crate::kern::sched::{PRI_SHIFT, SCHED_SHIFT, add_single_writer};
 use crate::kern::sched_prim::{

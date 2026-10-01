@@ -21,6 +21,7 @@ use crate::arch::x86_64::multiboot::{
     MultibootLoaderFlags, MultibootModule, MultibootRawInfo,
     MultibootRawModule, load_modules,
 };
+use crate::arch::x86_64::clock_platform;
 use crate::arch::x86_64::pmap::KERNEL_PMAP;
 use crate::arch::x86_64::pmap::pmap_extract;
 use crate::arch::x86_64::spl;
@@ -32,7 +33,7 @@ use crate::glue;
 use crate::glue::time_value::TimeValue64;
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
-use crate::kern::mach_clock;
+use crate::kern::host_time;
 use crate::kern::smp::CpuId;
 use crate::vm::types::VmProt;
 use crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS;
@@ -180,7 +181,7 @@ pub(crate) fn mapped_time_page(prot: VmProt) -> Option<VmOffset> {
 
     // SAFETY: `mapable_time_init()` wired the page at boot, before `/dev/time`
     // can be opened.
-    let address = unsafe { mach_clock::mapped_time_page() } as VmOffset;
+    let address = unsafe { clock_platform::mapped_time_page() } as VmOffset;
     // SAFETY: `kernel_pmap` is the kernel's own pmap, so it maps `address`;
     // the C called `pmap_extract` with the same two values.
     let phys = unsafe { pmap_extract(KERNEL_PMAP, address) };
@@ -193,20 +194,12 @@ pub(crate) fn timemmap(_dev: DevT, _off: VmOffset, prot: c_int) -> VmOffset {
     mapped_time_page(VmProt::from_bits(prot)).unwrap_or(VmOffset::MAX)
 }
 
-/// Set the kernel's wall clock, at high IPL.
+/// Set the kernel's wall clock.
 fn set_wallclock(seconds: i64) {
-    // SAFETY: `splhigh()` is the real asm function <i386/spl.h> declares, and
-    // the value it returns is only handed back to `splx()`.
-    let s = unsafe { spl::splhigh() };
-    // SAFETY: the clock interrupt is off, so it cannot see the store
-    // half-written; the C took the same level around it.
-    unsafe {
-        mach_clock::set_wallclock(TimeValue64 {
-            seconds,
-            nanoseconds: 0,
-        });
-    }; // SAFETY: `s` is the level `splhigh()` returned.
-    unsafe { spl::splx(s) };
+    host_time::set_wallclock(TimeValue64 {
+        seconds,
+        nanoseconds: 0,
+    });
 }
 
 /// `inittodr()` of <`i386/i386at/model_dep.h`>.
@@ -340,6 +333,8 @@ pub(crate) fn halt_cpu() -> ! {
 
 /// `halt_all_cpus()` of <`i386/i386/model_dep.h`>.
 pub(crate) fn halt_all_cpus(reboot: c_int) -> ! {
+    // Persist the ticking wall clock before this CPU stops advancing it.
+    resettodr();
     if reboot != 0 {
         // SAFETY: `kdreboot` is the keyboard controller's reset path, and the
         // C took it under the same flag.

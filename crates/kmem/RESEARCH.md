@@ -189,7 +189,8 @@ alignment above 8 (pcb 16, ifps 64, thread_stack and pmap tables page),
   this; ADR 0017 wants immediate failure.
 - `kmem_alloc*`/`kmem_free` (page-granular kernel-map memory): used by
   `syscall_emulation.rs:361`, `user_ldt.rs:491`, `vm_user.rs:687`,
-  `ipc/mach_debug.rs:102`, `ffi/mach_debug.rs:362`, `mach_clock.rs:970`,
+  `ipc/mach_debug.rs:102`, `ffi/mach_debug.rs:362`,
+  `clock_platform.rs` (`mapable_time_init`),
   `pmap.rs:1266`, and `slab.rs:1354`. These are not heap objects and are
   not a kmem type; the pageable ones feed `vm_map_copyin`.
 
@@ -287,10 +288,9 @@ Back-pointers and cycles (facts, then inference):
 - `crates/collections` provides four intrusive shapes: `SinglyList`,
   `List`, `SimpleQueue`, `TailQueue` (`collections/src/lib.rs:12-16`).
   They never allocate or free; nodes are caller-owned; ADR 0043-0049.
-- The kernel still uses `intrusive-collections =0.10.3` in 4 files
-  (`Cargo.toml`): `RBTree` and `Bound` in `vm_map.rs` and `slab.rs`, and
-  `LinkedListLink` for the legacy timeout wheel in `mach_clock.rs` and
-  `ioapic.rs`. Every other list goes through `collections`' `_ptr` pushes:
+- The kernel still uses `intrusive-collections =0.10.3` in `vm_map.rs`
+  and `slab.rs` (`RBTree` and `Bound`). Every other list goes through
+  `collections`' `_ptr` pushes:
   a `Box`'d `UserIntr` enters its queue as
   `push_back_ptr(NonNull::from(Box::leak(..)))` (`intr.rs`).
 - `rdxtree.rs` (`RDXTREE_NODE_CACHE`) is an in-kernel radix tree over a

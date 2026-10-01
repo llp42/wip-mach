@@ -28,7 +28,15 @@ use crate::device::ds_routines::DevOps;
 use crate::device::intr::irqgetstat;
 use crate::device::kmsg::{kmsgclose, kmsggetstat, kmsgopen, kmsgread};
 use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
-use crate::kern::mach_clock::{timeclose, timeopen};
+
+/// `/dev/time` open stub.
+fn timeopen(_dev: DevT, _flag: c_int, _ior: *mut IoReq) -> c_int {
+    Ok(DeviceSuccess::Success).as_io_return()
+}
+
+/// `/dev/time` close stub.
+const fn timeclose(_dev: DevT, _flag: c_int) {}
+
 use crate::utils::cell::SyncCell;
 use crate::utils::string::strcmp;
 use core::cell::UnsafeCell;

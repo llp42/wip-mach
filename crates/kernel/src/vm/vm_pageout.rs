@@ -13,7 +13,7 @@ use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::pmap::pmap_clear_modify;
 use crate::glue::{memory_object_data_initialize, memory_object_data_return};
-use crate::kern::mach_clock::CLOCK_HZ;
+use crate::kern::machine::CLOCK_HZ;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, thread_block, thread_set_timeout,
     thread_sleep, thread_wakeup_prim,

@@ -23,6 +23,9 @@ number is never reused, so the list has gaps.
   — CPU count from ACPI, capped by one constant.
 - [0021 — No in-kernel debugger](docs/adr/0021-no-in-kernel-debugger.md)
   — GDB through QEMU plus the serial panic line.
+- [0050 — The console stays in the kernel](docs/adr/0050-the-console-stays-in-the-kernel.md)
+  — kd/com and the kd/kbd/mouse devices are ABI; rumpdisk and netdde are
+  storage and network.
 
 ## Architecture
 
@@ -50,7 +53,7 @@ number is never reused, so the list has gaps.
 - [0007 — Inline assembly only](docs/adr/0007-inline-assembly-only.md)
   — `asm!` / `global_asm!` / `naked_asm!`, `att_syntax`; no `.s`/`.S`
   files.
-- [0022 — One feature set, three profiles](docs/adr/0022-one-feature-set-three-profiles.md)
+- [0022 — One feature set, two profiles](docs/adr/0022-one-feature-set-two-profiles.md)
   — no Cargo features; `dev`, `checked`, `release`.
 - [0023 — Third-party runtime crates are the exception](docs/adr/0023-third-party-runtime-crates-are-the-exception.md)
   — `no_std`, pinned, audited, licence-compatible; none today.
@@ -133,5 +136,7 @@ number is never reused, so the list has gaps.
   — a wrongly typed link fails to compile.
 - [0049 — `collections` `Debug` prints link pointers only](docs/adr/0049-collections-debug-prints-link-pointers-only.md)
   — no `Node: Debug` bound.
+- [0051 — `collections` orders nodes in a red-black tree](docs/adr/0051-collections-orders-nodes-in-a-red-black-tree.md)
+  — a three-word link, a one-word head, a compare that never reaches the rebalancing.
 
 Project vocabulary is in [`GLOSSARY.md`](GLOSSARY.md).

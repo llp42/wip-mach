@@ -6,6 +6,7 @@
 //! Kernel startup, which `kern/startup.c` used to define and `kern/startup.h`
 //! declares.
 
+use crate::arch::x86_64::clock_platform;
 use crate::arch::x86_64::model_dep::{self, KERNEL_CMDLINE};
 use crate::arch::x86_64::pcb;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
@@ -16,7 +17,7 @@ use crate::ipc::ipc_init;
 use crate::kern::console::write_cstr;
 use crate::kern::debug::kpanic;
 use crate::kern::gsync;
-use crate::kern::mach_clock::{self, record_time_stamp};
+use crate::kern::host_time::record_time_stamp;
 use crate::kern::mach_factor;
 use crate::kern::machine;
 use crate::kern::processor::{self, processor_at};
@@ -77,9 +78,8 @@ pub(crate) unsafe fn setup_main() {
 
         pmap::activate_kernel(CpuId::BOOT.bits() as c_int);
         timer::init_timers();
-        mach_clock::init_timeout();
         model_dep::machine_init();
-        mach_clock::mapable_time_init();
+        clock_platform::mapable_time_init();
     }
 
     let info = machine::info();
@@ -103,7 +103,7 @@ pub(crate) unsafe fn setup_main() {
         thread_swap::swapper_init();
         processor::system_init();
 
-        sched_prim::recompute_priorities(ptr::null_mut());
+        sched_prim::recompute_priorities_start();
         mach_factor::compute();
         gsync::setup();
 

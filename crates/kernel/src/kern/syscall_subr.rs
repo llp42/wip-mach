@@ -16,7 +16,6 @@ use crate::kern::ipc_kobject::IKOT_THREAD;
 use crate::kern::ipc_sched::{
     ipc_timeout_to_ticks, thread_will_wait_with_timeout,
 };
-use crate::kern::mach_clock::{self, reset_timeout_check};
 use crate::kern::policy::POLICY_FIXEDPRI;
 use crate::kern::sched::{NRQS, RUN_QUEUE_NULL};
 use crate::kern::sched_prim::{
@@ -75,13 +74,18 @@ pub(crate) unsafe fn depress_priority(
     unsafe {
         (*thread).lock.lock();
 
-        reset_timeout_check(&raw mut (*thread).depress_timer);
+        // SAFETY: `thread` is live.
+        Thread::stop_depress_timer(thread);
 
         (*thread).depress_priority = (*thread).priority;
         (*thread).priority = NRQS as c_int - 1;
         (*thread).sched_pri = NRQS as c_int - 1;
         if ticks != 0 {
-            mach_clock::set_timeout(&raw mut (*thread).depress_timer, ticks);
+            // SAFETY: `thread` is live and will not move.
+            Thread::start_depress_timer(
+                thread,
+                clock::Ticks::new(ticks as u64),
+            );
         }
 
         (*thread).lock.unlock();
@@ -133,7 +137,8 @@ pub(crate) unsafe fn depress_abort(thread: *mut Thread) -> c_int {
         (*thread).lock.lock();
 
         if (*thread).depress_priority >= 0 {
-            reset_timeout_check(&raw mut (*thread).depress_timer);
+            // SAFETY: `thread` is live.
+            Thread::stop_depress_timer(thread);
             (*thread).priority = (*thread).depress_priority;
             (*thread).depress_priority = -1;
             compute_priority(thread, 0);

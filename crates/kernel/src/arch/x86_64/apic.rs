@@ -811,12 +811,10 @@ pub(crate) fn fix_id_mask() {
 ///
 /// # Panics
 ///
-/// Panics when this CPU's per-CPU block is not initialized.
+/// In debug builds, panics when this CPU's per-CPU block is not
+/// initialized.
 pub(crate) fn setup() {
-    // TODO: switch to `debug_assert!` once a profile enables
-    // `debug-assertions`; `profile.dev` compiles that form out today, so
-    // the check must run unconditionally.
-    assert!(per_cpu::is_init(), "apic::setup before per_cpu::init");
+    debug_assert!(per_cpu::is_init(), "apic::setup before per_cpu::init");
     let cpu = cpu_id();
     let flags = intr_save();
     let ptr = lapic_ptr();

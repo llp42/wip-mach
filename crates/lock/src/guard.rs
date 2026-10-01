@@ -45,12 +45,18 @@ pub struct Guard<'a, R: RawLock, T> {
 unsafe impl<R: RawLock + Sync, T: Sync> Sync for Guard<'_, R, T> {}
 
 impl<'a, R: RawLock, T> Guard<'a, R, T> {
+    /// # Panics
+    ///
+    /// In debug builds, if the order checker's record says the running
+    /// thread does not hold `lock.raw`.
+    ///
     /// # Safety
     ///
     /// The running thread holds `lock.raw`, and hands its unlock to the
     /// returned guard.
     #[cfg(not(loom))]
-    pub(crate) const unsafe fn new(lock: &'a Lock<R, T>) -> Self {
+    pub(crate) unsafe fn new(lock: &'a Lock<R, T>) -> Self {
+        lock.raw.assert_held();
         Self {
             lock,
             not_send: PhantomData,
@@ -63,6 +69,7 @@ impl<'a, R: RawLock, T> Guard<'a, R, T> {
     /// returned guard.
     #[cfg(loom)]
     pub(crate) unsafe fn new(lock: &'a Lock<R, T>) -> Self {
+        lock.raw.assert_held();
         Self {
             lock,
             access: Self::track(lock),
@@ -90,7 +97,6 @@ impl<'a, R: RawLock, T> Guard<'a, R, T> {
     /// [`RawLock::lock`] or a successful [`RawLock::try_lock`], and has not
     /// unlocked it since.
     pub unsafe fn adopt(lock: &'a Lock<R, T>) -> Self {
-        lock.raw.assert_held();
         unsafe { Self::new(lock) }
     }
 
@@ -117,11 +123,17 @@ impl<'a, R: RawLock, T> Guard<'a, R, T> {
 
     /// Releases the lock, keeping the guard.
     ///
+    /// # Panics
+    ///
+    /// In debug builds, if the order checker's record says the running
+    /// thread does not hold the lock.
+    ///
     /// # Safety
     ///
     /// The guard holds its lock, and is not used again until
     /// [`Self::retake`], unless it is being dropped.
     pub(crate) unsafe fn release(&mut self) {
+        self.lock.raw.assert_held();
         #[cfg(loom)]
         unsafe {
             ManuallyDrop::drop(&mut self.access);
@@ -184,6 +196,10 @@ impl<R: RawLock, T> Deref for Guard<'_, R, T> {
 
 impl<R: RawLock, T> DerefMut for Guard<'_, R, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // `&mut self` is only ever on the thread that took the lock, since
+        // the guard is not `Send`; `deref` may be on another, as the guard
+        // is `Sync`.
+        self.lock.raw.assert_held();
         // SAFETY: the guard holds the lock, so no other thread reaches the
         // data, and `&mut self` lends it only once.
         unsafe { &mut *self.data() }
@@ -223,12 +239,18 @@ pub struct SharedGuard<'a, R: RawSharedLock, T> {
 unsafe impl<R: RawSharedLock + Sync, T: Sync> Sync for SharedGuard<'_, R, T> {}
 
 impl<'a, R: RawSharedLock, T> SharedGuard<'a, R, T> {
+    /// # Panics
+    ///
+    /// In debug builds, if the order checker's record says the running
+    /// thread does not hold `lock.raw` shared.
+    ///
     /// # Safety
     ///
     /// The running thread holds `lock.raw` shared, and hands its unlock to
     /// the returned guard.
     #[cfg(not(loom))]
-    pub(crate) const unsafe fn new(lock: &'a Lock<R, T>) -> Self {
+    pub(crate) unsafe fn new(lock: &'a Lock<R, T>) -> Self {
+        lock.raw.assert_held_shared();
         Self {
             lock,
             not_send: PhantomData,
@@ -241,6 +263,7 @@ impl<'a, R: RawSharedLock, T> SharedGuard<'a, R, T> {
     /// the returned guard.
     #[cfg(loom)]
     pub(crate) unsafe fn new(lock: &'a Lock<R, T>) -> Self {
+        lock.raw.assert_held_shared();
         Self {
             lock,
             access: Self::track(lock),
@@ -274,11 +297,17 @@ impl<'a, R: RawSharedLock, T> SharedGuard<'a, R, T> {
 
     /// Releases the shared hold, keeping the guard.
     ///
+    /// # Panics
+    ///
+    /// In debug builds, if the order checker's record says the running
+    /// thread does not hold the lock shared.
+    ///
     /// # Safety
     ///
     /// The guard holds its lock shared, and is not used again until
     /// [`Self::retake`], unless it is being dropped.
     unsafe fn release(&mut self) {
+        self.lock.raw.assert_held_shared();
         #[cfg(loom)]
         unsafe {
             ManuallyDrop::drop(&mut self.access);
@@ -329,7 +358,6 @@ impl<'a, R: RawSharedLock, T: Sync> SharedGuard<'a, R, T> {
     /// [`RawSharedLock::lock_shared`] or a successful
     /// [`RawSharedLock::try_lock_shared`], and has not unlocked it since.
     pub unsafe fn adopt(lock: &'a Lock<R, T>) -> Self {
-        lock.raw.assert_held_shared();
         unsafe { Self::new(lock) }
     }
 }

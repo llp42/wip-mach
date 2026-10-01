@@ -95,6 +95,13 @@ impl<P: Platform> RawMutex<P> {
         {
             self.lock_slow(me);
         }
+        // A handoff writes its waiter in as the owner before it wakes it,
+        // and the platform names a thread the same way every time.
+        debug_assert!(
+            self.is_owned_by_current(),
+            "mutex locked, but its word does not name the running thread \
+             as the owner",
+        );
     }
 
     #[cold]
@@ -196,17 +203,19 @@ impl<P: Platform> RawMutex<P> {
             "mutex unlocked by a thread that does not own it",
         );
         #[cfg(debug_assertions)]
-        checker::release::<P>(self.addr());
-        if self
-            .state
-            .compare_exchange(
-                P::current().addr(),
-                0,
-                Ordering::Release,
-                Ordering::Relaxed,
-            )
-            .is_err()
-        {
+        checker::release::<P>(self.addr(), checker::Kind::Mutex);
+        let me = P::current().addr();
+        if let Err(state) = self.state.compare_exchange(
+            me,
+            0,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            debug_assert!(
+                state == me | CONTESTED,
+                "mutex word is neither its owner's nor its owner's with \
+                 the contested flag",
+            );
             self.unlock_slow();
         }
     }
@@ -437,6 +446,34 @@ mod tests {
         let lock = RawMutex::<Host>::new();
         // SAFETY: none; the debug check is expected to catch it.
         unsafe { lock.unlock() };
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "mutex word is neither its owner's"]
+    fn unlock_of_a_word_with_an_unknown_flag_panics() {
+        let lock = RawMutex::<Host>::new();
+        lock.lock();
+        lock.state
+            .store(Host::current().addr() | 2, Ordering::Relaxed);
+        // SAFETY: none; the debug check is expected to catch it.
+        unsafe { lock.unlock() };
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "mutex locked, but its word does not name the running \
+                      thread"]
+    fn waiter_woken_with_no_handoff_panics() {
+        use crate::test_support::{resume_panic_of, wake_without_handoff};
+
+        let lock = Mutex::<(), Host>::new(());
+        thread::scope(|scope| {
+            let _guard = lock.lock();
+            let (_, waiter) = spawn_parked(scope, || drop(lock.lock()));
+            wake_without_handoff(lock.raw().addr().addr());
+            resume_panic_of(waiter);
+        });
     }
 
     #[test]

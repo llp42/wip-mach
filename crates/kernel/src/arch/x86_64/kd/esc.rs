@@ -19,8 +19,10 @@ use super::{
     KAX_INVISIBLE, KAX_REVERSE, KAX_UNDERLINE, ONE_LINE, ONE_PAGE, ONE_SPACE,
     beg_of_line, current_column, kd_belloff, kd_bellon, state,
 };
-use crate::kern::mach_clock;
+use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
+use crate::kern::machine;
 use core::ffi::{c_int, c_short};
+use core::pin::Pin;
 
 /// The most `\e[...]` parameters the C parser kept.
 const MAX_PARAMS: usize = 16;
@@ -53,21 +55,22 @@ pub(crate) fn putc(ch: u8) {
     }
 }
 
-/// Sound the bell until the timeout switches it off.
+/// Sound the bell until the callout switches it off.
 fn ring_bell() {
     if state().kd_bellstate {
         return;
     }
     kd_bellon();
-    // SAFETY: the timeout table is the driver's and SPLKD is held.
-    unsafe {
-        mach_clock::timeout(
-            Some(kd_belloff),
-            core::ptr::null_mut(),
-            mach_clock::CLOCK_HZ / 8,
-        );
-    }
+    // A leaked static callout; the action is `kd_belloff`.
+    static BELL: MachCallout = MachCallout::new(wheel(), bell_off_action, ());
+    Pin::static_ref(&BELL)
+        .start(clock::Ticks::new((machine::CLOCK_HZ / 8) as u64));
     state().kd_bellstate = true;
+}
+
+fn bell_off_action(_callout: Pin<&MachCallout>) {
+    // SAFETY: `kd_belloff` only touches the console state.
+    unsafe { kd_belloff(core::ptr::null_mut()) };
 }
 
 /// `kd_putc_esc()` in C.

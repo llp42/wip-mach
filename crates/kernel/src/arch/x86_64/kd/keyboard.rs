@@ -287,9 +287,6 @@ fn checkmagic(scancode: u8) -> bool {
 
 /// `kdintr()` in C.
 fn intr() {
-    if state().kd_pollc != 0 {
-        return; // kdb polling the keyboard
-    }
     if !state().kd_initialized {
         return;
     }

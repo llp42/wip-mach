@@ -10,7 +10,8 @@
 
 use crate::arch::x86_64::spl;
 use crate::glue::time_value::{RpcTimeValue, TimeValue, TimeValue64};
-use crate::kern::mach_clock::{self, read_time_stamp};
+use crate::kern::machine;
+use crate::kern::host_time::read_time_stamp;
 use crate::kern::policy::POLICY_FIXEDPRI;
 use crate::kern::sched_prim::{sched_tick, update_priority};
 use crate::kern::thread::{
@@ -182,7 +183,7 @@ impl From<&Thread> for ThreadSchedInfo {
         thread.lock.lock();
 
         let data = if thread.policy == POLICY_FIXEDPRI {
-            thread.sched_data.wrapping_mul(mach_clock::TICK) / 1000
+            thread.sched_data.wrapping_mul(machine::TICK) / 1000
         } else {
             0
         };

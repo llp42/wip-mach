@@ -15,6 +15,7 @@
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::autoconf;
 use crate::arch::x86_64::busses::configure_bus_device;
+use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
 use crate::arch::x86_64::io_req::{DevT, IoReq};
 use crate::arch::x86_64::kd::ConsDev;
 use crate::arch::x86_64::pio::Port;
@@ -28,13 +29,14 @@ use crate::device::chario::{
 };
 use crate::device::r#return::DeviceError;
 use crate::kern::console::{CStrArg, kprint, write_cstr};
-use crate::kern::mach_clock;
+use crate::kern::machine;
 use crate::utils::atoi::mach_atoi;
 use crate::utils::cell::SyncCell;
 use crate::utils::string::{strcmp, strncmp, strstr};
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of};
+use core::pin::Pin;
 use core::ptr::{self, NonNull};
 
 /// `struct bus_driver` of <chips/busses.h>, field for field.
@@ -1217,9 +1219,11 @@ pub(crate) fn start(tp: &mut Tty) {
     };
     if nch & 0x80 != 0 && tp.t_flags & TF_LITOUT == 0 {
         let delay = c_int::from(nch & 0x7f) + 6;
-        // SAFETY: the pool element stays at its address until it expires, and
-        // the tty stays live.
-        unsafe { mach_clock::timeout(Some(comtimer), ptr::null_mut(), delay) };
+        // One machine-wide com timer; arming re-arms it.
+        static COM_TIMER: MachCallout =
+            MachCallout::new(wheel(), com_timer_action, ());
+        Pin::static_ref(&COM_TIMER)
+            .start(clock::Ticks::new(delay.max(1) as u64));
         tp.t_state |= TS_TIMEOUT;
         com().st_4 += 1;
         return;
@@ -1236,6 +1240,14 @@ pub(crate) fn start(tp: &mut Tty) {
 /// layer's start contract requires.
 pub(crate) unsafe fn comstart(tp: *mut Tty) {
     start(unsafe { &mut *tp });
+}
+
+/// The expiry of the machine-wide com timer.
+fn com_timer_action(callout: Pin<&MachCallout>) {
+    timer();
+    callout.start(clock::Ticks::new(
+        (com().timer_interval * machine::CLOCK_HZ).max(1) as u64,
+    ));
 }
 
 /// `comtimer()` of `i386/i386at/com.c`.
@@ -1263,24 +1275,6 @@ pub(crate) fn timer() {
 
     // SAFETY: `s` is the level `spltty()` returned.
     unsafe { spl::splx(s) };
-    // SAFETY: the pool element stays at its address until it expires.
-    unsafe {
-        mach_clock::timeout(
-            Some(comtimer),
-            ptr::null_mut(),
-            com().timer_interval * mach_clock::CLOCK_HZ,
-        )
-    };
-}
-
-/// `comtimer()` of `i386/i386at/com.c`.
-///
-/// # Safety
-///
-/// `timeout()` calls this with the timeout pool element; the parameter is
-/// unused, as the C left it.
-pub(crate) unsafe fn comtimer(_param: *mut c_void) {
-    timer();
 }
 
 /// `fix_modem_state()` of `i386/i386at/com.c`.

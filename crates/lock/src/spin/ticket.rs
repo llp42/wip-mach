@@ -24,8 +24,9 @@ const _: () = assert!(size_of::<Ticket>() == 4);
 /// A 4-byte ticket lock that knows nothing of sections or the order
 /// checker.
 ///
-/// Each counter wraps at 2^16, so at most 65535 threads may wait at once;
-/// a spin-lock waiter keeps its CPU, so the CPU count bounds them.
+/// Each counter wraps at 2^16, so at most 65535 threads may hold or wait
+/// for it at once, since one more would make it look free; a spin-lock
+/// waiter keeps its CPU, so the CPU count bounds them.
 ///
 /// Only the holder writes the now-serving half, and the next-ticket half
 /// only ever grows: adding to it wraps out of the word instead of carrying
@@ -45,10 +46,19 @@ impl Ticket {
     }
 
     /// Takes the lock, spinning until it is free.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if 65535 threads hold or wait for it already.
     pub(crate) fn lock(&self) {
         let word = self.0.fetch_add(ONE_TICKET, Ordering::Acquire);
         let ticket = word >> NEXT_SHIFT;
         let mut serving = word & SERVING;
+        debug_assert!(
+            ticket.wrapping_sub(serving) & SERVING != SERVING,
+            "ticket lock held or waited for by 65535 threads: the next \
+             would see it free",
+        );
         while serving != ticket {
             spin_loop();
             serving = self.0.load(Ordering::Acquire) & SERVING;
@@ -72,6 +82,10 @@ impl Ticket {
 
     /// Serves the next ticket.
     ///
+    /// # Panics
+    ///
+    /// In debug builds, if the lock is free.
+    ///
     /// # Safety
     ///
     /// The caller holds the lock.
@@ -79,7 +93,9 @@ impl Ticket {
         // The holder is the only writer of the now-serving half, so a
         // relaxed read sees the ticket it was served, and advancing the
         // half by hand keeps a wrap from carrying into the next ticket.
-        let serving = self.0.load(Ordering::Relaxed) & SERVING;
+        let word = self.0.load(Ordering::Relaxed);
+        debug_assert!(!is_free(word), "ticket lock unlocked while free");
+        let serving = word & SERVING;
         if serving == SERVING {
             let _ = self.0.fetch_sub(SERVING, Ordering::Release);
         } else {
@@ -90,5 +106,29 @@ impl Ticket {
     /// Returns whether a thread holds the lock; stale as soon as read.
     pub(crate) fn is_locked(&self) -> bool {
         !is_free(self.0.load(Ordering::Relaxed))
+    }
+}
+
+#[cfg(all(test, not(loom), debug_assertions))]
+mod tests {
+    use super::{NEXT_SHIFT, SERVING, Ticket};
+    use core::sync::atomic::Ordering;
+
+    #[test]
+    #[should_panic = "ticket lock unlocked while free"]
+    fn unlock_of_a_free_ticket_panics() {
+        let ticket = Ticket::new();
+        // SAFETY: none; the debug check is expected to catch it.
+        unsafe { ticket.unlock() };
+    }
+
+    #[test]
+    #[should_panic = "held or waited for by 65535 threads"]
+    fn ticket_for_the_last_thread_the_word_can_tell_apart_panics() {
+        let ticket = Ticket::new();
+        // 65535 tickets out, none served: the next would wrap onto the
+        // served one, and the lock would look free.
+        ticket.0.store(SERVING << NEXT_SHIFT, Ordering::Relaxed);
+        ticket.lock();
     }
 }

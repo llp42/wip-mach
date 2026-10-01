@@ -1,8 +1,8 @@
-# `collections` — intrusive lists and queues
+# `collections` — intrusive lists, queues and a tree
 
-Four intrusive linked structures for a `no_std` kernel. The links live
-inside caller-owned nodes, so no structure ever allocates or frees. Each
-shape is a small, fixed-size head plus one link field per node.
+Five intrusive structures for a `no_std` kernel. The links live inside
+caller-owned nodes, so no structure ever allocates or frees. Each shape
+is a small, fixed-size head plus one link field per node.
 
 | Shape | Head | Link | Walk | Pinned head | Removal by address |
 |---|---|---|---|---|---|
@@ -10,6 +10,7 @@ shape is a small, fixed-size head plus one link field per node.
 | [`List`](src/list/mod.rs) | 1 word | 2 words | forward | yes | O(1) without the head, `unsafe` |
 | [`SimpleQueue`](src/simple_queue/mod.rs) | 2 words | 1 word | forward | yes | O(n), safe |
 | [`TailQueue`](src/tail_queue/mod.rs) | 2 words | 2 words | both ways | yes | O(1), `unsafe` |
+| [`RbTree`](src/rb_tree/mod.rs) | 3 words | 3 words | both ways, in key order | no | no search, `unsafe` |
 
 Pick the smallest shape that has the operations you need:
 
@@ -19,6 +20,8 @@ Pick the smallest shape that has the operations you need:
 - **`SimpleQueue`** — a FIFO.
 - **`TailQueue`** — anything walked backwards, or removed from the
   middle given the head, such as a run queue.
+- **`RbTree`** — nodes kept in key order, with floor and ceiling
+  lookups, such as a map of address ranges. Equal keys are allowed.
 
 ## Quick start
 
@@ -59,7 +62,14 @@ list::adapter!(pub(crate) TimerAdapter = Timer { link });
 ```
 
 The macro requires the field to be exactly that shape's `Link`. Any other
-field type fails to compile. `Adapter` is an `unsafe trait`, so a
+field type fails to compile. An `RbTree` adapter also names the key that
+orders the nodes:
+
+```rust
+rb_tree::adapter!(pub(crate) RegionAdapter = Region { link } key(usize) = |region| region.start);
+```
+
+ `Adapter` is an `unsafe trait`, so a
 hand-written adapter has to promise the same mapping itself.
 
 ### Lifetimes do the safety work
@@ -85,8 +95,10 @@ The `unsafe` parts are the ones a lifetime can't express.
 | API | Why |
 |---|---|
 | `push_front_ptr`, `push_back_ptr`, `insert_*_ptr`, `replace_current_ptr` | They take a raw pointer, for nodes whose lifetime isn't `'nodes` (freed after removal) or that sit on several structures at once. The caller promises the node stays live, in place and unshared until it leaves. |
-| `List::remove_ptr`, `TailQueue::remove_ptr` | They follow the node's own back pointer, so the node must be on that structure. |
+| `List::remove_ptr`, `TailQueue::remove_ptr`, `RbTree::remove_ptr` | They follow the node's own pointers, so the node must be on that structure. |
 | `cursor_mut_from_ptr` | The node must be on that structure. |
+
+`RbTree::insert_ptr` is the `_ptr` form of `insert`.
 
 `SinglyList::remove_ptr` and `SimpleQueue::remove_ptr` are safe. They
 walk from the front comparing addresses and return
@@ -110,6 +122,10 @@ freely.
 `new()` is `const` on every head and needs no address. An empty tail is
 stored as null, meaning "the head itself".
 
+`RbTree` points only at nodes, never back into its head, so like
+`SinglyList` it is not pinned and moves freely. Its head holds the root and
+the first and last nodes.
+
 ### Leaving writes nothing
 
 In release builds, removing a node never writes to that node. There's
@@ -118,10 +134,13 @@ is O(1): it forgets the nodes and leaves their stale link words behind,
 which the next push overwrites. A node pushed as `&'nodes mut` stays
 borrowed until `'nodes` ends, even after `clear()`.
 
-In debug builds, `List` and `TailQueue` check before every operation
-that a link's neighbours point back at it. They also fill a leaving
+In debug builds, `List`, `TailQueue` and `RbTree` check before every
+operation that a link's neighbours point back at it. They also fill a leaving
 link with dangling pointers, so a stale use faults on a recognisable
-address.
+address. `RbTree` checks more: that a link is on the tree it is used with,
+that its cached first and last nodes are the tree's ends, that a slot is
+empty before a node joins it, that the root is black after a rebalance, and
+that its adapter maps a link back to its node. None walks the whole tree.
 
 ### Threads
 
@@ -139,22 +158,39 @@ The operation set is deliberately the classic kernel queue-macro set,
 with names taken from `std::collections::LinkedList`. Cursors stand in
 for element pointers.
 
-| | `SinglyList` | `List` | `SimpleQueue` | `TailQueue` |
-|---|:-:|:-:|:-:|:-:|
-| `new`, `is_empty`, `clear`, `front`, `iter` | ✓ | ✓ | ✓ | ✓ |
-| `back` | | | ✓ | ✓ |
-| `iter().rev()` | | | | ✓ |
-| `push_front` (+ `_ptr`) | ✓ | ✓ | ✓ | ✓ |
-| `push_back` (+ `_ptr`) | | | ✓ | ✓ |
-| `pop_front` | ✓ | | ✓ | |
-| `remove_ptr` | safe, O(n) | `unsafe`, O(1) | safe, O(n) | `unsafe`, O(1) |
-| `append` (O(1)) | | | ✓ | ✓ |
-| `move_into` | | ✓ | | |
-| `cursor_front(_mut)`, `cursor_mut_from_ptr` | ✓ | ✓ | ✓ | ✓ |
-| `cursor_back(_mut)` | | | | ✓ |
+| | `SinglyList` | `List` | `SimpleQueue` | `TailQueue` | `RbTree` |
+|---|:-:|:-:|:-:|:-:|:-:|
+| `new`, `is_empty`, `clear`, `front`, `iter` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `back` | | | ✓ | ✓ | ✓ |
+| `iter().rev()` | | | | ✓ | ✓ |
+| `push_front` (+ `_ptr`) | ✓ | ✓ | ✓ | ✓ | |
+| `push_back` (+ `_ptr`) | | | ✓ | ✓ | |
+| `insert` (+ `_ptr`), after equal keys | | | | | ✓ |
+| `insert_after_ptr`, `insert_before_ptr`, no search | | | | | `unsafe` |
+| `lower_bound(_mut)`, `upper_bound(_mut)` | | | | | ✓ |
+| `pop_front` | ✓ | | ✓ | | |
+| `remove_ptr` | safe, O(n) | `unsafe`, O(1) | safe, O(n) | `unsafe`, O(1) | `unsafe`, no search |
+| `append` (O(1)) | | | ✓ | ✓ | |
+| `move_into` | | ✓ | | | |
+| `cursor_front(_mut)`, `cursor_mut_from_ptr` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `cursor_back(_mut)` | | | | ✓ | ✓ |
 
-On a `List` or `TailQueue`, you pop the front with
+On a `List`, `TailQueue` or `RbTree`, you pop the front with
 `cursor_front_mut().remove_current()`.
+
+`RbTree` orders its nodes by `Adapter::key`. `lower_bound(Included(k))`
+finds the first node with a key `>= k`, `Excluded(k)` the first `> k`;
+`upper_bound(Included(k))` finds the last node with a key `<= k`,
+`Excluded(k)` the last `< k`; `Unbounded` is the front or the back. Equal
+keys stay in insertion order. The key of a linked node must not change:
+a change misorders lookups, and nothing else.
+
+A cursor insert (`insert_after`, `insert_before`) links a node beside the
+cursor's node without searching, and so do the head's `insert_after_ptr` and
+`insert_before_ptr`, which skip the cursor too, for a caller that already holds the
+neighbour, such as a map that keeps its entries in a list as well. The
+node's key must lie between its two new neighbours' keys; debug builds
+check it, and a node out of order only misorders the lookups that cross it.
 
 ### Cursors
 
@@ -162,15 +198,15 @@ A cursor rests on a node or on the **ghost**, the empty position before
 the front and after the back. Moving past either end reaches the ghost,
 and moving on from it wraps to the other end.
 
-| Cursor method | `SinglyList` | `List` | `SimpleQueue` | `TailQueue` |
-|---|:-:|:-:|:-:|:-:|
-| `current`, `current_ptr`, `move_next`, `peek_next` | ✓ | ✓ | ✓ | ✓ |
-| `insert_after` (+ `_ptr`); at the ghost, at the front | ✓ | ✓ | ✓ | ✓ |
-| `remove_next`; at the ghost, the front | ✓ | | ✓ | |
-| `insert_before` (+ `_ptr`) | | ✓, panics at the ghost | | ✓, at the ghost at the back |
-| `remove_current` | | ✓ | | ✓ |
-| `replace_current` (+ `_ptr`) | | ✓ | | ✓ |
-| `move_prev`, `peek_prev` | | | | ✓ |
+| Cursor method | `SinglyList` | `List` | `SimpleQueue` | `TailQueue` | `RbTree` |
+|---|:-:|:-:|:-:|:-:|:-:|
+| `current`, `current_ptr`, `move_next`, `peek_next` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `insert_after` (+ `_ptr`); at the ghost, at the front | ✓ | ✓ | ✓ | ✓ | ✓, no search |
+| `remove_next`; at the ghost, the front | ✓ | | ✓ | | |
+| `insert_before` (+ `_ptr`) | | ✓, panics at the ghost | | ✓, at the ghost at the back | ✓, at the ghost at the back, no search |
+| `remove_current` | | ✓ | | ✓ | ✓ |
+| `replace_current` (+ `_ptr`) | | ✓ | | ✓ | |
+| `move_prev`, `peek_prev` | | | | ✓ | ✓ |
 
 The singly linked shapes keep no predecessor, so their cursors act on
 the node *after* them. `replace_current` returns `Err(node)` at the
@@ -187,13 +223,17 @@ pointer and re-derive a cursor with `cursor_mut_from_ptr`.
 
 ## Working on the crate
 
-The rules are ADRs 0043 to 0049 in the repository's
+The rules are ADRs 0043 to 0051 in the repository's
 [`docs/adr/`](../../docs/adr/), on top of the ones every crate follows.
 The ones the code relies on most:
 
 - **No shared code between shapes.** Each module has its own link,
   adapter trait, macro, cursors and iterator, even where they look
   alike. Only the `#[cfg(test)]` item in `src/test_items.rs` is shared.
+- **The tree's rebalancing sees links only.** `rb_tree/balance.rs` never
+  reads a key or names a node type, so one copy serves every tree. The key
+  compare lives in the descent, which is monomorphised through
+  `Adapter::key`.
 - **No new operations outside the set above.** For example, no `len`,
   `contains` or `pop_back`. Add one only when there's a reason to.
 - **Hand back the structure's own pointer.** Anything that returns
@@ -231,6 +271,7 @@ mise run test::collections   # host unit tests
 mise run cov::collections    # must stay at 100% lines, regions, functions
 cargo clippy -p collections --target x86_64-unknown-linux-gnu --all-targets
 cargo bench -p collections --target x86_64-unknown-linux-gnu --bench shapes
+cargo bench -p collections --target x86_64-unknown-linux-gnu --bench rb_tree
 ```
 
 Gate debug-only code with `#[cfg(debug_assertions)]`, not
@@ -240,7 +281,9 @@ gated on `debug_assertions`.
 
 The benchmark times each shape on the workloads that tell the shapes
 apart: `lifo`, `fifo`, `walk`, `walk_rev`, `churn` (remove by address,
-push back) and `concat`, at 16, 1024 and 65536 nodes.
+push back) and `concat`, at 16, 1024 and 65536 nodes. The `rb_tree`
+benchmark times the tree on `insert`, `insert_asc`, `dups`, `floor`,
+`ceil`, `churn`, `walk`, `walk_rev` and `drain`, at the same sizes.
 
 ## License
 

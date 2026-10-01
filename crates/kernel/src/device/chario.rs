@@ -9,6 +9,7 @@
 //! <device/tty.h> and the `struct tty_status` of <`device/tty_status.h`>.
 
 use crate::arch::types::{VmOffset, VmSize};
+use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
 use crate::arch::x86_64::io_req::{D_NOWAIT, IoDone, IoReq, IoReqQueue};
 use crate::arch::x86_64::spl;
 use crate::device::cirbuf::{self, Cirbuf};
@@ -17,7 +18,7 @@ use crate::device::r#return::{DeviceError, DeviceSuccess};
 use crate::glue;
 use crate::ipc::IpcPort;
 use crate::kern::lock::SimpleLock;
-use crate::kern::mach_clock;
+use crate::kern::machine;
 use crate::vm::error::KERN_SUCCESS;
 use crate::vm::vm_map::VmMapCopy;
 use crate::vm::vm_map::vm_map_copyout;
@@ -25,7 +26,7 @@ use crate::vm::vm_user;
 use core::ffi::{c_char, c_int, c_long, c_short, c_uint, c_void};
 use core::mem::{offset_of, size_of};
 use core::pin::Pin;
-use core::ptr::{self, NonNull};
+use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
 
 /// `NSPEEDS` of <`device/tty_status.h>`: how many baud-rate slots the `tt*` and
@@ -169,37 +170,15 @@ pub struct Tty {
     pub(crate) t_delayed_read: IoReqQueue,
     pub(crate) t_delayed_write: IoReqQueue,
     pub(crate) t_delayed_open: IoReqQueue,
-    t_timeout: Option<NonNull<mach_clock::Timeout>>,
+    t_timeout: MachCallout,
     pub(crate) t_getstat: Option<TtyGetstat>,
     pub(crate) t_setstat: Option<TtySetstat>,
     t_tops: Option<NonNull<c_void>>,
 }
 
-const _: () = {
-    assert!(size_of::<Tty>() == 224);
-    assert!(align_of::<Tty>() == align_of::<*mut c_void>());
-    assert!(offset_of!(Tty, t_lock) == 0);
-    assert!(offset_of!(Tty, t_inq) == 8);
-    assert!(offset_of!(Tty, t_outq) == 48);
-    assert!(offset_of!(Tty, t_addr) == 88);
-    assert!(offset_of!(Tty, t_dev) == 96);
-    assert!(offset_of!(Tty, t_start) == 104);
-    assert!(offset_of!(Tty, t_stop) == 112);
-    assert!(offset_of!(Tty, t_mctl) == 120);
-    assert!(offset_of!(Tty, t_ispeed) == 128);
-    assert!(offset_of!(Tty, t_ospeed) == 129);
-    assert!(offset_of!(Tty, t_breakc) == 130);
-    assert!(offset_of!(Tty, t_flags) == 132);
-    assert!(offset_of!(Tty, t_state) == 136);
-    assert!(offset_of!(Tty, t_line) == 140);
-    assert!(offset_of!(Tty, t_delayed_read) == 144);
-    assert!(offset_of!(Tty, t_delayed_write) == 160);
-    assert!(offset_of!(Tty, t_delayed_open) == 176);
-    assert!(offset_of!(Tty, t_timeout) == 192);
-    assert!(offset_of!(Tty, t_getstat) == 200);
-    assert!(offset_of!(Tty, t_setstat) == 208);
-    assert!(offset_of!(Tty, t_tops) == 216);
-};
+// The GNU Mach size and field offsets of `struct tty` are gone (ADR
+// 0002): `t_timeout` is now a `Callout`, and nothing MIG-visible reads
+// the record.
 
 impl Tty {
     /// The zero image a C `static` began with, ready for [`chars`].
@@ -222,7 +201,7 @@ impl Tty {
             t_delayed_read: IoReqQueue::new(),
             t_delayed_write: IoReqQueue::new(),
             t_delayed_open: IoReqQueue::new(),
-            t_timeout: None,
+            t_timeout: MachCallout::new(wheel(), ttypush_action, ()),
             t_getstat: None,
             t_setstat: None,
             t_tops: None,
@@ -731,7 +710,7 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> TtyResult {
         }
         // SAFETY: `vm_map_copyout()` mapped the copy's bytes at `addr` on
         // success.
-        data = ptr::with_exposed_provenance_mut(addr);
+        data = with_exposed_provenance_mut(addr);
     }
 
     let level = lock_irq(tp);
@@ -1314,30 +1293,46 @@ pub(crate) unsafe fn tty_output(tp: *mut Tty) {
     start(unsafe { &mut *tp });
 }
 
+/// The expiry of [`Tty::t_timeout`]: the PDMA receive timeout.
+fn ttypush_action(callout: Pin<&MachCallout>) {
+    // SAFETY: `t_timeout` is the callout field of a live `Tty`.
+    let tp = unsafe { tty_from_timeout(callout.get_ref()) };
+    // SAFETY: `tp` is a live tty the callout is embedded in.
+    unsafe { ttypush(tp) };
+}
+
+/// Recover the tty that owns `t_timeout`.
+///
+/// # Safety
+///
+/// `callout` must be `&tty.t_timeout` for a live tty.
+unsafe fn tty_from_timeout(callout: *const MachCallout) -> *mut Tty {
+    let base = callout
+        .expose_provenance()
+        .wrapping_sub(offset_of!(Tty, t_timeout));
+    with_exposed_provenance_mut(base)
+}
+
 /// `ttypush()` of device/chario.c: the PDMA receive timeout callback.
 ///
 /// # Safety
 ///
-/// `param` must be the live `Tty` a [`mach_clock::timeout()`] call armed
-/// this callback with, and the callback must run on the master CPU, as the
-/// C contract requires.
-unsafe fn ttypush(param: *mut c_void) {
-    // SAFETY: `timeout()` gets back the tty `input()` armed it with, which
-    // stays live.
-    let tp = unsafe { &mut *param.cast::<Tty>() };
+/// `tp` must be the live `Tty` whose `t_timeout` fired.
+unsafe fn ttypush(tp: *mut Tty) {
+    // SAFETY: the callout recovers the tty it is embedded in, which stays live.
+    let tp = unsafe { &mut *tp };
     let level = lock_irq(tp);
     let state = tp.t_state;
 
     if state & TS_MIN_TO != 0 {
         if state & TS_MIN_TO_RCV != 0 {
             tp.t_state = state & !TS_MIN_TO_RCV;
-            tp.t_timeout = NonNull::new(unsafe {
-                mach_clock::timeout(
-                    Some(ttypush),
-                    param,
-                    pdma_timeout(tp.t_ispeed),
-                )
-            });
+            let ticks =
+                clock::Ticks::new(pdma_timeout(tp.t_ispeed).max(1) as u64);
+            // SAFETY: the tty is live and does not move while armed.
+            unsafe {
+                Pin::new_unchecked(&tp.t_timeout).start(ticks);
+            }
         } else {
             tp.t_state = state & !TS_MIN_TO;
             if tp.t_inq.count() != 0 {
@@ -1380,13 +1375,7 @@ pub(crate) fn input(tp: &mut Tty, c: c_uint) {
     {
         if tp.t_state & TS_MIN_TO != 0 {
             tp.t_state &= !(TS_MIN_TO | TS_MIN_TO_RCV);
-            // SAFETY: `reset_timeout()`'s contract; `t_timeout` is the live
-            // timeout `input()` armed.
-            unsafe {
-                mach_clock::reset_timeout(
-                    tp.t_timeout.map_or(ptr::null_mut(), NonNull::as_ptr),
-                )
-            };
+            let _ = tp.t_timeout.stop();
         }
         // SAFETY: the read queue is the tty's and stays at its address.
         unsafe { complete_queue(ptr::from_mut(&mut tp.t_delayed_read)) };
@@ -1395,15 +1384,11 @@ pub(crate) fn input(tp: &mut Tty, c: c_uint) {
         if ptime > 0 {
             if tp.t_state & TS_MIN_TO == 0 {
                 tp.t_state |= TS_MIN_TO;
-                // SAFETY: `timeout()`'s contract; the tty lock is held and
-                // the callback runs on the master CPU.
-                tp.t_timeout = NonNull::new(unsafe {
-                    mach_clock::timeout(
-                        Some(ttypush),
-                        ptr::from_mut(tp).cast::<c_void>(),
-                        ptime,
-                    )
-                });
+                let ticks = clock::Ticks::new(ptime.max(1) as u64);
+                // SAFETY: the tty is live and does not move while armed.
+                unsafe {
+                    Pin::new_unchecked(&tp.t_timeout).start(ticks);
+                }
             } else {
                 tp.t_state |= TS_MIN_TO_RCV;
             }
@@ -1497,7 +1482,7 @@ pub(crate) fn chario_init() {
     }
 
     // The live clock rate the probe set before `device_service_create()`.
-    let hz_rate = mach_clock::CLOCK_HZ;
+    let hz_rate = machine::CLOCK_HZ;
 
     for (speed, baud) in PDMA_TIMEOUT_ROWS {
         // SAFETY: every speed is below `NSPEEDS`, the length of the table.

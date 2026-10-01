@@ -6,10 +6,11 @@
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
 //! The thread module's cores, which `kern/thread.c` used to define and
-//! `kern/thread.h` declares, and the `struct thread` mirror.
+//! `kern/thread.h` declares.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::KERNEL_STACK_SIZE;
+use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
 use crate::arch::x86_64::pcb::Pcb;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::arch::x86_64::spl;
@@ -25,7 +26,8 @@ use crate::kern::ipc_tt::{
     ipc_thread_terminate,
 };
 use crate::kern::lock::SimpleLock;
-use crate::kern::mach_clock::{self, Timeout, reset_timeout_check};
+use crate::kern::machine;
+use crate::kern::host_time;
 use crate::kern::policy::{POLICY_FIXEDPRI, POLICY_TIMESHARE, invalid_policy};
 use crate::kern::processor::{self, Processor, ProcessorRef, ProcessorSet};
 use crate::kern::sched::{
@@ -48,7 +50,7 @@ use crate::vm::vm_map::{VmMap, round_page};
 use collections::tail_queue::{self, TailQueue};
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_long, c_uint, c_void};
-use core::mem::MaybeUninit;
+use core::mem::{MaybeUninit, offset_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 
@@ -214,8 +216,11 @@ pub union Saved {
     pub other: *mut c_void,
 }
 
-/// `struct thread` of <kern/thread.h>.
-#[repr(C)]
+/// A kernel thread: the scheduling, IPC and accounting state GNU Mach
+/// kept in `struct thread` of <kern/thread.h>.
+///
+/// The representation is free (ADR 0002): nothing MIG-visible reads it,
+/// and the machine code takes field offsets with `offset_of!`.
 #[allow(missing_docs)]
 pub struct Thread {
     /// `links`: the run-queue or wait-queue links.
@@ -300,9 +305,9 @@ pub struct Thread {
     pub sched_delta: c_uint,
     pub creation_time: TimeValue64,
     /// `timer`: the wait timeout.
-    pub timer: Timeout,
+    pub(crate) timer: MachCallout,
     /// `depress_timer`: the priority-depression timeout.
-    pub depress_timer: Timeout,
+    pub(crate) depress_timer: MachCallout,
     /// `ast`: the pending AST reasons.
     pub ast: AstReason,
     pub processor_set: *mut ProcessorSet,
@@ -357,10 +362,28 @@ impl Thread {
     /// on the run-time task and processor set.
     #[must_use]
     pub fn new() -> Self {
-        // SAFETY: Every field accepts the all-zero image: the pointers are
-        // null, the two unions begin as a null `event_key` and a null `other`,
-        // and the locks' atomics start unlocked.
-        let mut thread: Self = unsafe { MaybeUninit::zeroed().assume_init() };
+        // Zero every field except the callouts, which have no all-zero
+        // image (a null wheel pointer); those are written before the
+        // value is assumed initialized.
+        let mut slot = MaybeUninit::<Self>::zeroed();
+        // SAFETY: `slot` is uninit storage large enough for `Self`; the
+        // two writes below are the first initialization of those fields.
+        unsafe {
+            let base = slot.as_mut_ptr();
+            ptr::addr_of_mut!((*base).timer).write(MachCallout::new(
+                wheel(),
+                thread_timeout_action,
+                (),
+            ));
+            ptr::addr_of_mut!((*base).depress_timer).write(MachCallout::new(
+                wheel(),
+                depress_timeout_action,
+                (),
+            ));
+        }
+        // SAFETY: every field is now initialized: zeros accept the
+        // pointers, unions and locks, and the callouts were written.
+        let mut thread = unsafe { slot.assume_init() };
 
         thread.runq = RUN_QUEUE_NULL;
         thread.ref_count = 2;
@@ -372,8 +395,6 @@ impl Thread {
         thread.depress_priority = -1;
         thread.user_stop_count = 1;
         thread.may_assign = 1;
-        thread.timer = Timeout::unlinked();
-        thread.depress_timer = Timeout::unlinked();
         thread
     }
 
@@ -401,7 +422,7 @@ impl Thread {
                 None,
                 CacheInitFlags::EMPTY,
             );
-            THREAD_TEMPLATE = Self::new();
+            (*ptr::addr_of_mut!(THREAD_TEMPLATE)).write(Self::new());
             let reaper_lock = &raw mut REAPER_LOCK;
             (*reaper_lock).init();
             let stack_lock = &raw mut STACK_LOCK_DATA;
@@ -412,6 +433,102 @@ impl Thread {
         }
     }
 
+    /// Arm the thread's wait timeout.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must be live and not move while the callout is armed.
+    pub(crate) unsafe fn start_timer(thread: *mut Self, ticks: clock::Ticks) {
+        // SAFETY: the thread is zone-allocated and does not move; `timer`
+        // is its callout field.
+        unsafe { Pin::new_unchecked(&(*thread).timer) }.start(ticks);
+    }
+
+    /// Cancel the wait timeout if one is armed (the old `reset_timeout_check`).
+    ///
+    /// # Safety
+    ///
+    /// `thread` must be live.
+    pub(crate) unsafe fn stop_timer(thread: *mut Self) {
+        // SAFETY: the thread is live.
+        let _ = unsafe { (*thread).timer.stop() };
+    }
+
+    /// Arm the priority-depression timeout.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must be live and not move while the callout is armed.
+    pub(crate) unsafe fn start_depress_timer(
+        thread: *mut Self,
+        ticks: clock::Ticks,
+    ) {
+        // SAFETY: the thread is zone-allocated and does not move.
+        unsafe { Pin::new_unchecked(&(*thread).depress_timer) }.start(ticks);
+    }
+
+    /// Cancel the priority-depression timeout if armed.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must be live.
+    pub(crate) unsafe fn stop_depress_timer(thread: *mut Self) {
+        // SAFETY: the thread is live.
+        let _ = unsafe { (*thread).depress_timer.stop() };
+    }
+
+    /// Recover the thread that owns `timer`.
+    ///
+    /// # Safety
+    ///
+    /// `callout` must be `&thread.timer` for a live thread.
+    pub(crate) unsafe fn from_timer(callout: *const MachCallout) -> *mut Self {
+        let base = callout
+            .expose_provenance()
+            .wrapping_sub(offset_of!(Self, timer));
+        with_exposed_provenance_mut(base)
+    }
+
+    /// Recover the thread that owns `depress_timer`.
+    ///
+    /// # Safety
+    ///
+    /// `callout` must be `&thread.depress_timer` for a live thread.
+    pub(crate) unsafe fn from_depress_timer(
+        callout: *const MachCallout,
+    ) -> *mut Self {
+        let base = callout
+            .expose_provenance()
+            .wrapping_sub(offset_of!(Self, depress_timer));
+        with_exposed_provenance_mut(base)
+    }
+}
+
+/// The expiry of [`Thread::timer`].
+pub(crate) fn thread_timeout_action(callout: Pin<&MachCallout>) {
+    // SAFETY: `timer` is the callout field of a live thread.
+    let thread =
+        unsafe { Thread::from_timer(ptr::from_ref(callout.get_ref())) };
+    // SAFETY: `thread` is live; the action runs from the wheel.
+    unsafe {
+        clear_wait(thread, crate::kern::sched_prim::THREAD_TIMED_OUT, 0)
+    };
+}
+
+/// The expiry of [`Thread::depress_timer`].
+pub(crate) fn depress_timeout_action(callout: Pin<&MachCallout>) {
+    // SAFETY: `depress_timer` is the callout field of a live thread.
+    let thread = unsafe {
+        Thread::from_depress_timer(ptr::from_ref(callout.get_ref()))
+    };
+    // SAFETY: `thread` is live; the action runs from the wheel.
+    unsafe {
+        crate::kern::syscall_subr::depress_timeout(thread.cast::<c_void>())
+    };
+}
+
+#[allow(missing_docs)]
+impl Thread {
     /// `thread_timer_delta()` of <kern/sched.h>.
     ///
     /// # Safety
@@ -731,7 +848,7 @@ impl Thread {
 ///
 /// Panics if the kernel's `tick` global is zero: the conversion divides by it.
 fn fixedpri_quantum(data: c_int) -> c_int {
-    let tick_rate = mach_clock::TICK;
+    let tick_rate = machine::TICK;
     let temp = data.wrapping_mul(1000);
     let temp = if temp % tick_rate != 0 {
         temp.wrapping_add(tick_rate)
@@ -1376,10 +1493,8 @@ static mut THREAD_CACHE: KmemCache = KmemCache::zeroed();
 static mut THREAD_STACK_CACHE: KmemCache = KmemCache::zeroed();
 
 /// `thread_template` of kern/thread.c: the image `thread_create()` copies.
-static mut THREAD_TEMPLATE: Thread =
-    // SAFETY: `Thread` is a plain struct that accepts an all-zero image,
-    // which `thread_create()` overwrites before the template is used.
-    unsafe { MaybeUninit::zeroed().assume_init() };
+/// Built by [`Thread::new`] in [`Thread::init`], never zeroed.
+static mut THREAD_TEMPLATE: MaybeUninit<Thread> = MaybeUninit::uninit();
 
 /// `reaper_queue` of kern/thread.c: the threads waiting for the reaper.
 static REAPER_QUEUE: SyncCell<ThreadQueue> =
@@ -1534,8 +1649,10 @@ impl Thread {
         // SAFETY: the storage is fresh and unshared; every field below is
         // written before the thread is visible to anything else.
         unsafe {
-            new_thread.write(ptr::read(ptr::addr_of!(THREAD_TEMPLATE)));
-            mach_clock::record_time_stamp(ptr::addr_of_mut!(
+            new_thread.write(ptr::read(
+                (*ptr::addr_of!(THREAD_TEMPLATE)).assume_init_ref(),
+            ));
+            host_time::record_time_stamp(ptr::addr_of_mut!(
                 (*new_thread).creation_time
             ));
             (*new_thread).task = parent_task;
@@ -1679,8 +1796,10 @@ impl Thread {
                 return;
             }
 
-            reset_timeout_check(ptr::addr_of_mut!((*thread).timer));
-            reset_timeout_check(ptr::addr_of_mut!((*thread).depress_timer));
+            // Zone free does not run `Drop` (ADR 0040): cancel both
+            // callouts before the thread returns to the cache.
+            ptr::drop_in_place(ptr::addr_of_mut!((*thread).timer));
+            ptr::drop_in_place(ptr::addr_of_mut!((*thread).depress_timer));
             (*thread).depress_priority = -1;
 
             let (user_time, system_time) = read_times(&*thread);

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license = "MIT"
-description = "Intrusive singly linked lists, lists, simple queues and tail queues"
+description = "Intrusive singly linked lists, lists, simple queues, tail queues and a red-black tree"
 repository.workspace = true
 publish = false
 
@@ -15,6 +15,10 @@ criterion = { version = "=0.8.2", default-features = false, features = ["cargo_b
 
 [[bench]]
 name = "shapes"
+harness = false
+
+[[bench]]
+name = "rb_tree"
 harness = false
 
 [lints.rust]

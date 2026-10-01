@@ -85,6 +85,15 @@ impl Timer {
         fence(Ordering::SeqCst);
         self.high_bits = self.high_bits.wrapping_add(high_increment);
     }
+
+    /// Add `usec` microseconds, carrying into the seconds count once the
+    /// low word fills (`timer_bump()` of <kern/timer.h>).
+    pub fn bump(&mut self, usec: c_uint) {
+        self.low_bits = self.low_bits.wrapping_add(usec);
+        if self.low_bits >= TIMER_RATE {
+            self.normalize();
+        }
+    }
 }
 
 impl TimerSave {

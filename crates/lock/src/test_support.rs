@@ -137,6 +137,21 @@ pub(crate) fn spawn_parked<'scope, T: Send + 'scope>(
     (waiter, handle)
 }
 
+/// Wakes every thread parked under `key` with no handoff, as a lock that
+/// released without granting its waiters the lock would.
+#[cfg(all(not(loom), debug_assertions))]
+pub(crate) fn wake_without_handoff(key: usize) {
+    let _ = crate::wait::unpark_all::<Host>(key, &mut |_| {});
+}
+
+/// Joins `handle`, which must panic, and panics with its panic.
+#[cfg(all(not(loom), debug_assertions))]
+pub(crate) fn resume_panic_of<T>(
+    handle: thread::ScopedJoinHandle<'_, T>,
+) -> ! {
+    std::panic::resume_unwind(handle.join().err().expect("the thread panics"))
+}
+
 fn host_thread(thread: ThreadRef) -> &'static HostThread {
     // SAFETY: every `ThreadRef` of `Host` comes from `Host::current`, the
     // address of a leaked `HostThread`.

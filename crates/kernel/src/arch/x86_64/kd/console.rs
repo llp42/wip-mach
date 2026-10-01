@@ -7,8 +7,7 @@
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
 //! The kd console entry points, which <device/cons.c> calls through `constab`:
-//! probe/init and the polled getc/putc the kernel debugger uses, plus the bell
-//! ioctl.
+//! probe/init and the polled getc/putc, plus the bell ioctl.
 
 use super::keymap::KEY_MAP;
 use super::{
@@ -52,7 +51,7 @@ pub(crate) unsafe fn kdcninit(_cp: *mut ConsDev) -> c_int {
 /// # Safety
 ///
 /// The caller must hold the console lock and interrupts must be off while the
-/// debugger polls.
+/// controller is polled.
 pub(crate) unsafe fn kdcngetc(_dev: u16, wait: c_int) -> c_int {
     if wait != 0 {
         loop {
@@ -144,8 +143,8 @@ pub(crate) fn maygetc() -> c_int {
                 // after boot; `char_idx + 1` is a valid column.
                 && unsafe { KEY_MAP[scancode as usize][char_idx + 1] } == 0x5b
             {
-                // Remap some keys to the readline-like shortcuts the debugger
-                // supports.
+                // Remap some keys to the readline-like shortcuts the console
+                // reader supports.
                 // SAFETY: `scancode` is below `NUMKEYS`, `char_idx` is a
                 // `key_map` column, and the table is never written
                 // after boot; `char_idx + 2` is a valid column.

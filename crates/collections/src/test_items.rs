@@ -9,7 +9,7 @@
     reason = "a test fixture shared by the shapes' test modules"
 )]
 
-use crate::{list, simple_queue, singly_list, tail_queue};
+use crate::{list, rb_tree, simple_queue, singly_list, tail_queue};
 use core::ptr::NonNull;
 
 /// A node that can sit on one structure of each shape at once.
@@ -20,6 +20,7 @@ pub(crate) struct Item {
     pub(crate) list: list::Link,
     pub(crate) simple: simple_queue::Link,
     pub(crate) tail: tail_queue::Link,
+    pub(crate) rb: rb_tree::Link,
 }
 
 impl Item {
@@ -31,6 +32,7 @@ impl Item {
             list: list::Link::new(),
             simple: simple_queue::Link::new(),
             tail: tail_queue::Link::new(),
+            rb: rb_tree::Link::new(),
         }
     }
 }
@@ -53,6 +55,11 @@ simple_queue::adapter!(
 tail_queue::adapter!(
     /// Links an item into a tail queue.
     pub(crate) TailItem = Item { tail }
+);
+
+rb_tree::adapter!(
+    /// Links an item into a red-black tree, ordered by its value.
+    pub(crate) RbItem = Item { rb } key(u32) = |item| item.value
 );
 
 /// Returns one item per value, in one allocation that the tests never

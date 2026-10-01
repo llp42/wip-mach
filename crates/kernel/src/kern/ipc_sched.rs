@@ -11,7 +11,7 @@ use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::arch::x86_64::spl;
 use crate::kern::ast;
 use crate::kern::debug::kpanic;
-use crate::kern::mach_clock::{self, reset_timeout_check};
+use crate::kern::machine;
 use crate::kern::sched_prim::{
     TH_RUN_WAIT, TH_RUN_WAIT_SUSP, TH_RUN_WAIT_SUSP_UNINT, TH_RUN_WAIT_UNINT,
     TH_WAIT_SUSP, TH_WAIT_SUSP_UNINT, TH_WAIT_UNINT, THREAD_AWAKENED,
@@ -25,7 +25,7 @@ use core::ffi::c_uint;
 /// `convert_ipc_timeout_to_ticks()` of <`kern/sched_prim.h>`: round a
 /// millisecond timeout up to whole ticks.
 pub(crate) fn ipc_timeout_to_ticks(msecs: c_uint) -> c_uint {
-    let hz = mach_clock::CLOCK_HZ;
+    let hz = machine::CLOCK_HZ;
     // The C expression is unsigned arithmetic over the `int` rate converted to
     // unsigned.
     msecs.wrapping_mul(hz as c_uint).wrapping_add(999) / 1000
@@ -42,7 +42,8 @@ pub(crate) unsafe fn thread_go(thread: *mut Thread) {
     let s = unsafe { spl::splsched() };
     unsafe {
         (*thread).lock.lock();
-        reset_timeout_check(&raw mut (*thread).timer);
+        // ADR 0028: the waker does not touch the sleeper's timeout; the
+        // sleeper stops its own callout on the way out of `thread_block`.
 
         let state = (*thread).state();
         match state & TH_SCHED_STATE {
@@ -95,14 +96,17 @@ pub(crate) unsafe fn thread_will_wait_with_timeout(
     thread: *mut Thread,
     msecs: c_uint,
 ) {
-    let ticks = ipc_timeout_to_ticks(msecs);
+    // The 32-bit `msecs * HZ / 1000` used to wrap above ~11.9 hours
+    // (DEBT); `from_milliseconds_ceil` widens first.
+    let ticks = clock::Ticks::from_milliseconds_ceil(u64::from(msecs));
     // SAFETY: `splsched()` is the real asm routine.
     let s = unsafe { spl::splsched() };
     unsafe {
         (*thread).lock.lock();
         (*thread).wait_result = -1;
         (*thread).set_state((*thread).state() | TH_WAIT);
-        mach_clock::set_timeout(&raw mut (*thread).timer, ticks);
+        // SAFETY: `thread` is live and will not move.
+        Thread::start_timer(thread, ticks);
         (*thread).lock.unlock();
         spl::splx(s);
     }
@@ -156,7 +160,7 @@ pub(crate) unsafe fn thread_handoff(
             return false;
         }
 
-        reset_timeout_check(&raw mut (*new).timer);
+        // ADR 0028: the waker never touches the sleeper's timeout.
         (*new).set_state(TH_RUN);
         (*new).lock.unlock();
 

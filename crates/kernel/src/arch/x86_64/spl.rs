@@ -26,7 +26,7 @@
 
 use crate::arch::x86_64::ioapic::CURR_IPL;
 use crate::arch::x86_64::per_cpu;
-use crate::kern::mach_clock::softclock;
+use crate::arch::x86_64::clock_platform::softclock;
 use core::arch::asm;
 use core::ffi::{c_int, c_ulong};
 use core::sync::atomic::{AtomicI32, Ordering};

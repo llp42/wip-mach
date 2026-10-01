@@ -60,11 +60,6 @@ The pinned Debian GNU/Hurd snapshot whose scripted boot shows that a
 stock Hurd runs.
 _Avoid_: test image, Debian image
 
-**Checked build**:
-The kernel built with debug assertions and overflow checks on, booted by
-the ABI suite like any other build.
-_Avoid_: debug build
-
 ## Kernel objects
 
 **Reference**:

@@ -285,6 +285,47 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "Mutex lock is not held by the running thread"]
+    fn guard_dropped_after_a_raw_unlock_panics() {
+        use crate::Mutex;
+
+        let lock = Mutex::<u32, Host>::new(0);
+        let guard = lock.lock();
+        // SAFETY: none; the debug check is expected to catch the guard.
+        unsafe { lock.raw().unlock() };
+        drop(guard);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "Mutex lock is not held by the running thread"]
+    fn guard_written_after_a_raw_unlock_panics() {
+        use crate::Mutex;
+        use core::mem::ManuallyDrop;
+
+        let lock = Mutex::<u32, Host>::new(0);
+        // Not dropped, so the panic does not meet a second one.
+        let mut guard = ManuallyDrop::new(lock.lock());
+        // SAFETY: none; the debug check is expected to catch the guard.
+        unsafe { lock.raw().unlock() };
+        **guard += 1;
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "Read lock is not held by the running thread"]
+    fn shared_guard_dropped_after_a_raw_unlock_panics() {
+        use crate::RwLock;
+
+        let lock = RwLock::<u32, Host>::new(0);
+        let guard = lock.read();
+        // SAFETY: none; the debug check is expected to catch the guard.
+        unsafe { lock.raw().unlock_shared() };
+        drop(guard);
+    }
+
+    #[test]
     fn raw_rwlock_shares_through_the_trait() {
         let raw = RawRwLock::<Host>::new();
         raw.lock_shared();

@@ -118,6 +118,11 @@ impl<P: Platform> RawRwLock<P> {
     #[cold]
     fn read_slow(&self) {
         while !self.read_fast() && !self.queue(READ) {}
+        // A handoff counts the reader in before it wakes it.
+        debug_assert!(
+            self.is_held_shared(),
+            "rwlock handed to a reader its word does not count",
+        );
     }
 
     /// Takes the lock shared if no writer holds it and no thread waits for
@@ -146,6 +151,11 @@ impl<P: Platform> RawRwLock<P> {
     /// Releases a shared hold; the last reader out hands the lock off.
     /// Never sleeps.
     ///
+    /// # Panics
+    ///
+    /// In debug builds, if the running thread does not hold the lock
+    /// shared, or the lock's word counts no reader.
+    ///
     /// # Safety
     ///
     /// The running thread holds the lock shared: it took it with
@@ -153,8 +163,12 @@ impl<P: Platform> RawRwLock<P> {
     /// [`Self::downgrade`], and has not unlocked it since.
     pub unsafe fn unlock_read(&self) {
         #[cfg(debug_assertions)]
-        checker::release::<P>(self.addr());
+        checker::release::<P>(self.addr(), checker::Kind::Read);
         let state = self.state.fetch_sub(ONE_READER, Ordering::Release);
+        debug_assert!(
+            state & WRITER == 0 && state & HOLDERS != 0,
+            "shared unlock of a lock whose word counts no reader",
+        );
         if state & HOLDERS == ONE_READER && state & CONTESTED != 0 {
             // Orders every reader's hold before the next holder's, which
             // takes the lock from this thread alone.
@@ -192,6 +206,11 @@ impl<P: Platform> RawRwLock<P> {
     #[cold]
     fn write_slow(&self) {
         while !self.write_fast() && !self.queue(WRITE) {}
+        // A handoff writes the writer in before it wakes it.
+        debug_assert!(
+            self.is_held_by_current_writer(),
+            "rwlock handed to a writer its word does not name",
+        );
     }
 
     /// Marks the lock contested and parks the running thread on it, and
@@ -246,6 +265,11 @@ impl<P: Platform> RawRwLock<P> {
 
     /// Releases an exclusive hold and hands the lock off; never sleeps.
     ///
+    /// # Panics
+    ///
+    /// In debug builds, if the running thread does not hold the lock
+    /// exclusive, or the lock's word does not name it as the writer.
+    ///
     /// # Safety
     ///
     /// The running thread holds the lock exclusive: it took it with
@@ -253,17 +277,19 @@ impl<P: Platform> RawRwLock<P> {
     /// unlocked or downgraded it since.
     pub unsafe fn unlock_write(&self) {
         #[cfg(debug_assertions)]
-        checker::release::<P>(self.addr());
-        if self
-            .state
-            .compare_exchange(
-                P::current().addr() | WRITER,
-                0,
-                Ordering::Release,
-                Ordering::Relaxed,
-            )
-            .is_err()
-        {
+        checker::release::<P>(self.addr(), checker::Kind::Write);
+        let writer = P::current().addr() | WRITER;
+        if let Err(state) = self.state.compare_exchange(
+            writer,
+            0,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            debug_assert!(
+                state == writer | CONTESTED,
+                "exclusive unlock of a lock whose word does not name the \
+                 running thread as its writer",
+            );
             self.hand_off();
         }
     }
@@ -279,16 +305,18 @@ impl<P: Platform> RawRwLock<P> {
     pub unsafe fn downgrade(&self) {
         #[cfg(debug_assertions)]
         checker::downgrade::<P>(self.addr());
-        if self
-            .state
-            .compare_exchange(
-                P::current().addr() | WRITER,
-                ONE_READER,
-                Ordering::Release,
-                Ordering::Relaxed,
-            )
-            .is_err()
-        {
+        let writer = P::current().addr() | WRITER;
+        if let Err(state) = self.state.compare_exchange(
+            writer,
+            ONE_READER,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            debug_assert!(
+                state == writer | CONTESTED,
+                "downgrade of a lock whose word does not name the running \
+                 thread as its writer",
+            );
             self.downgrade_slow();
         }
     }
@@ -312,6 +340,18 @@ impl<P: Platform> RawRwLock<P> {
     #[must_use]
     pub fn is_locked(&self) -> bool {
         self.state.load(Ordering::Relaxed) & HOLDERS != 0
+    }
+
+    /// Returns whether the word counts a reader and names no writer.
+    fn is_held_shared(&self) -> bool {
+        let state = self.state.load(Ordering::Relaxed);
+        state & WRITER == 0 && state & HOLDERS != 0
+    }
+
+    /// Returns whether the word names the running thread as the writer.
+    fn is_held_by_current_writer(&self) -> bool {
+        self.state.load(Ordering::Relaxed) & !CONTESTED
+            == P::current().addr() | WRITER
     }
 
     /// Hands the released, contested lock to its top waiter: a writer
@@ -900,6 +940,81 @@ mod tests {
         let raw = RawRwLock::<Host>::new();
         raw.write();
         raw.assert_held_shared();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "shared unlock of a lock whose word counts no reader"]
+    fn shared_unlock_of_a_word_with_no_reader_panics() {
+        let raw = RawRwLock::<Host>::new();
+        raw.read();
+        raw.state.store(0, Ordering::Relaxed);
+        // SAFETY: none; the debug check is expected to catch it.
+        unsafe { raw.unlock_read() };
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "shared unlock of a lock whose word counts no reader"]
+    fn shared_unlock_of_a_word_with_a_writer_panics() {
+        let raw = RawRwLock::<Host>::new();
+        raw.read();
+        raw.state
+            .store(super::WRITER | super::ONE_READER, Ordering::Relaxed);
+        // SAFETY: none; the debug check is expected to catch it.
+        unsafe { raw.unlock_read() };
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "exclusive unlock of a lock whose word does not name"]
+    fn exclusive_unlock_of_a_word_that_is_not_the_writers_panics() {
+        let raw = RawRwLock::<Host>::new();
+        raw.write();
+        raw.state.store(0, Ordering::Relaxed);
+        // SAFETY: none; the debug check is expected to catch it.
+        unsafe { raw.unlock_write() };
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "downgrade of a lock whose word does not name"]
+    fn downgrade_of_a_word_that_is_not_the_writers_panics() {
+        let raw = RawRwLock::<Host>::new();
+        raw.write();
+        raw.state.store(0, Ordering::Relaxed);
+        // SAFETY: none; the debug check is expected to catch it.
+        unsafe { raw.downgrade() };
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "rwlock handed to a reader its word does not count"]
+    fn reader_woken_with_no_handoff_panics() {
+        use crate::test_support::{resume_panic_of, wake_without_handoff};
+
+        let lock = RwLock::<(), Host>::new(());
+        thread::scope(|scope| {
+            let _write = lock.write();
+            let (_, reader) = spawn_parked(scope, || drop(lock.read()));
+            wake_without_handoff(lock.raw().addr().addr());
+            resume_panic_of(reader);
+        });
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic = "rwlock handed to a writer its word does not name"]
+    fn writer_woken_with_no_handoff_panics() {
+        use crate::test_support::{resume_panic_of, wake_without_handoff};
+
+        let lock = RwLock::<(), Host>::new(());
+        thread::scope(|scope| {
+            let _read = lock.read();
+            let (_, writer) = spawn_parked(scope, || drop(lock.write()));
+            wake_without_handoff(lock.raw().addr().addr());
+            resume_panic_of(writer);
+        });
     }
 
     #[test]

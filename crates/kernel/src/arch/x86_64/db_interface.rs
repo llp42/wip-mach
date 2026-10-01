@@ -9,7 +9,7 @@
 
 use crate::arch::types::VmOffset;
 use crate::arch::vm_param::VM_MAX_USER_ADDRESS;
-use crate::arch::x86_64::pcb::{I386DebugState, I386SavedState, Pcb};
+use crate::arch::x86_64::pcb::{I386DebugState, Pcb};
 use crate::arch::x86_64::per_cpu;
 use crate::kern::types::KernError;
 use core::arch::asm;
@@ -21,13 +21,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// only skips redundant register writes and no other thread synchronizes on
 /// it.
 static ZERO_DR: AtomicBool = AtomicBool::new(false);
-
-/// `ddb_regs` of <`i386/db_machdep.h>`: the register state the debugger reads
-/// through `DDB_REGS`.
-pub static mut DDB_REGS: I386SavedState =
-    // SAFETY: every field is an integer or an array of them, so the all-zero
-    // pattern is a valid `I386SavedState`.
-    unsafe { core::mem::zeroed() };
 
 /// The C's `set_dr0()` of <`i386/proc_reg.h`>.
 fn set_dr0(value: c_ulong) {

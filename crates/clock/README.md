@@ -217,9 +217,8 @@ Scheme 6 pays that a bounded table would not.
 
 Debug builds keep `Stats` — records armed now, the peak, and a
 histogram of intervals — to size the wheel against a real workload.
-The workspace's `dev` profile turns debug assertions off; enable them
-for this crate alone with `[profile.dev.package.clock]
-debug-assertions = true`.
+The workspace's `dev` profile builds with debug assertions, so the
+kernel's `dev` build keeps them; `release` does not.
 
 ### Why Scheme 6
 

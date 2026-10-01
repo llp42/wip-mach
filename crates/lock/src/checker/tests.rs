@@ -240,6 +240,24 @@ fn rwlock_write_downgraded_then_released_passes() {
 }
 
 #[test]
+#[should_panic = "release of a lock this thread does not hold as Read"]
+fn raw_read_unlock_of_a_write_hold_panics() {
+    let rwlock = RawRwLock::<Host>::new();
+    rwlock.write();
+    // SAFETY: none; the checker is expected to catch the broken contract.
+    unsafe { rwlock.unlock_read() };
+}
+
+#[test]
+#[should_panic = "release of a lock this thread does not hold as Write"]
+fn raw_write_unlock_of_a_read_hold_panics() {
+    let rwlock = RawRwLock::<Host>::new();
+    rwlock.read();
+    // SAFETY: none; the checker is expected to catch the broken contract.
+    unsafe { rwlock.unlock_write() };
+}
+
+#[test]
 #[should_panic = "downgrade of a lock this thread does not hold as Write"]
 fn raw_downgrade_of_a_read_hold_panics() {
     let rwlock = RawRwLock::<Host>::new();
@@ -306,7 +324,7 @@ fn class_table_overflow_panics() {
 /// Builds a lock of each of 33 classes: every `s!()` is a construction
 /// site of its own.
 #[rustfmt::skip]
-fn locks_of_33_classes() -> [SpinLock<(), Host>; 33] {
+const fn locks_of_33_classes() -> [SpinLock<(), Host>; 33] {
     macro_rules! s {
         () => { SpinLock::<(), Host>::new(()) };
     }

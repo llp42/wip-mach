@@ -15,7 +15,8 @@ use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_START;
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
 use crate::kern::lock::SimpleLock;
-use crate::kern::mach_clock;
+use crate::kern::machine;
+use crate::kern::host_time;
 use crate::utils::cell::SyncCell;
 use crate::vm::vm_kern::KERNEL_MAP;
 use crate::vm::vm_kern::{self, VM_MIN_KERNEL_ADDRESS};
@@ -1712,11 +1713,11 @@ fn kalloc_name(mut value: usize) -> [u8; KMEM_CACHE_NAME_SIZE] {
 pub(crate) fn slab_collect() {
     // SAFETY: `elapsed_ticks` is the live clock global, an `unsigned long`
     // the C kept in the target's `usize`.
-    let now = unsafe { mach_clock::elapsed_ticks() };
+    let now = host_time::elapsed_ticks();
     // The C read `hz` for `KMEM_GC_INTERVAL`, an `int` that is positive
     // after the probe sets it.
     let interval =
-        usize::try_from(mach_clock::CLOCK_HZ).unwrap_or(0) * KMEM_GC_TICKS;
+        usize::try_from(machine::CLOCK_HZ).unwrap_or(0) * KMEM_GC_TICKS;
 
     if now
         <= KMEM_GC_LAST_TICK

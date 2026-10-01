@@ -6,6 +6,7 @@
 //! The wait/wake and run-queue scheduler primitives, which `kern/sched_prim.c`
 //! used to define and `kern/sched_prim.h` declares.
 
+use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
 use crate::arch::x86_64::model_dep::machine_idle;
 use crate::arch::x86_64::pcb::{stack_handoff, switch_context};
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
@@ -14,7 +15,6 @@ use crate::kern::ast::{self, AstReason};
 use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
 use crate::kern::lock::SimpleLock;
-use crate::kern::mach_clock::{self, reset_timeout_check};
 use crate::kern::mach_factor;
 use crate::kern::machine;
 use crate::kern::policy::{POLICY_FIXEDPRI, POLICY_TIMESHARE};
@@ -96,9 +96,10 @@ static MIN_QUANTUM_TICKS: AtomicI32 = AtomicI32::new(0);
 /// `recompute_priorities()` wakes.
 static SCHED_THREAD_ID: AtomicPtr<Thread> = AtomicPtr::new(ptr::null_mut());
 
-/// `recompute_priorities_timer` of `kern/sched_prim.c`.
-static RECOMPUTE_PRIORITIES_TIMER: SyncCell<mach_clock::Timeout> =
-    SyncCell(UnsafeCell::new(mach_clock::Timeout::unlinked()));
+/// `recompute_priorities_timer` of `kern/sched_prim.c`: a leaked static
+/// callout, never dropped.
+static RECOMPUTE_PRIORITIES_TIMER: MachCallout =
+    MachCallout::new(wheel(), recompute_priorities_action, ());
 
 /// `wait_queue[NUMQUEUES]` of `kern/sched_prim.c`: one bucket per hash value.
 static WAIT_QUEUE: SyncCell<[ThreadQueue; NUMQUEUES]> =
@@ -311,11 +312,6 @@ fn wait_lock(index: usize) -> &'static SimpleLock {
     &WAIT_LOCK[index]
 }
 
-/// The timer element `init()` arms.
-fn recompute_timer() -> *mut mach_clock::Timeout {
-    RECOMPUTE_PRIORITIES_TIMER.0.get()
-}
-
 /// The `state_panic()` macro of `kern/sched_prim.c`: a thread state the
 /// scheduler cannot classify is fatal, with the C message.
 fn state_panic(thread: *mut Thread) -> ! {
@@ -347,14 +343,7 @@ fn state_panic(thread: *mut Thread) -> ! {
 /// `kern/startup.c` calls this once during the boot, before any other CPU or
 /// thread can reach the scheduler.
 pub(crate) unsafe fn sched_init() {
-    unsafe {
-        let timer = recompute_timer();
-        (*timer).fcn = Some(recompute_priorities);
-        (*timer).param = ptr::null_mut();
-        (*timer).set = 0;
-    }
-
-    MIN_QUANTUM_TICKS.store(mach_clock::CLOCK_HZ / 33, Ordering::Relaxed);
+    MIN_QUANTUM_TICKS.store(machine::CLOCK_HZ / 33, Ordering::Relaxed);
 
     // SAFETY: the processor module owns the processor sets and the machine
     // module the action globals, and this is the boot step that builds them.
@@ -527,35 +516,15 @@ fn setrun(th: *mut Thread, may_preempt: bool) {
     }
 }
 
-/// `thread_timeout_setup()` of `kern/sched_prim.c`.
+/// `thread_timeout_setup()` of `kern/sched_prim.c`: the callouts carry
+/// their actions in the [`Thread::new`] image, so this is only the C
+/// shape kept for the create path.
 ///
 /// # Safety
 ///
 /// `thread` must be a live, freshly created thread that no other CPU can see
 /// yet, as in C.
-pub(crate) unsafe fn thread_timeout_setup(thread: *mut Thread) {
-    unsafe {
-        (*thread).timer.fcn = Some(thread_timeout);
-        (*thread).timer.param = thread.cast::<c_void>();
-        (*thread).timer.set = 0;
-        (*thread).depress_timer.fcn =
-            Some(crate::kern::syscall_subr::depress_timeout);
-        (*thread).depress_timer.param = thread.cast::<c_void>();
-        (*thread).depress_timer.set = 0;
-    }
-}
-
-/// `thread_timeout()` of `kern/sched_prim.c`.
-///
-/// # Safety
-///
-/// `thread` must be a live `thread_t` the timer subsystem owns until the
-/// timeout fires; C passes the value stored in `timer.param`.
-pub(crate) unsafe fn thread_timeout(thread: *mut c_void) {
-    unsafe {
-        clear_wait(thread.cast::<Thread>(), THREAD_TIMED_OUT, 0);
-    }
-}
+pub(crate) unsafe fn thread_timeout_setup(_thread: *mut Thread) {}
 
 /// `assert_wait()` of `kern/sched_prim.c`.
 ///
@@ -657,7 +626,10 @@ pub(crate) unsafe fn clear_wait(
 
         if event.is_null() {
             let state = (*thread).state();
-            reset_timeout_check(&raw mut (*thread).timer);
+            // SAFETY: `thread` is live; the sleeper owns its timeout
+            // (ADR 0028) but `clear_wait` is the C's cancel point until
+            // the resume path stops it.
+            Thread::stop_timer(thread);
             match state & TH_SCHED_STATE {
                 TH_WAIT | TH_WAIT_UNINT | TH_WAIT_SUSP_UNINT => {
                     (*thread).set_state((state & !TH_WAIT) | TH_RUN);
@@ -721,7 +693,8 @@ pub(crate) unsafe fn thread_wakeup_prim(
                 (*current).lock.lock();
                 pin_queue(q).remove_ptr(NonNull::new_unchecked(current));
                 (*current).wait_event = ptr::null_mut();
-                reset_timeout_check(&raw mut (*current).timer);
+                // SAFETY: `current` is the live current thread.
+                Thread::stop_timer(current);
 
                 let state = (*current).state();
                 match state & TH_SCHED_STATE {
@@ -1754,9 +1727,15 @@ pub(crate) unsafe fn thread_set_timeout(t: c_int) {
     unsafe {
         (*thread).lock.lock();
         if (*thread).state() & TH_WAIT != 0 {
-            // The C passes the `int` to an `unsigned` parameter, so a negative
-            // interval wraps; the cast is that conversion.
-            mach_clock::set_timeout(&raw mut (*thread).timer, t as c_uint);
+            // A negative interval is a long wait, as the C `unsigned` cast
+            // spelled; `Ticks` is 64-bit so it does not wrap.
+            let ticks = if t < 0 {
+                clock::Ticks::new(u64::from(t as c_uint))
+            } else {
+                clock::Ticks::new(t as u64)
+            };
+            // SAFETY: `thread` is the current thread and will not move.
+            Thread::start_timer(thread, ticks);
         }
         (*thread).lock.unlock();
         spl::splx(s);
@@ -1833,25 +1812,20 @@ pub(crate) unsafe fn compute_my_priority(thread: *mut Thread) {
     unsafe { (*thread).sched_pri = priority_computation(thread) };
 }
 
-/// `recompute_priorities()` of `kern/sched_prim.c`.
-///
-/// # Safety
-///
-/// Called by the timeout machinery at splsoftclock, and once at boot; `param`
-/// is unused, as in C.
-pub(crate) unsafe fn recompute_priorities(_param: *mut c_void) {
+/// The expiry of [`RECOMPUTE_PRIORITIES_TIMER`], which re-arms itself.
+fn recompute_priorities_action(callout: Pin<&MachCallout>) {
     SCHED_TICK.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: the clock lock inside `set_timeout()` serializes against the
-    // clock interrupt, exactly as the C call's did; the scheduler thread may
-    // be waiting.
-    unsafe {
-        mach_clock::set_timeout(
-            recompute_timer(),
-            mach_clock::CLOCK_HZ as c_uint,
-        );
-        let thread = SCHED_THREAD_ID.load(Ordering::Acquire);
-        if !thread.is_null() {
-            clear_wait(thread, THREAD_AWAKENED, 0);
-        }
+    // A periodic 1 Hz scheduler timer (ADR 0042 allows re-arm from the action).
+    callout.start(clock::Ticks::new(machine::CLOCK_HZ as u64));
+    let thread = SCHED_THREAD_ID.load(Ordering::Acquire);
+    if !thread.is_null() {
+        // SAFETY: `thread` is the live scheduler thread the scan armed.
+        unsafe { clear_wait(thread, THREAD_AWAKENED, 0) };
     }
+}
+
+/// `recompute_priorities()` of `kern/sched_prim.c`: arm the periodic scan.
+pub(crate) fn recompute_priorities_start() {
+    Pin::static_ref(&RECOMPUTE_PRIORITIES_TIMER)
+        .start(clock::Ticks::new(machine::CLOCK_HZ as u64));
 }

@@ -169,7 +169,29 @@ Debug builds check every acquisition:
 - no second lock of a class while the thread holds one, `try_*` included
   ([ADR 0036](../../docs/adr/0036-a-thread-holds-at-most-one-lock-of-a-class.md)), so no
   taking a lock the thread already holds, reads included;
-- no releasing a lock the thread does not hold.
+- no releasing a lock the thread does not hold, or holds in another mode:
+  a read unlock of a write hold, or the reverse.
+
+## What else debug builds check
+
+Beside the order checker, each unsafe path checks the lock's own word,
+so a corrupt word or a broken handoff stops at its source:
+
+- **Unlock:** a `Mutex` word must name the running thread, with at most
+  the contested flag; a `RwLock` word must count a reader and no writer
+  for a shared unlock, and name the running thread as writer for an
+  exclusive unlock or a downgrade; a ticket lock must not be free.
+- **Handoff:** a thread that a release woke must find the word naming
+  it: as owner of a `Mutex`, as writer or counted reader of a `RwLock`.
+  A queued waiter must not already be woken.
+- **Guards:** a guard checks that the running thread holds its lock when
+  it is made, when it hands out `&mut`, and when it unlocks; `&` access
+  is unchecked, since a `Sync` guard may be read from another thread.
+- **Wait table:** a bucket's queue is reached only with the bucket lock
+  held, and an unwinding waiter must be on the queue it leaves.
+- **Bounds:** a ticket lock refuses the 65535th thread to hold or wait
+  for it, which the word could not tell from a free lock; a lock word
+  read as an owner must be aligned like a thread.
 
 ## What is not here, and why
 

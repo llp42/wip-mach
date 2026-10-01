@@ -246,11 +246,12 @@ pub(crate) fn assert_held<P: Platform>(lock: *const (), kind: Kind) {
 ///
 /// # Panics
 ///
-/// Panics if the running thread does not hold `lock`.
-pub(crate) fn release<P: Platform>(lock: *const ()) {
+/// Panics if the running thread does not hold `lock` as `kind`: a read
+/// release of a write hold would otherwise corrupt the lock's word.
+pub(crate) fn release<P: Platform>(lock: *const (), kind: Kind) {
     assert!(
-        P::held_locks().remove(lock.addr()),
-        "release of a lock this thread does not hold",
+        P::held_locks().remove(lock.addr(), kind),
+        "release of a lock this thread does not hold as {kind:?}",
     );
 }
 

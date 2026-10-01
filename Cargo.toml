@@ -10,15 +10,17 @@ authors = ["Leonardo Lopes Pereira <leonardolopespereira@outlook.com>"]
 license = "GPL-2.0-or-later"
 repository = "https://github.com/llp42/wip-mach"
 
+# The everyday build.  Debug assertions and overflow checks are on, so a
+# `debug_assert!` runs in a booted kernel and in host tests alike (ADR 0022).
 [profile.dev]
 opt-level = 2
-# Line tables only: full DWARF weighs the kernel image down and boots the
-# ABI suite at about 45 s, over the 33-43 s benchmark window.
+# Line tables only: full DWARF weighs the kernel image down.
 debug = "line-tables-only"
-debug-assertions = false
-overflow-checks = false
+debug-assertions = true
+overflow-checks = true
 panic = "abort"
 
+# What runs the Hurd, and what the benchmarks time: the checks are off.
 [profile.release]
 panic = "abort"
 lto = true
@@ -27,10 +29,3 @@ lto = true
 # time; they compare structures relative to each other, so they skip it.
 [profile.bench]
 lto = false
-
-# Host unit tests of the portable modules; `test` inherits `dev`, whose
-# checks are off for the kernel's boot-time budget.  Cargo forces
-# `panic=unwind` on test targets, so the `dev` setting does not carry over.
-[profile.test]
-debug-assertions = true
-overflow-checks = true
