@@ -14,9 +14,9 @@ use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_END;
 use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_START;
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
+use crate::kern::host_time;
 use crate::kern::lock::SimpleLock;
 use crate::kern::machine;
-use crate::kern::host_time;
 use crate::utils::cell::SyncCell;
 use crate::vm::vm_kern::KERNEL_MAP;
 use crate::vm::vm_kern::{self, VM_MIN_KERNEL_ADDRESS};
@@ -24,13 +24,12 @@ use crate::vm::vm_map::VmMap;
 use crate::vm::vm_map::round_page;
 use crate::vm::vm_page;
 use crate::vm::vm_resident::{self, VM_PAGE_DIRECTMAP};
-use collections::rb_tree::{self, RbTree};
 use collections::simple_queue::{self, SimpleQueue};
 use collections::tail_queue::{self, TailQueue};
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_ulong, c_void};
 use core::mem::{align_of, offset_of, size_of};
-use core::ops::{self, Bound};
+use core::ops;
 use core::pin::{Pin, pin};
 use core::ptr::{self, NonNull, addr_of_mut, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -122,9 +121,9 @@ impl CacheFlags {
     const PHYSMEM: Self = Self(0x02);
     /// `KMEM_CF_DIRECT`.
     const DIRECT: Self = Self(0x04);
-    /// `KMEM_CF_USE_TREE`.
-    const USE_TREE: Self = Self(0x08);
-    /// `KMEM_CF_USE_PAGE`.
+    /// `KMEM_CF_USE_PAGE`: every page of a slab carries the slab in its
+    /// `priv_` field (see [`tag_pages`]).  Bit 0x08 is reserved:
+    /// `host_slab_info()` reports `flags`, so the other values do not move.
     const USE_PAGE: Self = Self(0x10);
     /// `KMEM_CF_VERIFY`.
     const VERIFY: Self = Self(0x20);
@@ -188,28 +187,20 @@ const _: () = {
 pub(crate) struct KmemSlab {
     cache: *mut KmemCache,
     list_node: tail_queue::Link,
-    tree_node: rb_tree::Link,
     nr_refs: c_ulong,
     first_free: *mut KmemBufctl,
     addr: *mut u8,
 }
 
 const _: () = {
-    assert!(size_of::<KmemSlab>() == 72);
+    assert!(size_of::<KmemSlab>() == 48);
     assert!(align_of::<KmemSlab>() == 8);
     assert!(offset_of!(KmemSlab, cache) == 0);
     assert!(offset_of!(KmemSlab, list_node) == 8);
-    assert!(offset_of!(KmemSlab, tree_node) == 24);
-    assert!(offset_of!(KmemSlab, nr_refs) == 48);
-    assert!(offset_of!(KmemSlab, first_free) == 56);
-    assert!(offset_of!(KmemSlab, addr) == 64);
+    assert!(offset_of!(KmemSlab, nr_refs) == 24);
+    assert!(offset_of!(KmemSlab, first_free) == 32);
+    assert!(offset_of!(KmemSlab, addr) == 40);
 };
-
-rb_tree::adapter!(
-    /// The adapter for a slab's `tree_node` in [`KmemCache::active_slabs`],
-    /// keyed by the slab's buffer base.
-    pub(crate) KmemSlabTreeAdapter = KmemSlab { tree_node } key(VmOffset) = |slab| slab.addr.addr()
-);
 
 tail_queue::adapter!(
     /// The adapter for a slab's `list_node` in the free, partial and dead
@@ -230,13 +221,10 @@ type SlabList = TailQueue<'static, KmemSlabListAdapter>;
 type CacheList = SimpleQueue<'static, KmemCacheListAdapter>;
 
 // The links and heads have the sizes the offsets above and below rely on.
-const _: () = assert!(size_of::<rb_tree::Link>() == 24);
-const _: () = assert!(align_of::<rb_tree::Link>() == 8);
 const _: () = assert!(size_of::<tail_queue::Link>() == 16);
 const _: () = assert!(size_of::<simple_queue::Link>() == 8);
 const _: () = assert!(size_of::<SlabList>() == 16);
 const _: () = assert!(size_of::<CacheList>() == 16);
-const _: () = assert!(size_of::<RbTree<'static, KmemSlabTreeAdapter>>() == 24);
 
 /// The constructor a cache may hold; `kmem_cache_ctor_t` of <kern/slab.h>.
 ///
@@ -248,9 +236,6 @@ pub type KmemCacheCtor = Option<unsafe fn(*mut c_void)>;
 /// `struct kmem_cache` of <kern/slab.h>: a cache of objects.
 ///
 /// The record is `__cacheline_aligned` (`1 << CPU_L1_SHIFT`, 64 bytes).
-/// Field order is ours; `active_slabs` is a three-word `rb_tree` head
-/// (ADR 0051), so `flags` and `bufctl_dist` sit past offset 64.  See
-/// DEBT for putting the hot fields back in line 0.
 #[repr(C, align(64))]
 #[allow(missing_docs)]
 pub struct KmemCache {
@@ -258,7 +243,6 @@ pub struct KmemCache {
     node: simple_queue::Link,
     partial_slabs: SlabList,
     free_slabs: SlabList,
-    active_slabs: RbTree<'static, KmemSlabTreeAdapter>,
     flags: CacheFlags,
     bufctl_dist: usize,
     slab_size: usize,
@@ -285,24 +269,23 @@ const _: () = {
     assert!(offset_of!(KmemCache, node) == 8);
     assert!(offset_of!(KmemCache, partial_slabs) == 16);
     assert!(offset_of!(KmemCache, free_slabs) == 32);
-    assert!(offset_of!(KmemCache, active_slabs) == 48);
-    assert!(offset_of!(KmemCache, flags) == 72);
-    assert!(offset_of!(KmemCache, bufctl_dist) == 80);
-    assert!(offset_of!(KmemCache, slab_size) == 88);
-    assert!(offset_of!(KmemCache, bufs_per_slab) == 96);
-    assert!(offset_of!(KmemCache, nr_objs) == 104);
-    assert!(offset_of!(KmemCache, nr_free_slabs) == 112);
-    assert!(offset_of!(KmemCache, ctor) == 120);
-    assert!(offset_of!(KmemCache, obj_size) == 128);
-    assert!(offset_of!(KmemCache, align) == 136);
-    assert!(offset_of!(KmemCache, buf_size) == 144);
-    assert!(offset_of!(KmemCache, color) == 152);
-    assert!(offset_of!(KmemCache, color_max) == 160);
-    assert!(offset_of!(KmemCache, nr_bufs) == 168);
-    assert!(offset_of!(KmemCache, nr_slabs) == 176);
-    assert!(offset_of!(KmemCache, name) == 184);
-    assert!(offset_of!(KmemCache, buftag_dist) == 208);
-    assert!(offset_of!(KmemCache, redzone_pad) == 216);
+    assert!(offset_of!(KmemCache, flags) == 48);
+    assert!(offset_of!(KmemCache, bufctl_dist) == 56);
+    assert!(offset_of!(KmemCache, slab_size) == 64);
+    assert!(offset_of!(KmemCache, bufs_per_slab) == 72);
+    assert!(offset_of!(KmemCache, nr_objs) == 80);
+    assert!(offset_of!(KmemCache, nr_free_slabs) == 88);
+    assert!(offset_of!(KmemCache, ctor) == 96);
+    assert!(offset_of!(KmemCache, obj_size) == 104);
+    assert!(offset_of!(KmemCache, align) == 112);
+    assert!(offset_of!(KmemCache, buf_size) == 120);
+    assert!(offset_of!(KmemCache, color) == 128);
+    assert!(offset_of!(KmemCache, color_max) == 136);
+    assert!(offset_of!(KmemCache, nr_bufs) == 144);
+    assert!(offset_of!(KmemCache, nr_slabs) == 152);
+    assert!(offset_of!(KmemCache, name) == 160);
+    assert!(offset_of!(KmemCache, buftag_dist) == 184);
+    assert!(offset_of!(KmemCache, redzone_pad) == 192);
 };
 
 /// `cache_info_t` of <`mach_debug/slab_info.h`>, the record `host_slab_info()`
@@ -423,7 +406,6 @@ impl KmemCache {
             node: simple_queue::Link::new(),
             partial_slabs: SlabList::new(),
             free_slabs: SlabList::new(),
-            active_slabs: RbTree::new(),
             flags: CacheFlags(0),
             bufctl_dist: 0,
             slab_size: 0,
@@ -466,7 +448,6 @@ impl KmemCache {
         // The C's `list_init()` calls: empty heads.
         self.partial_slabs = SlabList::new();
         self.free_slabs = SlabList::new();
-        self.active_slabs.clear();
         self.obj_size = obj_size;
         self.align = align;
         self.buf_size = buf_size;
@@ -565,20 +546,16 @@ impl KmemCache {
             }
         }
 
-        if self.flags.contains(CacheFlags::VERIFY) {
-            self.flags.insert(CacheFlags::USE_TREE);
-        }
-
-        if self.flags.contains(CacheFlags::SLAB_EXTERNAL) {
-            if self.flags.contains(CacheFlags::PHYSMEM) {
-                self.flags.insert(CacheFlags::USE_PAGE);
-            } else {
-                self.flags.insert(CacheFlags::USE_TREE);
-            }
-        } else if self.slab_size == PAGE_SIZE {
+        // An embedded one-page slab is found by address arithmetic.  Every
+        // other slab is found through its pages; a verify cache always
+        // is, since it must reject an address that is in no slab.
+        if !self.flags.contains(CacheFlags::SLAB_EXTERNAL)
+            && self.slab_size == PAGE_SIZE
+            && !self.flags.contains(CacheFlags::VERIFY)
+        {
             self.flags.insert(CacheFlags::DIRECT);
         } else {
-            self.flags.insert(CacheFlags::USE_TREE);
+            self.flags.insert(CacheFlags::USE_PAGE);
         }
     }
 
@@ -684,13 +661,6 @@ impl KmemCache {
             self.nr_free_slabs -= 1;
         }
 
-        if slab.nr_refs == 1 && self.flags.contains(CacheFlags::USE_TREE) {
-            // SAFETY: `Slab::create` left the tree node unlinked and keyed
-            // by this slab, and the cache lock keeps the slab live and
-            // unmoved while the tree links it.
-            unsafe { self.active_slabs.insert_ptr(slab_ref) };
-        }
-
         Some(self.buf_of(bufctl))
     }
 
@@ -747,6 +717,37 @@ impl KmemCache {
         self.lock.unlock();
     }
 
+    /// The slab holding the page of `addr`, read from the tag [`tag_pages`]
+    /// left on it.
+    ///
+    /// The tag is what lets an address anywhere in a slab, not only a buffer
+    /// start, find it.
+    ///
+    /// # Panics
+    ///
+    /// Halts through [`KmemCache::error`] as an invalid address when the page
+    /// has no descriptor, no tag, or a tag from another cache.
+    fn slab_of(&self, addr: *mut u8) -> NonNull<KmemSlab> {
+        let slab =
+            vm_page::lookup_pa(kvtophys(addr.addr())).and_then(|page| {
+                // SAFETY: the page is live, and the tag is null or a live slab:
+                // `tag_pages()` and `untag_pages()` are the only writers of
+                // `priv_` outside the page allocator, which clears it.
+                NonNull::new(
+                    unsafe { (*page.as_ptr()).priv_ }.cast::<KmemSlab>(),
+                )
+            });
+
+        // SAFETY: a tag names a slab that is live until `destroy()` clears
+        // it, and `cache` never changes after `create()`.
+        match slab {
+            Some(slab) if ptr::eq(unsafe { (*slab.as_ptr()).cache }, self) => {
+                slab
+            }
+            _ => self.error(addr, CacheError::Invalid, ptr::null_mut()),
+        }
+    }
+
     /// `kmem_cache_free_to_slab()` in C; the cache lock must be held.
     ///
     /// # Safety
@@ -757,23 +758,8 @@ impl KmemCache {
             // SAFETY: a direct-mapped slab sits at the end of the page range
             // containing the buffer.
             unsafe { slab_from_direct(buf, self.slab_size) }
-        } else if self.flags.contains(CacheFlags::USE_PAGE) {
-            let page = vm_page::lookup_pa(kvtophys(buf.as_ptr().addr()));
-            let Some(page) = page else {
-                self.error(buf.as_ptr(), CacheError::Invalid, ptr::null_mut());
-            };
-            // SAFETY: the page is live and this cache owns its private
-            // field.
-            unsafe { (*page.as_ptr()).priv_ }.cast::<KmemSlab>()
         } else {
-            let slab = self
-                .active_slabs
-                .upper_bound(Bound::Included(&buf.as_ptr().addr()))
-                .current_ptr();
-            let Some(slab) = slab else {
-                self.error(buf.as_ptr(), CacheError::Invalid, ptr::null_mut());
-            };
-            slab.as_ptr()
+            self.slab_of(buf.as_ptr()).as_ptr()
         };
 
         // SAFETY: the slab and the bufctl are live, and the cache lock
@@ -790,12 +776,6 @@ impl KmemCache {
         // serializes them.
         unsafe {
             if (*slab).nr_refs == 0 {
-                if self.flags.contains(CacheFlags::USE_TREE) {
-                    // SAFETY: the slab is linked in this tree, and the
-                    // cache lock keeps it live and unmoved.
-                    self.active_slabs.remove_ptr(NonNull::new_unchecked(slab));
-                }
-
                 if self.bufs_per_slab > 1 {
                     // SAFETY: with more than one buffer per slab, the last
                     // free leaves the slab in `partial_slabs`, and the
@@ -891,18 +871,11 @@ impl KmemCache {
     ///
     /// `buf` must be a live allocation from this verify cache.
     unsafe fn free_verify(&mut self, buf: NonNull<u8>) {
-        self.lock.lock();
-        let found = self
-            .active_slabs
-            .upper_bound(Bound::Included(&buf.as_ptr().addr()))
-            .current_ptr();
-        self.lock.unlock();
+        // The tag stays put while `buf` is a live buffer, so no lock is
+        // needed; an address that is in no slab of this cache is rejected.
+        let found = self.slab_of(buf.as_ptr());
 
-        let Some(found) = found else {
-            self.error(buf.as_ptr(), CacheError::Invalid, ptr::null_mut());
-        };
-
-        // SAFETY: the cursor named an active slab of this cache.
+        // SAFETY: `slab_of()` named a slab of this cache.
         let slab = unsafe { &*found.as_ptr() };
         let slabend =
             slab.addr.addr().wrapping_add(self.slab_size) & !(PAGE_SIZE - 1);
@@ -1068,20 +1041,6 @@ impl KmemSlab {
                 return None;
             };
 
-            if cache.flags.contains(CacheFlags::USE_PAGE) {
-                let page =
-                    vm_page::lookup_pa(kvtophys(slab_buf.as_ptr().addr()));
-                let Some(page) = page else {
-                    kpanic!(
-                        "kmem_slab_create",
-                        "kmem_slab_create: missing page"
-                    )
-                };
-                // SAFETY: the page is live and this cache owns its private
-                // field.
-                unsafe { (*page.as_ptr()).priv_ = external.as_ptr().cast() };
-            }
-
             external.cast::<Self>()
         } else {
             // SAFETY: the slab trailer fits the buffer, as
@@ -1101,10 +1060,6 @@ impl KmemSlab {
             ptr::write(
                 addr_of_mut!((*slab.as_ptr()).list_node),
                 tail_queue::Link::new(),
-            );
-            ptr::write(
-                addr_of_mut!((*slab.as_ptr()).tree_node),
-                rb_tree::Link::new(),
             );
             (*slab.as_ptr()).nr_refs = 0;
             (*slab.as_ptr()).first_free = ptr::null_mut();
@@ -1127,6 +1082,18 @@ impl KmemSlab {
         if cache.flags.contains(CacheFlags::VERIFY) {
             // SAFETY: the slab is fresh and complete.
             unsafe { Self::create_verify(slab, cache) };
+        }
+
+        if cache.flags.contains(CacheFlags::USE_PAGE) {
+            // SAFETY: the pages are the live allocation `pagealloc()` made,
+            // and nothing else tags them.
+            unsafe {
+                tag_pages(
+                    slab_buf.as_ptr().addr(),
+                    cache.slab_size,
+                    slab.as_ptr(),
+                );
+            };
         }
 
         Some(slab)
@@ -1167,14 +1134,13 @@ impl KmemSlab {
         let slab_buf =
             unsafe { (*slab.as_ptr()).addr.addr() } & !(PAGE_SIZE - 1);
 
-        if cache.flags.contains(CacheFlags::SLAB_EXTERNAL) {
-            if cache.flags.contains(CacheFlags::USE_PAGE)
-                && let Some(page) = vm_page::lookup_pa(kvtophys(slab_buf))
-            {
-                // SAFETY: the page is live, and the C cleared the field.
-                unsafe { (*page.as_ptr()).priv_ = ptr::null_mut() };
-            }
+        if cache.flags.contains(CacheFlags::USE_PAGE) {
+            // SAFETY: the pages are still mapped, so they can be named, and
+            // `pagefree()` below has not released them yet.
+            unsafe { untag_pages(slab_buf, cache.slab_size) };
+        }
 
+        if cache.flags.contains(CacheFlags::SLAB_EXTERNAL) {
             // SAFETY: the slab came from the off-slab cache.
             unsafe {
                 (*slab_cache())
@@ -1217,6 +1183,73 @@ impl KmemSlab {
             buftag = cache.buftag_of(buf);
         }
     }
+}
+
+/// Point the `priv_` field of every page of the slab buffer at `base` to
+/// `slab`.
+///
+/// Every page is tagged, not only the first, so an address anywhere in the
+/// slab finds it.  The slab's address lives in the page descriptor in place
+/// of a search structure, the buffer-to-slab method of FreeBSD's UMA
+/// allocator and of x15.
+///
+/// # Panics
+///
+/// Halts when a page of the range has no descriptor, or is already tagged:
+/// a stale tag means an earlier slab was not untagged.
+///
+/// # Safety
+///
+/// `base..base + size` must be a mapped, page-aligned range of slab pages
+/// that no other slab owns, and `slab` must be the slab that owns them.
+unsafe fn tag_pages(base: VmOffset, size: VmSize, slab: *mut KmemSlab) {
+    for addr in (base..base + size).step_by(PAGE_SIZE) {
+        let page = page_of(addr);
+
+        // SAFETY: the page is live, and the caller says this slab owns its
+        // private field.
+        unsafe {
+            if !(*page.as_ptr()).priv_.is_null() {
+                kpanic!("kmem_tag_pages", "slab: page already tagged");
+            }
+
+            (*page.as_ptr()).priv_ = slab.cast();
+        }
+    }
+}
+
+/// Clear the tag [`tag_pages`] left on every page of the slab buffer at
+/// `base`.
+///
+/// # Panics
+///
+/// Halts when a page of the range has no descriptor.
+///
+/// # Safety
+///
+/// `base..base + size` must be the mapped range [`tag_pages`] tagged, and
+/// the slab must be off every list with nothing holding it.
+unsafe fn untag_pages(base: VmOffset, size: VmSize) {
+    for addr in (base..base + size).step_by(PAGE_SIZE) {
+        let page = page_of(addr);
+
+        // SAFETY: the page is live, and the caller says its tag is this
+        // slab's.
+        unsafe { (*page.as_ptr()).priv_ = ptr::null_mut() };
+    }
+}
+
+/// The descriptor of the page mapped at `addr`.
+///
+/// # Panics
+///
+/// Halts when `addr` names no page.
+fn page_of(addr: VmOffset) -> NonNull<vm_page::VmPage> {
+    let Some(page) = vm_page::lookup_pa(kvtophys(addr)) else {
+        kpanic!("kmem_tag_pages", "slab: missing page");
+    };
+
+    page
 }
 
 /// The slab at the end of the `slab_size` block holding `buf`, the C's
