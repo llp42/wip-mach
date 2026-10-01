@@ -13,6 +13,38 @@
 > further analysis was done. The tag cost at create and destroy (P6) was
 > not measured in the kernel. The sections below are the analysis from
 > before that decision.
+>
+> **Outcome (2026-10-01, landed in `9534e12`):** `active_slabs` is gone;
+> every non-`DIRECT` slab tags all its pages through `vm_page.priv_`, the
+> FreeBSD UMA and x15 method. A release-profile user-space model (hot
+> cache, no TLB misses, not the kernel binary; three runs pinned to one
+> CPU under the `powersave` governor) gave:
+>
+> - **Tag lookup** (page walk plus `priv_` read): about 12.5 ns, flat up to
+>   a few hundred live buffers, 25 ns at 4096, 51 to 66 ns at 65536.
+> - **Tree path** (floor lookup, plus remove and insert per alloc/free
+>   pair of a one-buffer slab): 8.3 ns at 1 live buffer, 16 ns at 2, 24 ns
+>   at 4, 37 ns at 16, 88 ns at 4096, about 150 ns at 65536. The lookup
+>   alone is 6.9, 10.9 and 12.8 ns at 1, 2 and 4.
+> - **Break-even:** the tag loses only when a cache has about one live
+>   buffer (12.5 against 8.3 ns). It wins the pair from 2 and the lookup
+>   alone from 4.
+> - **Tag every page at create plus destroy:** 14 to 20 ns for 1 page, 63
+>   to 72 ns for 8, 202 to 269 ns for 32, noisy between runs.
+>
+> What the change bought besides speed: no tree edit under the cache lock
+> on the first allocation and last free of a slab, `free_verify` without
+> the lock and with interior addresses, `KmemSlab` 72 to 48 bytes, and
+> `flags` and `bufctl_dist` back in line 0 of `KmemCache` (that DEBT entry
+> closed). What it cost: a few nanoseconds per free in a near-idle cache,
+> and the tag loop at slab create and destroy. `vm_map` still uses
+> `collections::rb_tree`; only the slab stopped being a user.
+>
+> Boot check: the ABI suite passes 25 of 26 (`test-host-abi` fails the
+> same way without the change), and the multi-page tag path ran for
+> `kalloc_8192` and `i386_task_iopb`. Not measured: in-kernel cycles per
+> lookup and per tag loop, the creates and destroys per cache under real
+> load, lock hold time, and TLB-miss cost.
 
 Facts carry `path:line @ revision`. Statements that are my reading rather
 than a quote say "inference"; things I did not or could not reach say "not
