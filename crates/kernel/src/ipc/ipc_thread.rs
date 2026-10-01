@@ -48,7 +48,7 @@ impl ThreadRef {
     /// # Safety
     ///
     /// The thread must be valid.
-    unsafe fn next(self) -> Option<ThreadRef> {
+    unsafe fn next(self) -> Option<Self> {
         let thread = self.as_ptr().cast::<Thread>();
         NonNull::new(unsafe { (*thread).ith_next }.cast()).map(ThreadRef)
     }
@@ -58,7 +58,7 @@ impl ThreadRef {
     /// # Safety
     ///
     /// The thread must be valid.
-    unsafe fn prev(self) -> Option<ThreadRef> {
+    unsafe fn prev(self) -> Option<Self> {
         let thread = self.as_ptr().cast::<Thread>();
         NonNull::new(unsafe { (*thread).ith_prev }.cast()).map(ThreadRef)
     }
@@ -68,7 +68,7 @@ impl ThreadRef {
     /// # Safety
     ///
     /// The thread must be valid.
-    unsafe fn set_next(self, next: Option<ThreadRef>) {
+    unsafe fn set_next(self, next: Option<Self>) {
         let thread = self.as_ptr().cast::<Thread>();
         unsafe {
             (*thread).ith_next =
@@ -81,7 +81,7 @@ impl ThreadRef {
     /// # Safety
     ///
     /// The thread must be valid.
-    unsafe fn set_prev(self, prev: Option<ThreadRef>) {
+    unsafe fn set_prev(self, prev: Option<Self>) {
         let thread = self.as_ptr().cast::<Thread>();
         unsafe {
             (*thread).ith_prev =

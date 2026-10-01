@@ -84,7 +84,7 @@ pub(crate) unsafe fn depress_priority(
             // SAFETY: `thread` is live and will not move.
             Thread::start_depress_timer(
                 thread,
-                clock::Ticks::new(ticks as u64),
+                clock::Ticks::new(u64::from(ticks)),
             );
         }
 

@@ -524,7 +524,7 @@ fn setrun(th: *mut Thread, may_preempt: bool) {
 ///
 /// `thread` must be a live, freshly created thread that no other CPU can see
 /// yet, as in C.
-pub(crate) unsafe fn thread_timeout_setup(_thread: *mut Thread) {}
+pub(crate) const unsafe fn thread_timeout_setup(_thread: *mut Thread) {}
 
 /// `assert_wait()` of `kern/sched_prim.c`.
 ///

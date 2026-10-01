@@ -53,12 +53,13 @@ use crate::vm::vm_object_ffi::vm_object_deallocate;
 use crate::vm::vm_page;
 use crate::vm::vm_resident;
 use crate::vm::vm_resident::VM_PAGE_QUEUE_LOCK;
+use collections::rb_tree::{self, RbTree};
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::mem::{ManuallyDrop, offset_of, size_of};
+use core::ops::Bound;
 use core::ptr::{self, NonNull, addr_of_mut};
 use core::sync::atomic::{AtomicU32, Ordering};
-use intrusive_collections::{Bound, RBTree, RBTreeLink, UnsafeRef};
 
 /// `VM_MAP_COPY_PAGE_LIST_MAX`: pages a page-list copy carries inline.
 pub const VM_MAP_COPY_PAGE_LIST_MAX: usize = 64;
@@ -94,8 +95,8 @@ fn map_copy_cache() -> *mut KmemCache {
     VM_MAP_COPY_CACHE.0.get()
 }
 
-/// Pins a mirror to the C layout it replaces: size, alignment and the offsets
-/// of the fields C reads by name.
+/// Pins our layout: size, alignment and the offsets of the fields the
+/// rest of the file names.
 macro_rules! assert_layout {
     ($t:ty, $size:expr, $align:expr, { $($f:ident: $off:expr),* $(,)? }) => {
         const _: () = assert!(size_of::<$t>() == $size);
@@ -144,10 +145,10 @@ pub const VME_NEEDS_COPY: u32 = 1 << 5;
 pub struct VmMapEntry {
     pub links: VmMapLinks,
     /// Node in the address-ordered tree, `tree_node` in C.
-    pub tree_node: RBTreeLink,
+    pub tree_node: rb_tree::Link,
     /// Node in the gap-size tree, `gap_node` in C.  The tree allows
     /// duplicate keys, so it indexes every entry with a nonzero gap.
-    pub gap_node: RBTreeLink,
+    pub gap_node: rb_tree::Link,
     /// The gap after this entry, `gap_size` in C.
     pub gap_size: VmSize,
     /// The object or submap mapped, `object` in C.
@@ -174,61 +175,30 @@ assert_layout!(VmMapEntry, 136, 8, {
     wired_access: 124, projected_on: 128,
 });
 
-// The macro-emitted items stay undocumented (`NEW`, `new()`) and hand-roll
-// `Clone` on a `Copy` type, so the lints are off around the expansions.
-#[allow(missing_docs, clippy::expl_impl_clone_on_copy)]
-mod tree_adapters {
-    use super::{RBTreeLink, UnsafeRef, VmMapEntry, VmOffset, VmSize};
-    use intrusive_collections::KeyAdapter;
-    use intrusive_collections::intrusive_adapter;
+rb_tree::adapter!(
+    /// The adapter for an entry's `tree_node` in [`VmMapHeader::tree`],
+    /// keyed by the entry's first address.
+    ///
+    /// [`RbTree::upper_bound`] then returns the last entry at or before a
+    /// looked-up address, which `lookup_entry()` range-checks.
+    pub VmMapEntryTreeAdapter = VmMapEntry { tree_node } key(VmOffset) = |entry| entry.links.start
+);
 
-    intrusive_adapter!(
-        /// The adapter for an entry's `tree_node` in [`VmMapHeader::tree`],
-        /// keyed by the entry's first address.
-        ///
-        /// [`RBTree::upper_bound`] then returns the last entry at or before a
-        /// looked-up address, which `lookup_entry()` range-checks.
-        pub VmMapEntryTreeAdapter = UnsafeRef<VmMapEntry>: VmMapEntry {
-            tree_node => RBTreeLink
-        }
-    );
+rb_tree::adapter!(
+    /// The adapter for an entry's `gap_node` in [`VmMapHeader::gap_tree`],
+    /// keyed by gap size.
+    ///
+    /// The tree allows duplicate keys, so it holds one node per entry
+    /// with a nonzero gap.
+    pub VmMapEntryGapAdapter = VmMapEntry { gap_node } key(VmSize) = |entry| entry.gap_size
+);
 
-    impl<'a> KeyAdapter<'a> for VmMapEntryTreeAdapter {
-        type Key = VmOffset;
-
-        fn get_key(&self, value: &'a VmMapEntry) -> VmOffset {
-            value.links.start
-        }
-    }
-
-    intrusive_adapter!(
-        /// The adapter for an entry's `gap_node` in [`VmMapHeader::gap_tree`],
-        /// keyed by gap size.
-        ///
-        /// The tree allows duplicate keys, so it holds one node per entry
-        /// with a nonzero gap.
-        pub VmMapEntryGapAdapter = UnsafeRef<VmMapEntry>: VmMapEntry {
-            gap_node => RBTreeLink
-        }
-    );
-
-    impl<'a> KeyAdapter<'a> for VmMapEntryGapAdapter {
-        type Key = VmSize;
-
-        fn get_key(&self, value: &'a VmMapEntry) -> VmSize {
-            value.gap_size
-        }
-    }
-}
-
-pub use tree_adapters::{VmMapEntryGapAdapter, VmMapEntryTreeAdapter};
-
-// The links and trees stand in for the C `rbtree_node` and `rbtree` members,
-// so their sizes keep the mirrors above and below valid.
-const _: () = assert!(size_of::<RBTreeLink>() == 24);
-const _: () = assert!(align_of::<RBTreeLink>() == 8);
-const _: () = assert!(size_of::<RBTree<VmMapEntryTreeAdapter>>() == 8);
-const _: () = assert!(size_of::<RBTree<VmMapEntryGapAdapter>>() == 8);
+// The links are the sizes the entry offsets above and below rely on; the
+// tree heads are three words (ADR 0051).
+const _: () = assert!(size_of::<rb_tree::Link>() == 24);
+const _: () = assert!(align_of::<rb_tree::Link>() == 8);
+const _: () = assert!(size_of::<RbTree<'static, VmMapEntryTreeAdapter>>() == 24);
+const _: () = assert!(size_of::<RbTree<'static, VmMapEntryGapAdapter>>() == 24);
 
 /// The object-or-submap tag of an entry, `union vm_map_object`.
 #[repr(C)]
@@ -345,14 +315,14 @@ pub struct VmMapHeader {
     /// First, last and bounds of the entry chain.
     pub links: VmMapLinks,
     /// The address-ordered tree.
-    pub tree: RBTree<VmMapEntryTreeAdapter>,
+    pub tree: RbTree<'static, VmMapEntryTreeAdapter>,
     /// The gap-size tree.
-    pub gap_tree: RBTree<VmMapEntryGapAdapter>,
+    pub gap_tree: RbTree<'static, VmMapEntryGapAdapter>,
     pub nentries: c_int,
 }
 
-assert_layout!(VmMapHeader, 56, 8, {
-    links: 0, tree: 32, gap_tree: 40, nentries: 48,
+assert_layout!(VmMapHeader, 88, 8, {
+    links: 0, tree: 32, gap_tree: 56, nentries: 80,
 });
 
 impl VmMapHeader {
@@ -401,11 +371,11 @@ pub struct VmMap {
     pub size_max_limit: VmSize,
 }
 
-assert_layout!(VmMap, 168, 8, {
-    lock: 0, hdr: 16, pmap: 72, size: 80, size_wired: 88,
-    size_none: 96, ref_count: 104, ref_lock: 108, hint: 112,
-    hint_lock: 120, first_free: 128, flags: 136, timestamp: 140,
-    name: 144, size_cur_limit: 152, size_max_limit: 160,
+assert_layout!(VmMap, 200, 8, {
+    lock: 0, hdr: 16, pmap: 104, size: 112, size_wired: 120,
+    size_none: 128, ref_count: 136, ref_lock: 140, hint: 144,
+    hint_lock: 152, first_free: 160, flags: 168, timestamp: 172,
+    name: 176, size_cur_limit: 184, size_max_limit: 192,
 });
 
 impl VmMap {
@@ -421,8 +391,8 @@ impl VmMap {
                     start: 0,
                     end: 0,
                 },
-                tree: RBTree::new(VmMapEntryTreeAdapter::new()),
-                gap_tree: RBTree::new(VmMapEntryGapAdapter::new()),
+                tree: RbTree::new(),
+                gap_tree: RbTree::new(),
                 nentries: 0,
             },
             pmap: ptr::null_mut(),
@@ -629,7 +599,7 @@ impl VmMap {
         // after the floor lookup.
         let cursor = self.hdr.tree.upper_bound(Bound::Included(&address));
 
-        cursor.get_ptr().map_or_else(
+        cursor.current_ptr().map_or_else(
             || {
                 self.save_hint(sentinel);
                 (false, sentinel)
@@ -750,8 +720,8 @@ impl VmMap {
         map.hdr.links.prev = Some(sentinel);
         map.hdr.links.next = Some(sentinel);
         map.hdr.nentries = 0;
-        map.hdr.tree.fast_clear();
-        map.hdr.gap_tree.fast_clear();
+        map.hdr.tree.clear();
+        map.hdr.gap_tree.clear();
 
         map.size = 0;
         map.size_wired = 0;
@@ -1773,8 +1743,8 @@ impl VmMapCopy {
             (*header.as_ptr()).links.prev = Some(sentinel);
             (*header.as_ptr()).links.next = Some(sentinel);
             (*header.as_ptr()).nentries = 0;
-            (*header.as_ptr()).tree.fast_clear();
-            (*header.as_ptr()).gap_tree.fast_clear();
+            (*header.as_ptr()).tree.clear();
+            (*header.as_ptr()).gap_tree.clear();
         }
 
         copy
@@ -1903,11 +1873,11 @@ impl VmMapEntry {
         unsafe {
             ptr::write(
                 addr_of_mut!((*entry.as_ptr()).tree_node),
-                RBTreeLink::new(),
+                rb_tree::Link::new(),
             );
             ptr::write(
                 addr_of_mut!((*entry.as_ptr()).gap_node),
-                RBTreeLink::new(),
+                rb_tree::Link::new(),
             );
         }
         entry
@@ -1963,7 +1933,7 @@ impl VmMapHeader {
         // SAFETY: the map lock keeps the entry live and unmoved for as long
         // as the tree links it, and a re-insert always follows a remove.
         unsafe {
-            self.gap_tree.insert(UnsafeRef::from_raw(entry.as_ptr()));
+            self.gap_tree.insert_ptr(entry);
             (*entry.as_ptr()).set_in_gap_tree(true);
         }
     }
@@ -1983,11 +1953,9 @@ impl VmMapHeader {
         }
 
         // SAFETY: the entry is linked in this gap tree, and the map lock
-        // keeps it live for the cursor.
+        // keeps it live and unmoved.
         unsafe {
-            self.gap_tree
-                .cursor_mut_from_ptr(entry.as_ptr().cast_const())
-                .remove();
+            self.gap_tree.remove_ptr(entry);
             (*entry.as_ptr()).set_in_gap_tree(false);
         }
     }
@@ -2033,7 +2001,15 @@ impl VmMapHeader {
 
             // The tree node is unlinked caller storage, and the map lock
             // keeps the entry live and unmoved while the tree links it.
-            self.tree.insert(UnsafeRef::from_raw(entry.as_ptr()));
+            // The chain splice already proved `after` precedes `entry`
+            // and `entry` precedes `next`, so the address tree can take
+            // the predecessor as a hint.  The sentinel is not on the
+            // tree; a below-first insert is O(1) without one.
+            if self.is_sentinel(after) {
+                self.tree.insert_ptr(entry);
+            } else {
+                self.tree.insert_after_ptr(after, entry);
+            }
 
             if link_gap {
                 self.gap_insert(entry);
@@ -2156,7 +2132,7 @@ impl VmMap {
                 .hdr
                 .gap_tree
                 .lower_bound(Bound::Included(&max_size))
-                .get_ptr();
+                .current_ptr();
 
             let Some(mut entry) = found else {
                 if map_locked || !self.wait_for_space() {
@@ -2184,7 +2160,7 @@ impl VmMap {
                 .hdr
                 .gap_tree
                 .upper_bound(Bound::Included(&gap_size))
-                .get_ptr();
+                .current_ptr();
             if let Some(last) = last {
                 entry = last;
             }
@@ -2310,11 +2286,11 @@ impl VmMapEntry {
         unsafe {
             ptr::write(
                 addr_of_mut!((*dst.as_ptr()).tree_node),
-                RBTreeLink::new(),
+                rb_tree::Link::new(),
             );
             ptr::write(
                 addr_of_mut!((*dst.as_ptr()).gap_node),
-                RBTreeLink::new(),
+                rb_tree::Link::new(),
             );
         }
     }
@@ -2331,11 +2307,11 @@ impl VmMapEntry {
             // tree links of an unlinked `dst` start unlinked.
             ptr::write(
                 addr_of_mut!((*dst.as_ptr()).tree_node),
-                RBTreeLink::new(),
+                rb_tree::Link::new(),
             );
             ptr::write(
                 addr_of_mut!((*dst.as_ptr()).gap_node),
-                RBTreeLink::new(),
+                rb_tree::Link::new(),
             );
             (*dst.as_ptr()).set_shared(false);
             (*dst.as_ptr()).set_needs_wakeup(false);
@@ -2482,10 +2458,8 @@ impl VmMapHeader {
             }
 
             // SAFETY: the entry is linked in this tree, and the map lock
-            // keeps it live for the cursor.
-            self.tree
-                .cursor_mut_from_ptr(entry.as_ptr().cast_const())
-                .remove();
+            // keeps it live and unmoved.
+            self.tree.remove_ptr(entry);
 
             if unlink_gap {
                 self.gap_remove(entry);
@@ -3352,15 +3326,15 @@ impl VmMap {
 
     /// `vm_map_pageable_current()` in C.
     fn pageable_current(&mut self, access_type: VmProt) -> Result<(), Error> {
-        let Some(min) = self.hdr.tree.front().get_ptr() else {
+        let Some(min) = self.hdr.tree.front().map(NonNull::from) else {
             return Ok(());
         };
-        let Some(max) = self.hdr.tree.back().get_ptr() else {
+        let Some(max) = self.hdr.tree.back().map(NonNull::from) else {
             return Ok(());
         };
-        // SAFETY: the cursors named live entries of this map's entry tree.
+        // SAFETY: the tree named live entries of this map's entry tree.
         let min_address = unsafe { (*min.as_ptr()).links.start };
-        // SAFETY: `max` is live from the cursor above.
+        // SAFETY: `max` is live from the tree above.
         let max_address = unsafe { (*max.as_ptr()).links.end };
 
         self.pageable(min_address, max_address, access_type, false, false)

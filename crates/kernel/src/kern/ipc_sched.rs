@@ -24,7 +24,7 @@ use core::ffi::c_uint;
 
 /// `convert_ipc_timeout_to_ticks()` of <`kern/sched_prim.h>`: round a
 /// millisecond timeout up to whole ticks.
-pub(crate) fn ipc_timeout_to_ticks(msecs: c_uint) -> c_uint {
+pub(crate) const fn ipc_timeout_to_ticks(msecs: c_uint) -> c_uint {
     let hz = machine::CLOCK_HZ;
     // The C expression is unsigned arithmetic over the `int` rate converted to
     // unsigned.

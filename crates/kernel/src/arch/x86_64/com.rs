@@ -1196,6 +1196,9 @@ fn params(tp: &mut Tty, index: usize) {
 
 /// `comstart()` of `i386/i386at/com.c`.
 pub(crate) fn start(tp: &mut Tty) {
+    // One machine-wide com timer; arming re-arms it.
+    static COM_TIMER: MachCallout =
+        MachCallout::new(wheel(), com_timer_action, ());
     if tp.t_state & (TS_TIMEOUT | TS_TTSTOP | TS_BUSY) != 0 {
         com().st_1 += 1;
         return;
@@ -1219,9 +1222,6 @@ pub(crate) fn start(tp: &mut Tty) {
     };
     if nch & 0x80 != 0 && tp.t_flags & TF_LITOUT == 0 {
         let delay = c_int::from(nch & 0x7f) + 6;
-        // One machine-wide com timer; arming re-arms it.
-        static COM_TIMER: MachCallout =
-            MachCallout::new(wheel(), com_timer_action, ());
         Pin::static_ref(&COM_TIMER)
             .start(clock::Ticks::new(delay.max(1) as u64));
         tp.t_state |= TS_TIMEOUT;

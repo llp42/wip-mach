@@ -17,7 +17,6 @@ bench = false
 [dependencies]
 clock = { path = "../clock" }
 collections = { path = "../collections" }
-intrusive-collections = { version = "=0.10.3", default-features = false }
 kmem = { path = "../kmem" }
 mach-mig-sys = { path = "../mach-mig-sys" }
 spin = { version = "=0.12.3", default-features = false, features = ["spin_mutex", "once"] }

@@ -152,26 +152,19 @@ deletes its entry; a change that opens one adds it.
 
 - **ADR**: ADR 0023.
 - **Where**: `spin` (the kernel, in 9 files, and `clock`'s
-  `CriticalLock`) and `intrusive-collections` (`vm/vm_map.rs` and the
-  tree half of `kern/slab.rs`, which use its `RBTree`). While
-  `intrusive-collections` remains, an object with
-  one of its links is born whole: one struct literal, `Link::new()`
-  included, `ptr::write`n into fresh storage, never fields stamped over
-  recycled or zeroed memory. Its links carry an unlinked marker, and a
-  stale one panics as "already linked" on the next insert.
-- **Done when**: no `Cargo.toml` in the workspace names `spin` or
-  `intrusive-collections`.
+  `CriticalLock`).
+- **Done when**: no `Cargo.toml` in the workspace names `spin`.
 
-## The kernel's trees do not use `collections::rb_tree`
+## `KmemCache` hot fields left the first cache line
 
-- **ADR**: ADR 0051.
-- **Where**: `vm/vm_map.rs` (the address tree, keyed by first address, and
-  the gap tree, keyed by gap size with duplicate keys) and `kern/slab.rs`
-  (`active_slabs`, keyed by buffer base) still use `intrusive-collections`'
-  `RBTree`, which `collections::rb_tree` replaces: `insert`, `remove_ptr`,
-  `lower_bound`, `upper_bound`, `front` and `back` cover what they call.
-- **Done when**: those three trees use `rb_tree` and no `Cargo.toml` in the
-  workspace names `intrusive-collections`.
+- **ADR**: ADR 0027.
+- **Where**: `kern/slab.rs` — `active_slabs` is now a three-word
+  `rb_tree` head (ADR 0051), so `flags` and `bufctl_dist` sit past
+  offset 64 in the `align(64)` record. The C field order that kept
+  them in line 0 is no longer free.
+- **Done when**: the cache's field order is re-tuned or the line
+  split is measured not to matter, and the comment at `KmemCache`
+  stops claiming the C packing.
 
 ## `cargo deny` does not run
 

@@ -57,12 +57,12 @@ pub(crate) fn putc(ch: u8) {
 
 /// Sound the bell until the callout switches it off.
 fn ring_bell() {
+    // A leaked static callout; the action is `kd_belloff`.
+    static BELL: MachCallout = MachCallout::new(wheel(), bell_off_action, ());
     if state().kd_bellstate {
         return;
     }
     kd_bellon();
-    // A leaked static callout; the action is `kd_belloff`.
-    static BELL: MachCallout = MachCallout::new(wheel(), bell_off_action, ());
     Pin::static_ref(&BELL)
         .start(clock::Ticks::new((machine::CLOCK_HZ / 8) as u64));
     state().kd_bellstate = true;

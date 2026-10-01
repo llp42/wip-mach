@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The `clock` platform for x86_64: the HPET counter, spl, the RTC and
+//! The `clock` platform for `x86_64`: the HPET counter, `spl`, the RTC and
 //! the mapped time page.
 
 use crate::arch::x86_64::{apic, rtc, spl};

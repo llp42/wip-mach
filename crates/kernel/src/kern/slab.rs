@@ -24,16 +24,16 @@ use crate::vm::vm_map::VmMap;
 use crate::vm::vm_map::round_page;
 use crate::vm::vm_page;
 use crate::vm::vm_resident::{self, VM_PAGE_DIRECTMAP};
+use collections::rb_tree::{self, RbTree};
 use collections::simple_queue::{self, SimpleQueue};
 use collections::tail_queue::{self, TailQueue};
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_ulong, c_void};
 use core::mem::{align_of, offset_of, size_of};
-use core::ops;
+use core::ops::{self, Bound};
 use core::pin::{Pin, pin};
 use core::ptr::{self, NonNull, addr_of_mut, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use intrusive_collections::{Bound, RBTree, RBTreeLink, UnsafeRef};
 
 /// `KMEM_CACHE_NAME_SIZE` of <kern/slab.h>: the length of a cache name,
 /// chosen so the mirror fits in two 64-byte cache lines.
@@ -188,7 +188,7 @@ const _: () = {
 pub(crate) struct KmemSlab {
     cache: *mut KmemCache,
     list_node: tail_queue::Link,
-    tree_node: RBTreeLink,
+    tree_node: rb_tree::Link,
     nr_refs: c_ulong,
     first_free: *mut KmemBufctl,
     addr: *mut u8,
@@ -205,32 +205,11 @@ const _: () = {
     assert!(offset_of!(KmemSlab, addr) == 64);
 };
 
-// The macro-emitted items stay undocumented (`NEW`, `new()`) and hand-roll
-// `Clone` on a `Copy` type, so the lints are off around the expansion.
-#[allow(missing_docs, clippy::expl_impl_clone_on_copy)]
-mod tree_adapter {
-    use super::{KmemSlab, RBTreeLink, UnsafeRef, VmOffset};
-    use intrusive_collections::KeyAdapter;
-    use intrusive_collections::intrusive_adapter;
-
-    intrusive_adapter!(
-        /// The adapter for a slab's `tree_node` in [`KmemCache::active_slabs`],
-        /// keyed by the slab's buffer base.
-        pub(crate) KmemSlabTreeAdapter = UnsafeRef<KmemSlab>: KmemSlab {
-            tree_node => RBTreeLink
-        }
-    );
-
-    impl<'a> KeyAdapter<'a> for KmemSlabTreeAdapter {
-        type Key = VmOffset;
-
-        fn get_key(&self, value: &'a KmemSlab) -> VmOffset {
-            value.addr.addr()
-        }
-    }
-}
-
-use tree_adapter::KmemSlabTreeAdapter;
+rb_tree::adapter!(
+    /// The adapter for a slab's `tree_node` in [`KmemCache::active_slabs`],
+    /// keyed by the slab's buffer base.
+    pub(crate) KmemSlabTreeAdapter = KmemSlab { tree_node } key(VmOffset) = |slab| slab.addr.addr()
+);
 
 tail_queue::adapter!(
     /// The adapter for a slab's `list_node` in the free, partial and dead
@@ -251,13 +230,13 @@ type SlabList = TailQueue<'static, KmemSlabListAdapter>;
 type CacheList = SimpleQueue<'static, KmemCacheListAdapter>;
 
 // The links and heads have the sizes the offsets above and below rely on.
-const _: () = assert!(size_of::<RBTreeLink>() == 24);
-const _: () = assert!(align_of::<RBTreeLink>() == 8);
+const _: () = assert!(size_of::<rb_tree::Link>() == 24);
+const _: () = assert!(align_of::<rb_tree::Link>() == 8);
 const _: () = assert!(size_of::<tail_queue::Link>() == 16);
 const _: () = assert!(size_of::<simple_queue::Link>() == 8);
 const _: () = assert!(size_of::<SlabList>() == 16);
 const _: () = assert!(size_of::<CacheList>() == 16);
-const _: () = assert!(size_of::<RBTree<KmemSlabTreeAdapter>>() == 8);
+const _: () = assert!(size_of::<RbTree<'static, KmemSlabTreeAdapter>>() == 24);
 
 /// The constructor a cache may hold; `kmem_cache_ctor_t` of <kern/slab.h>.
 ///
@@ -268,9 +247,10 @@ pub type KmemCacheCtor = Option<unsafe fn(*mut c_void)>;
 
 /// `struct kmem_cache` of <kern/slab.h>: a cache of objects.
 ///
-/// The layout is the C record's, `__cacheline_aligned` (`1 << CPU_L1_SHIFT`,
-/// 64 bytes) included; the field order is the C's, which put every hot field
-/// in the first cache line.
+/// The record is `__cacheline_aligned` (`1 << CPU_L1_SHIFT`, 64 bytes).
+/// Field order is ours; `active_slabs` is a three-word `rb_tree` head
+/// (ADR 0051), so `flags` and `bufctl_dist` sit past offset 64.  See
+/// DEBT for putting the hot fields back in line 0.
 #[repr(C, align(64))]
 #[allow(missing_docs)]
 pub struct KmemCache {
@@ -278,7 +258,7 @@ pub struct KmemCache {
     node: simple_queue::Link,
     partial_slabs: SlabList,
     free_slabs: SlabList,
-    active_slabs: RBTree<KmemSlabTreeAdapter>,
+    active_slabs: RbTree<'static, KmemSlabTreeAdapter>,
     flags: CacheFlags,
     bufctl_dist: usize,
     slab_size: usize,
@@ -306,23 +286,23 @@ const _: () = {
     assert!(offset_of!(KmemCache, partial_slabs) == 16);
     assert!(offset_of!(KmemCache, free_slabs) == 32);
     assert!(offset_of!(KmemCache, active_slabs) == 48);
-    assert!(offset_of!(KmemCache, flags) == 56);
-    assert!(offset_of!(KmemCache, bufctl_dist) == 64);
-    assert!(offset_of!(KmemCache, slab_size) == 72);
-    assert!(offset_of!(KmemCache, bufs_per_slab) == 80);
-    assert!(offset_of!(KmemCache, nr_objs) == 88);
-    assert!(offset_of!(KmemCache, nr_free_slabs) == 96);
-    assert!(offset_of!(KmemCache, ctor) == 104);
-    assert!(offset_of!(KmemCache, obj_size) == 112);
-    assert!(offset_of!(KmemCache, align) == 120);
-    assert!(offset_of!(KmemCache, buf_size) == 128);
-    assert!(offset_of!(KmemCache, color) == 136);
-    assert!(offset_of!(KmemCache, color_max) == 144);
-    assert!(offset_of!(KmemCache, nr_bufs) == 152);
-    assert!(offset_of!(KmemCache, nr_slabs) == 160);
-    assert!(offset_of!(KmemCache, name) == 168);
-    assert!(offset_of!(KmemCache, buftag_dist) == 192);
-    assert!(offset_of!(KmemCache, redzone_pad) == 200);
+    assert!(offset_of!(KmemCache, flags) == 72);
+    assert!(offset_of!(KmemCache, bufctl_dist) == 80);
+    assert!(offset_of!(KmemCache, slab_size) == 88);
+    assert!(offset_of!(KmemCache, bufs_per_slab) == 96);
+    assert!(offset_of!(KmemCache, nr_objs) == 104);
+    assert!(offset_of!(KmemCache, nr_free_slabs) == 112);
+    assert!(offset_of!(KmemCache, ctor) == 120);
+    assert!(offset_of!(KmemCache, obj_size) == 128);
+    assert!(offset_of!(KmemCache, align) == 136);
+    assert!(offset_of!(KmemCache, buf_size) == 144);
+    assert!(offset_of!(KmemCache, color) == 152);
+    assert!(offset_of!(KmemCache, color_max) == 160);
+    assert!(offset_of!(KmemCache, nr_bufs) == 168);
+    assert!(offset_of!(KmemCache, nr_slabs) == 176);
+    assert!(offset_of!(KmemCache, name) == 184);
+    assert!(offset_of!(KmemCache, buftag_dist) == 208);
+    assert!(offset_of!(KmemCache, redzone_pad) == 216);
 };
 
 /// `cache_info_t` of <`mach_debug/slab_info.h`>, the record `host_slab_info()`
@@ -443,7 +423,7 @@ impl KmemCache {
             node: simple_queue::Link::new(),
             partial_slabs: SlabList::new(),
             free_slabs: SlabList::new(),
-            active_slabs: RBTree::new(KmemSlabTreeAdapter::new()),
+            active_slabs: RbTree::new(),
             flags: CacheFlags(0),
             bufctl_dist: 0,
             slab_size: 0,
@@ -486,7 +466,7 @@ impl KmemCache {
         // The C's `list_init()` calls: empty heads.
         self.partial_slabs = SlabList::new();
         self.free_slabs = SlabList::new();
-        self.active_slabs.fast_clear();
+        self.active_slabs.clear();
         self.obj_size = obj_size;
         self.align = align;
         self.buf_size = buf_size;
@@ -708,8 +688,7 @@ impl KmemCache {
             // SAFETY: `Slab::create` left the tree node unlinked and keyed
             // by this slab, and the cache lock keeps the slab live and
             // unmoved while the tree links it.
-            self.active_slabs
-                .insert(unsafe { UnsafeRef::from_raw(slab_ref.as_ptr()) });
+            unsafe { self.active_slabs.insert_ptr(slab_ref) };
         }
 
         Some(self.buf_of(bufctl))
@@ -790,7 +769,7 @@ impl KmemCache {
             let slab = self
                 .active_slabs
                 .upper_bound(Bound::Included(&buf.as_ptr().addr()))
-                .get_ptr();
+                .current_ptr();
             let Some(slab) = slab else {
                 self.error(buf.as_ptr(), CacheError::Invalid, ptr::null_mut());
             };
@@ -813,10 +792,8 @@ impl KmemCache {
             if (*slab).nr_refs == 0 {
                 if self.flags.contains(CacheFlags::USE_TREE) {
                     // SAFETY: the slab is linked in this tree, and the
-                    // cache lock keeps it live for the cursor.
-                    self.active_slabs
-                        .cursor_mut_from_ptr(slab.cast_const())
-                        .remove();
+                    // cache lock keeps it live and unmoved.
+                    self.active_slabs.remove_ptr(NonNull::new_unchecked(slab));
                 }
 
                 if self.bufs_per_slab > 1 {
@@ -918,7 +895,7 @@ impl KmemCache {
         let found = self
             .active_slabs
             .upper_bound(Bound::Included(&buf.as_ptr().addr()))
-            .get_ptr();
+            .current_ptr();
         self.lock.unlock();
 
         let Some(found) = found else {
@@ -1127,7 +1104,7 @@ impl KmemSlab {
             );
             ptr::write(
                 addr_of_mut!((*slab.as_ptr()).tree_node),
-                RBTreeLink::new(),
+                rb_tree::Link::new(),
             );
             (*slab.as_ptr()).nr_refs = 0;
             (*slab.as_ptr()).first_free = ptr::null_mut();

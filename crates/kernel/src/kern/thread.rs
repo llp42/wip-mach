@@ -511,7 +511,7 @@ pub(crate) fn thread_timeout_action(callout: Pin<&MachCallout>) {
         unsafe { Thread::from_timer(ptr::from_ref(callout.get_ref())) };
     // SAFETY: `thread` is live; the action runs from the wheel.
     unsafe {
-        clear_wait(thread, crate::kern::sched_prim::THREAD_TIMED_OUT, 0)
+        clear_wait(thread, crate::kern::sched_prim::THREAD_TIMED_OUT, 0);
     };
 }
 
@@ -523,7 +523,7 @@ pub(crate) fn depress_timeout_action(callout: Pin<&MachCallout>) {
     };
     // SAFETY: `thread` is live; the action runs from the wheel.
     unsafe {
-        crate::kern::syscall_subr::depress_timeout(thread.cast::<c_void>())
+        crate::kern::syscall_subr::depress_timeout(thread.cast::<c_void>());
     };
 }
 
@@ -847,7 +847,7 @@ impl Thread {
 /// # Panics
 ///
 /// Panics if the kernel's `tick` global is zero: the conversion divides by it.
-fn fixedpri_quantum(data: c_int) -> c_int {
+const fn fixedpri_quantum(data: c_int) -> c_int {
     let tick_rate = machine::TICK;
     let temp = data.wrapping_mul(1000);
     let temp = if temp % tick_rate != 0 {
