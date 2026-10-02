@@ -9,10 +9,8 @@
 //! `ipc/ipc_entry.h` declares.
 
 use crate::ipc::{IE_BITS_TYPE_MASK, IpcEntry, IpcSpace};
-use crate::kern::rdxtree::{Found, Lookup, RdxtreeKey, replace_slot};
 use crate::kern::slab::{KmemCache, kmem_cache_init};
 use crate::kern::types::KernError;
-use crate::vm::error::Error;
 use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
@@ -101,11 +99,10 @@ impl IpcEntry {
 }
 
 /// The [`KernError`] a radix-tree error stands for.
-const fn map_error(error: Error) -> KernError {
+const fn map_error(error: kmem::RadixTreeError) -> KernError {
     match error {
-        Error::InvalidArgument => KernError::InvalidArgument,
-        Error::ResourceShortage => KernError::ResourceShortage,
-        _ => KernError::Failure,
+        kmem::RadixTreeError::Exists => KernError::InvalidArgument,
+        kmem::RadixTreeError::ResourceShortage => KernError::ResourceShortage,
     }
 }
 
@@ -183,7 +180,7 @@ pub(crate) unsafe fn dealloc(
             (*entry).set_next_free((*record).free_list);
             (*record).free_list = entry;
         } else {
-            (*record).map.remove(RdxtreeKey::from_raw(name));
+            (*record).map.remove(kmem::RadixKey::from_raw(name));
             free(entry);
         }
 
@@ -245,16 +242,17 @@ pub(crate) unsafe fn alloc(
 
     match inserted {
         Ok((key, _slot)) => {
+            let name = key.into_raw();
             unsafe {
                 (*entry).set_bits(0);
                 (*entry).set_object(IO_NULL);
                 (*entry).set_request(0);
-                (*entry).set_name(key.into_raw());
+                (*entry).set_name(name);
                 let record = space.record();
                 (*record).size = (*record).size.wrapping_add(1);
             }
 
-            Ok((key.into_raw(), entry))
+            Ok((name, entry))
         }
         Err(error) => {
             // SAFETY: the failed insert left the fresh entry unreferenced.
@@ -277,49 +275,33 @@ pub(crate) unsafe fn alloc_name(
         return Err(KernError::InvalidTask);
     }
 
-    let slot = unsafe {
-        (*space.record())
-            .map
-            .lookup(RdxtreeKey::from_raw(name), Lookup::Slot)
-    }
-    .map(Found::address);
+    let existing =
+        unsafe { (*space.record()).map.get(kmem::RadixKey::from_raw(name)) }
+            .map(|entry| entry.as_ptr());
 
-    let mut entry = slot.map_or(IE_NULL, |slot| {
-        // SAFETY: a lookup-slot result addresses the map's live slot.
-        unsafe { *slot.cast::<*mut IpcEntry>() }
-    });
-
-    if slot.is_none() || entry == IE_NULL {
+    let Some(entry) = existing else {
         let Some(fresh) = ie_alloc() else {
             return Err(KernError::ResourceShortage);
         };
-        entry = fresh;
 
         // SAFETY: the fresh entry belongs to this call.
         unsafe {
-            (*entry).set_bits(0);
-            (*entry).set_object(IO_NULL);
-            (*entry).set_request(0);
-            (*entry).set_name(name);
+            (*fresh).set_bits(0);
+            (*fresh).set_object(IO_NULL);
+            (*fresh).set_request(0);
+            (*fresh).set_name(name);
         }
 
-        if let Some(slot) = slot {
-            // SAFETY: the slot addresses the map's storage for `name`.
-            unsafe {
-                replace_slot(&mut *slot.cast::<*mut c_void>(), entry.cast());
-            }
-        } else {
-            let inserted = unsafe {
-                (*space.record()).map.insert(
-                    RdxtreeKey::from_raw(name),
-                    NonNull::new_unchecked(entry.cast()),
-                )
-            };
-            if let Err(error) = inserted {
-                // SAFETY: the failed insert left the entry unreferenced.
-                unsafe { free(entry) };
-                return Err(map_error(error));
-            }
+        let inserted = unsafe {
+            (*space.record()).map.insert(
+                kmem::RadixKey::from_raw(name),
+                NonNull::new_unchecked(fresh.cast()),
+            )
+        };
+        if let Err(error) = inserted {
+            // SAFETY: the failed insert left the entry unreferenced.
+            unsafe { free(fresh) };
+            return Err(map_error(error));
         }
 
         unsafe {
@@ -327,8 +309,8 @@ pub(crate) unsafe fn alloc_name(
             (*record).size = (*record).size.wrapping_add(1);
         }
 
-        return Ok(entry);
-    }
+        return Ok(fresh);
+    };
 
     // SAFETY: a lookup result is a live entry.
     if unsafe { (*entry).bits() } & IE_BITS_TYPE_MASK != 0 {

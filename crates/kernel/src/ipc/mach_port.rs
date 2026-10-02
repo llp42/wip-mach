@@ -19,7 +19,6 @@ use crate::ipc::{IE_BITS_TYPE_MASK, IpcEntry, IpcPort, IpcSpace, IpcTarget};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::{kpanic, soft_debugger};
 use crate::kern::ipc_kobject::set_locked;
-use crate::kern::rdxtree::RdxtreeIter;
 use crate::kern::task::current_task;
 use crate::kern::types::KernError;
 use crate::vm::error::Error;
@@ -470,11 +469,10 @@ pub(crate) unsafe fn names(
     // SAFETY: the space is live and read-locked; the map address is formed
     // without reading.
     let map_ptr = unsafe { ptr::addr_of_mut!((*space.record()).map) };
-    let mut iter = RdxtreeIter::new();
     // SAFETY: the space is read-locked, so its map is stable; each walk
     // returns a live entry once.
-    while let Some(found) = unsafe { (*map_ptr).walk(&mut iter) } {
-        let entry = found.as_ptr().cast::<IpcEntry>();
+    for (_key, found) in unsafe { (*map_ptr).iter() } {
+        let entry = found.as_ptr();
 
         // SAFETY: a walked pointer is a live entry.
         if unsafe { (*entry).bits() } & IE_BITS_TYPE_MASK != 0 {
@@ -1109,11 +1107,10 @@ unsafe fn set_members(
     // SAFETY: the space is live and read-locked; the map address is formed
     // without reading.
     let map_ptr = unsafe { ptr::addr_of_mut!((*space.record()).map) };
-    let mut iter = RdxtreeIter::new();
     // SAFETY: the space is read-locked, so its map is stable; each walk
     // returns a live entry once.
-    while let Some(found) = unsafe { (*map_ptr).walk(&mut iter) } {
-        let entry = found.as_ptr().cast::<IpcEntry>();
+    for (_key, found) in unsafe { (*map_ptr).iter() } {
+        let entry = found.as_ptr();
 
         // SAFETY: a walked pointer is a live entry.
         if unsafe { (*entry).bits() } & MACH_PORT_TYPE_RECEIVE != 0 {

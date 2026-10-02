@@ -24,9 +24,9 @@
 //! add` fence are the only instructions Rust cannot spell; `curr_ipl`
 //! itself is a plain per-CPU read and write.
 
+use crate::arch::x86_64::clock_platform::softclock;
 use crate::arch::x86_64::ioapic::CURR_IPL;
 use crate::arch::x86_64::per_cpu;
-use crate::arch::x86_64::clock_platform::softclock;
 use core::arch::asm;
 use core::ffi::{c_int, c_ulong};
 use core::sync::atomic::{AtomicI32, Ordering};

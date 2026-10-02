@@ -46,13 +46,15 @@ deletes its entry; a change that opens one adds it.
 - **ADR**: ADR 0014.
 - **Where**: `ipc/`, `vm/` above the pmap, and the task, thread,
   scheduler and device-dispatch modules of `kern/` and `device/`; the
-  mechanisms `kern/rcu.rs`, `kern/rdxtree.rs` and `kern/boot_script.rs`.
+  mechanisms `kern/rcu.rs` and `kern/boot_script.rs`.
 - **Done when**: `crates/wip-mach` exists and holds the
   machine-independent core, and each mechanism has moved to its own
   crate or has been found to fail the split test.
 - **Recorded outcomes**: `elf_load` passes the split test and lives in
   `crates/elf-load` as original MIT code with one `x86_64` reader;
-  `ELFCLASS32` is rejected (ADR 0003).
+  `ELFCLASS32` is rejected (ADR 0003).  The radix tree is rewritten as
+  `kmem::RadixTree` (MIT, `A: Alloc`, typed leaves) and the IPC name
+  tables use it; `kern/rdxtree.rs` is gone.
 
 ## Host tests compile kernel sources through a shim
 

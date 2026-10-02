@@ -6,11 +6,12 @@
 use crate::ipc::ipc_table::IpcTableSize;
 use crate::ipc::ipc_thread::IpcThreadQueue;
 use crate::kern::debug::kpanic;
+use crate::kern::kheap::Kalloc;
 use crate::kern::lock::{LockData, SimpleLock};
-use crate::kern::rdxtree::{Lookup, Rdxtree, RdxtreeKey};
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
+use kmem::{RadixKey, RadixTree};
 
 pub mod copy_user;
 pub mod ipc_entry;
@@ -467,34 +468,22 @@ const _: () = {
     assert!(offset_of!(HashInfoBucket, hib_count) == 0);
 };
 
+/// The name table: a radix tree of entries under 32-bit keys.
+pub(crate) type NameMap = RadixTree<NonNull<IpcEntry>, Kalloc>;
+
 /// `struct ipc_space` of <`ipc/ipc_space.h>`: the capability namespace.
-#[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct IpcSpaceRecord {
     ref_lock: SimpleLock,
     references: u32,
     lock: LockData,
     active: c_int,
-    map: Rdxtree,
+    map: NameMap,
     size: usize,
-    reverse_map: Rdxtree,
+    reverse_map: NameMap,
     free_list: *mut IpcEntry,
     free_list_size: usize,
 }
-
-const _: () = {
-    assert!(size_of::<IpcSpaceRecord>() == 88);
-    assert!(align_of::<IpcSpaceRecord>() == 8);
-    assert!(offset_of!(IpcSpaceRecord, ref_lock) == 0);
-    assert!(offset_of!(IpcSpaceRecord, references) == 4);
-    assert!(offset_of!(IpcSpaceRecord, lock) == 8);
-    assert!(offset_of!(IpcSpaceRecord, active) == 24);
-    assert!(offset_of!(IpcSpaceRecord, map) == 32);
-    assert!(offset_of!(IpcSpaceRecord, size) == 48);
-    assert!(offset_of!(IpcSpaceRecord, reverse_map) == 56);
-    assert!(offset_of!(IpcSpaceRecord, free_list) == 72);
-    assert!(offset_of!(IpcSpaceRecord, free_list_size) == 80);
-};
 
 /// `mach_msg_header_t` of <mach/message.h>: its two pointer-wide unions carry
 /// the remote and local ports.
@@ -1302,12 +1291,8 @@ impl IpcSpace {
         name: c_uint,
     ) -> Option<*mut IpcEntry> {
         let record = self.record();
-        let found = unsafe {
-            (*record)
-                .map
-                .lookup(RdxtreeKey::from_raw(name), Lookup::Value)
-        }?;
-        let entry = found.address().cast::<IpcEntry>();
+        let entry =
+            unsafe { (*record).map.get(RadixKey::from_raw(name)) }?.as_ptr();
 
         // SAFETY: a found address is a live entry stored in the map.
         let bits = unsafe { (*entry).bits };

@@ -19,14 +19,14 @@ use crate::arch::x86_64::pmap;
 use crate::arch::x86_64::spl;
 use crate::config::MAX_NCPUS;
 use crate::kern::console::kprint;
-use crate::kern::priority;
-use crate::kern::rcu;
 use crate::kern::debug::{self, kpanic};
 use crate::kern::lock::SimpleLock;
+use crate::kern::priority;
 use crate::kern::processor::{
     Processor, ProcessorQueue, ProcessorSet, ProcessorState, boot_processor,
     default_pset, processor_at, slave_pset,
 };
+use crate::kern::rcu;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, thread_bind, thread_block,
     thread_wakeup_prim,

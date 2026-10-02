@@ -197,8 +197,10 @@ rb_tree::adapter!(
 // tree heads are three words (ADR 0051).
 const _: () = assert!(size_of::<rb_tree::Link>() == 24);
 const _: () = assert!(align_of::<rb_tree::Link>() == 8);
-const _: () = assert!(size_of::<RbTree<'static, VmMapEntryTreeAdapter>>() == 24);
-const _: () = assert!(size_of::<RbTree<'static, VmMapEntryGapAdapter>>() == 24);
+const _: () =
+    assert!(size_of::<RbTree<'static, VmMapEntryTreeAdapter>>() == 24);
+const _: () =
+    assert!(size_of::<RbTree<'static, VmMapEntryGapAdapter>>() == 24);
 
 /// The object-or-submap tag of an entry, `union vm_map_object`.
 #[repr(C)]

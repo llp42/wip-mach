@@ -22,6 +22,7 @@ use crate::ipc::{IpcPort, IpcSpace};
 use crate::kern::ast::{self, AstReason};
 use crate::kern::console::{CStrArg, write_cstr};
 use crate::kern::debug::kpanic;
+use crate::kern::host_time;
 use crate::kern::ipc_tt::{
     convert_task_to_port, convert_thread_to_port, ipc_task_disable,
     ipc_task_enable, ipc_task_init, ipc_task_terminate, ipc_thread_disable,
@@ -29,7 +30,6 @@ use crate::kern::ipc_tt::{
 };
 use crate::kern::lock::SimpleLock;
 use crate::kern::machine;
-use crate::kern::host_time;
 use crate::kern::processor::{self, ProcessorSet};
 use crate::kern::sched::invalid_pri;
 use crate::kern::sched_prim::{

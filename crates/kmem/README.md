@@ -11,9 +11,18 @@ constructor.
 | `KBoxSlice<T, A>` | a fixed run of `T` | the array layout |
 | `KVec<T, A>` | a growable run of `T` | the array layout of its capacity |
 | `KRawBuf<A>` | untyped bytes | its size, at 8-byte alignment |
+| `RadixTree<T, A>` | values under 32-bit keys | nodes, through `A` |
 
 `A: Alloc` is stored in each owner. A zero-sized `T` or an empty buffer
 never reaches the allocator.
+
+## `RadixTree`
+
+A dense integer radix tree: 6 key bits per level, at most 6 node chases
+for a 32-bit key. Leaves hold `T` inline; nodes come from `A` and are
+freed on removal and on drop. The lowest free key is one descent
+(`insert_alloc`). `insert` on an occupied key is `Error::Exists` and
+leaves the old value. `iter` walks in key order.
 
 ## Failure
 

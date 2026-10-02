@@ -20,6 +20,7 @@ use crate::ipc::mach_port;
 use crate::kern::ast::{self, AstReason};
 use crate::kern::debug::kpanic;
 use crate::kern::eventcount;
+use crate::kern::host_time;
 use crate::kern::ipc_mig::abort_rpc;
 use crate::kern::ipc_tt::{
     ipc_thread_disable, ipc_thread_enable, ipc_thread_init,
@@ -27,7 +28,6 @@ use crate::kern::ipc_tt::{
 };
 use crate::kern::lock::SimpleLock;
 use crate::kern::machine;
-use crate::kern::host_time;
 use crate::kern::policy::{POLICY_FIXEDPRI, POLICY_TIMESHARE, invalid_policy};
 use crate::kern::processor::{self, Processor, ProcessorRef, ProcessorSet};
 use crate::kern::sched::{

@@ -12,7 +12,7 @@ use crate::ipc::ipc_entry;
 use crate::ipc::ipc_right;
 use crate::ipc::{IE_BITS_TYPE_MASK, IpcEntry, IpcSpace, IpcSpaceRecord};
 use crate::kern::lock::LockData;
-use crate::kern::rdxtree::{Lookup, RdxtreeIter, RdxtreeKey};
+
 use crate::kern::slab::{KmemCache, kmem_cache_init};
 use crate::kern::types::KernError;
 use crate::vm::error::Error;
@@ -93,12 +93,11 @@ impl IpcSpace {
         object: *mut c_void,
     ) -> Option<*mut IpcEntry> {
         let found = unsafe {
-            (*self.record()).reverse_map.lookup(
-                RdxtreeKey::from_raw(reverse_key(object)),
-                Lookup::Value,
-            )
+            (*self.record())
+                .reverse_map
+                .get(kmem::RadixKey::from_raw(reverse_key(object)))
         }?;
-        Some(found.address().cast::<IpcEntry>())
+        Some(found.as_ptr())
     }
 
     /// `ipc_reverse_insert()` of <`ipc/ipc_space.h>`: record `entry` as
@@ -113,13 +112,18 @@ impl IpcSpace {
         object: *mut c_void,
         entry: *mut IpcEntry,
     ) -> Result<(), Error> {
-        let entry = unsafe { NonNull::new_unchecked(entry.cast::<c_void>()) };
+        let entry = unsafe { NonNull::new_unchecked(entry.cast()) };
 
         unsafe {
             (*self.record())
                 .reverse_map
-                .insert(RdxtreeKey::from_raw(reverse_key(object)), entry)
-                .map(|_| ())
+                .insert(kmem::RadixKey::from_raw(reverse_key(object)), entry)
+                .map_err(|error| match error {
+                    kmem::RadixTreeError::Exists => Error::InvalidArgument,
+                    kmem::RadixTreeError::ResourceShortage => {
+                        Error::ResourceShortage
+                    }
+                })
         }
     }
 
@@ -136,9 +140,9 @@ impl IpcSpace {
         unsafe {
             (*self.record())
                 .reverse_map
-                .remove(RdxtreeKey::from_raw(reverse_key(object)))
+                .remove(kmem::RadixKey::from_raw(reverse_key(object)))
         }
-        .map(|found| found.as_ptr().cast::<IpcEntry>())
+        .map(NonNull::as_ptr)
     }
 }
 
@@ -226,14 +230,14 @@ pub(crate) fn create() -> Result<IpcSpace, KernError> {
         (*record).active = 1;
 
         let map = ptr::addr_of_mut!((*record).map);
-        (*map).init();
+        map.write(crate::ipc::NameMap::new(crate::kern::kheap::Kalloc));
         let reverse = ptr::addr_of_mut!((*record).reverse_map);
-        (*reverse).init();
+        reverse.write(crate::ipc::NameMap::new(crate::kern::kheap::Kalloc));
 
         // The C ignored the insert result too; the zeroth entry is reserved.
         let zero =
             NonNull::new_unchecked(ptr::addr_of_mut!(ZERO_ENTRY)).cast();
-        let _ = (*map).insert(RdxtreeKey::from_raw(0), zero);
+        let _ = (*map).insert(kmem::RadixKey::from_raw(0), zero);
 
         (*record).size = 1;
         (*record).free_list = ptr::null_mut();
@@ -311,11 +315,10 @@ pub(crate) unsafe fn destroy(space: IpcSpace) {
 
     let map = unsafe { ptr::addr_of_mut!((*space.record()).map) };
 
-    let mut iter = RdxtreeIter::new();
     // SAFETY: the space is live and its map belongs to it; the walk hands
     // back each stored entry once.
-    while let Some(found) = unsafe { (*map).walk(&mut iter) } {
-        let entry = found.as_ptr().cast::<IpcEntry>();
+    for (_key, found) in unsafe { (*map).iter() } {
+        let entry = found.as_ptr();
 
         // SAFETY: a walked pointer is a live entry in the map.
         unsafe {
@@ -335,9 +338,9 @@ pub(crate) unsafe fn destroy(space: IpcSpace) {
 
     // SAFETY: the space is live and dead, so nothing else walks its maps.
     unsafe {
-        (*map).remove_all();
+        (*map).clear();
         let reverse = ptr::addr_of_mut!((*space.record()).reverse_map);
-        (*reverse).remove_all();
+        (*reverse).clear();
     }
 
     // SAFETY: the space is live and the dead space's active reference is the

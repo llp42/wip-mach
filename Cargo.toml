@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["crates/.mimocode"]
 default-members = ["crates/kernel"]
 resolver = "3"
 

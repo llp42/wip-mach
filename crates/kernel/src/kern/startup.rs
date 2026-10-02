@@ -21,7 +21,6 @@ use crate::kern::host_time::record_time_stamp;
 use crate::kern::mach_factor;
 use crate::kern::machine;
 use crate::kern::processor::{self, processor_at};
-use crate::kern::rdxtree;
 use crate::kern::sched_prim;
 use crate::kern::smp::CpuId;
 use crate::kern::task::{self, KERNEL_TASK};
@@ -71,7 +70,6 @@ pub(crate) unsafe fn setup_main() {
     unsafe {
         sched_prim::sched_init();
         vm_init::vm_mem_bootstrap();
-        rdxtree::cache_init();
         ipc_init::ipc_bootstrap();
         vm_init::vm_mem_init();
         ipc_init::ipc_init();

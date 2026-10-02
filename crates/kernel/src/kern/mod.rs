@@ -32,7 +32,6 @@ pub mod priority;
 pub mod processor;
 pub mod processor_ffi;
 pub mod rcu;
-pub mod rdxtree;
 pub mod sched;
 pub mod sched_prim;
 pub mod slab;

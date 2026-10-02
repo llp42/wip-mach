@@ -16,6 +16,7 @@
 //! | [`KBoxSlice`] | `len` values of `T`, fixed | the array layout |
 //! | [`KVec`] | a growable run of `T` | the array layout of its capacity |
 //! | [`KRawBuf`] | `size` untyped bytes | its size, at 8-byte alignment |
+//! | [`RadixTree`] | values under 32-bit keys | nodes, through `A` |
 //!
 //! The allocator is a value stored in each owner, so a zero-sized one
 //! costs nothing and one that points at a cache can be shared by many.
@@ -25,6 +26,7 @@
 
 mod alloc;
 mod boxed;
+mod radix_tree;
 mod raw_buf;
 mod slice;
 mod vec;
@@ -34,6 +36,9 @@ mod test_support;
 
 pub use alloc::{Alloc, AllocError};
 pub use boxed::KBox;
+pub use radix_tree::{
+    Error as RadixTreeError, Iter as RadixTreeIter, RadixKey, RadixTree,
+};
 pub use raw_buf::KRawBuf;
 pub use slice::KBoxSlice;
 pub use vec::{Drain, KVec};

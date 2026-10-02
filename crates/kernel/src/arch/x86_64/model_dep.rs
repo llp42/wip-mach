@@ -16,12 +16,12 @@
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_MASK, PAGE_SHIFT, PAGE_SIZE};
+use crate::arch::x86_64::clock_platform;
 use crate::arch::x86_64::io_req::DevT;
 use crate::arch::x86_64::multiboot::{
     MultibootLoaderFlags, MultibootModule, MultibootRawInfo,
     MultibootRawModule, load_modules,
 };
-use crate::arch::x86_64::clock_platform;
 use crate::arch::x86_64::pmap::KERNEL_PMAP;
 use crate::arch::x86_64::pmap::pmap_extract;
 use crate::arch::x86_64::spl;
