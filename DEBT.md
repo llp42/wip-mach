@@ -51,8 +51,8 @@ deletes its entry; a change that opens one adds it.
   machine-independent core, and each mechanism has moved to its own
   crate or has been found to fail the split test.
 - **Recorded outcomes**: `elf_load` passes the split test and lives in
-  `crates/elf-load` as original MIT code with isolated x86 / x86_64
-  readers.
+  `crates/elf-load` as original MIT code with one `x86_64` reader;
+  `ELFCLASS32` is rejected (ADR 0003).
 
 ## Host tests compile kernel sources through a shim
 

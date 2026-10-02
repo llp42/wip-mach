@@ -28,7 +28,6 @@ use crate::ipc::{IpcPort, IpcSpace};
 use crate::kern::boot_script::{self, Command, Host, Script};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
-use elf_load::{self, ExecSectype};
 use crate::kern::host;
 use crate::kern::lock::SimpleLock;
 use crate::kern::printf;
@@ -48,6 +47,7 @@ use core::ptr::{
     self, NonNull, addr_of_mut, null_mut, with_exposed_provenance_mut,
 };
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use elf_load;
 
 /// The send-right type the port insertion calls take.
 const MACH_MSG_TYPE_PORT_SEND: c_uint = 17;
@@ -532,25 +532,12 @@ struct ModuleImage<'a> {
     module: &'a MultibootModule,
 }
 
-/// The module image does not cover the requested file range.
-#[derive(Clone, Copy, Debug)]
-struct ShortImage;
-
 impl elf_load::ElfImage for ModuleImage<'_> {
-    type Error = ShortImage;
-
-    fn read_at(
-        &self,
-        buf: &mut [u8],
-        offset: u64,
-    ) -> Result<usize, Self::Error> {
-        // A range the module does not cover is a short read, not an
-        // error: the loader classifies it as an unrecognized image.
-        let Some(source) = self
-            .module
-            .image_at(offset as VmOffset, buf.len())
-        else {
-            return Ok(0);
+    fn read_at(&self, buf: &mut [u8], offset: usize) -> usize {
+        // A range the module does not cover is a short read: the
+        // loader classifies it as a malformed image.
+        let Some(source) = self.module.image_at(offset, buf.len()) else {
+            return 0;
         };
         // SAFETY: `image_at` covers `buf.len()` bytes at `source`, and
         // `buf` is writable for that many.
@@ -561,36 +548,39 @@ impl elf_load::ElfImage for ModuleImage<'_> {
                 buf.len(),
             );
         }
-        Ok(buf.len())
+        buf.len()
     }
+}
 
-    fn place(
-        &mut self,
-        offset: u64,
-        file_len: usize,
-        addr: usize,
-        mem_len: usize,
-        sectype: ExecSectype,
-    ) -> Result<(), Self::Error> {
-        let Some(source) = self
-            .module
-            .image_at(offset as VmOffset, file_len)
+impl ModuleImage<'_> {
+    /// Allocates the segment's pages, copies its file bytes and applies
+    /// its protection, halting on any failure.
+    fn place(&self, segment: elf_load::Segment) {
+        let Some(source) =
+            self.module.image_at(segment.offset(), segment.file_len())
         else {
-            return Err(ShortImage);
+            kpanic!(
+                "read_exec",
+                "the bootstrap module does not cover the section at {:#x}",
+                segment.offset()
+            );
         };
-        if !sectype.contains(ExecSectype::ALLOC) {
-            return Ok(());
-        }
 
+        let addr = segment.addr();
         // SAFETY: runs on the thread that receives the image; its task
         // and map are live.
         let map = unsafe { (*current_task()).map }.cast::<VmMap>();
         let mut start_page = trunc_page(addr);
-        let end_page = round_page(addr.wrapping_add(mem_len));
+        let end_page = round_page(addr.wrapping_add(segment.mem_len()));
         let page_count = end_page - start_page;
         if let Some(mut map) = NonNull::new(map) {
             let result = unsafe {
-                vm_user::allocate(map.as_mut(), &mut start_page, page_count, false)
+                vm_user::allocate(
+                    map.as_mut(),
+                    &mut start_page,
+                    page_count,
+                    false,
+                )
             };
             if let Err(error) = result {
                 kpanic!(
@@ -601,15 +591,19 @@ impl elf_load::ElfImage for ModuleImage<'_> {
             }
         }
 
-        if file_len > 0 {
+        if segment.file_len() > 0 {
             // SAFETY: `image_at` covers `file_len` bytes, and the
             // user address is the segment just allocated above.
             unsafe {
-                user_access::copyout(source, user_ptr(addr), file_len);
+                user_access::copyout(
+                    source,
+                    user_ptr(addr),
+                    segment.file_len(),
+                );
             }
         }
 
-        let mem_prot = vm_prot(sectype.protection());
+        let mem_prot = vm_prot(segment.sectype().protection());
         if mem_prot != VmProt::ALL
             && let Some(mut map) = NonNull::new(map)
         {
@@ -630,7 +624,6 @@ impl elf_load::ElfImage for ModuleImage<'_> {
                 );
             }
         }
-        Ok(())
     }
 }
 
@@ -649,16 +642,28 @@ fn vm_prot(prot: elf_load::Prot) -> VmProt {
     result
 }
 
-/// Loads the image of `module` into the current task's map, or halts.
+/// Parses the image of `module` and places its segments into the current
+/// task's map, or halts.
 fn load_bootstrap(module: &MultibootModule) -> elf_load::ExecInfo {
-    let mut image = ModuleImage { module };
-    match elf_load::load(&mut image) {
+    let image = ModuleImage { module };
+    let info = match elf_load::parse(&image) {
         Ok(info) => info,
         Err(err) => kpanic!(
             "copy_bootstrap",
             "Cannot load user-bootstrap image: {err:?}"
         ),
+    };
+    for segment in info.segments(&image) {
+        let segment = match segment {
+            Ok(segment) => segment,
+            Err(err) => kpanic!(
+                "copy_bootstrap",
+                "Cannot read user-bootstrap image: {err:?}"
+            ),
+        };
+        image.place(segment);
     }
+    info
 }
 
 /// One environment entry: a name ending in `=`, and a value.
@@ -746,12 +751,7 @@ unsafe fn build_args_and_stack(
         stack_prot: 0,
     };
     let mut arg_pos = unsafe {
-        set_user_regs(
-            stack_base,
-            stack_size,
-            ptr::from_ref(&regs),
-            arg_len,
-        )
+        set_user_regs(stack_base, stack_size, ptr::from_ref(&regs), arg_len)
     };
     let mut string_pos = arg_pos + pointer_bytes;
 
@@ -866,9 +866,8 @@ unsafe extern "C" fn user_bootstrap() {
     let thread = per_cpu::thread();
     let info = unsafe { (*thread).saved.other.cast::<UserBootstrapInfo>() };
     // SAFETY: the launcher stored the live module pointer in `info`.
-    let exec_info = load_bootstrap(unsafe {
-        &*(*info).module.cast::<MultibootModule>()
-    });
+    let exec_info =
+        load_bootstrap(unsafe { &*(*info).module.cast::<MultibootModule>() });
 
     kprint!("task loaded:");
     let argv = unsafe { &*(*info).argv };

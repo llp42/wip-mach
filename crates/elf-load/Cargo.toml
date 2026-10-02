@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license = "MIT"
-description = "Load ELF executables: recognize an image and place its segments"
+description = "Parse ELF executables: recognize an image and report its segments"
 repository.workspace = true
 publish = false
 
@@ -31,13 +31,13 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 missing_safety_doc = "deny"
-# ADR 0018: a bad image is an error, never a panic.
+# A bad image is an error, never a panic.
 unwrap_used = "deny"
 expect_used = "deny"
 indexing_slicing = "deny"
 panic = "deny"
 allow_attributes = "deny"
-# The fields are the ELF header's `e_*` and `p_*` members (ADR 0010).
+# The fields are the ELF header's `e_*` and `p_*` members.
 struct_field_names = "allow"
 # Contradicts rustc's `unreachable_pub`, which this crate follows.
 redundant_pub_crate = "allow"
