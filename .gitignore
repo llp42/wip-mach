@@ -2,3 +2,9 @@
 /abi-test
 /debug
 mise.local.toml
+
+# Claude Code skills travel with the tree; the rest of .claude stays local.
+# The global ignore excludes `.claude` wholesale, so carve skills back out.
+!.claude/
+/.claude/*
+!.claude/skills/
