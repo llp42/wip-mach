@@ -186,7 +186,6 @@ must not claim to close them.
 | ADR 0028 sleeper stops its own callout | Wakeup path still cancels the woken thread's timer | DEBT.md:26-33; `sched_prim.rs:645,710` `Thread::stop_timer` |
 | `clock` `CriticalLock` → `lock::IrqSpinLock` | Crate lock policy (ADRs 0029/0041) | DEBT.md:16-24; `clock/src/critical.rs` |
 | `kern/timer.rs` → `clock::Timer` | v0 left it out (cosmic-eagle plan:27-28). **Not a drop-in:** `kern/timer.rs` `Timer` has a `tstamp` field and C layout asserts (`timer.rs:33-34,192-197`); `clock::Timer` has private fields and no `tstamp` | `kern/timer.rs`, `clock/src/timer.rs` |
-| `host_adjust_time64` query arm | `MACH_ADJTIME_NSECS_OMIT` returns zero; `Clock` has no `Adjustment` getter | DEBT.md:35-42; `mach_clock.rs:390-395` |
 
 ## 6. Stale pointers to fix when the module goes
 

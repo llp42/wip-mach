@@ -181,12 +181,11 @@ pub(crate) fn adjust_time(
     // only handed back to `splx()`.
     let s = unsafe { spl::splclock() };
 
+    // The C read the outstanding adjustment before the write, under the
+    // same `splclock()`, so both arms answer it: the query leaves the
+    // stored value alone, and the write hands back what it replaced.
     let old_nanos = if new_adjustment.nanoseconds == MACH_ADJTIME_NSECS_OMIT {
-        // Read-only query: `set_adjustment` with the current value is not
-        // exposed, so return the outstanding correction as zero here and
-        // only write when the caller supplies one.  The C returned
-        // `timedelta`; the `clock` crate keeps that in `Adjustment`.
-        0
+        CLOCK.adjustment()
     } else {
         let nanos = new_adjustment
             .seconds
@@ -195,7 +194,14 @@ pub(crate) fn adjust_time(
         CLOCK.set_adjustment(nanos)
     };
 
-    let old = TimeValue64::from_nanos(old_nanos.max(0) as u64);
+    // The C split the outstanding microseconds into whole seconds and the
+    // remainder, truncating toward zero, so a negative correction keeps
+    // both parts negative.
+    let micros = old_nanos / 1000;
+    let old = TimeValue64 {
+        seconds: micros / 1_000_000,
+        nanoseconds: (micros % 1_000_000) * 1000,
+    };
 
     // SAFETY: `s` is the level `splclock()` returned.
     unsafe { spl::splx(s) };

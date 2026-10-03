@@ -1,10 +1,6 @@
-[tool_alias]
-mimo = "github:XiaomiMiMo/MiMo-Code"
-
 [tools]
 rust = { version = "stable", targets = "x86_64-unknown-none" }
 "cargo:cargo-llvm-cov" = "0.9.1"
-mimo = "0.1.15"
 
 [tasks."build::dev"]
 description = "Build the kernel with the dev profile"
@@ -76,6 +72,10 @@ run = "cargo bench -p clock --target x86_64-unknown-linux-gnu --bench timers"
 [tasks."bench::lock"]
 description = "Benchmark the lock crate's spin and sleeping locks"
 run = "cargo bench -p lock --target x86_64-unknown-linux-gnu"
+
+[tasks."bench::rdxtree"]
+description = "Benchmark the old kern/rdxtree against kmem::RadixTree"
+run = "cargo bench -p rdxtree-bench --target x86_64-unknown-linux-gnu"
 
 [tasks."test::unit"]
 description = "Run the host unit tests of the portable kernel modules"

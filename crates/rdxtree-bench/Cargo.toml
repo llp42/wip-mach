@@ -1,0 +1,19 @@
+[package]
+name = "rdxtree-bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Times kmem::RadixTree against the kern/rdxtree it replaced"
+repository.workspace = true
+publish = false
+
+[dependencies]
+kmem = { path = "../kmem" }
+
+[dev-dependencies]
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "trees"
+harness = false

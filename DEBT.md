@@ -32,15 +32,6 @@ deletes its entry; a change that opens one adds it.
   that resume path non-local).
 - **Done when**: no wakeup path touches another thread's timer.
 
-## `host_adjust_time64` with `MACH_ADJTIME_NSECS_OMIT` returns zero
-
-- **ADR**: ADR 0002 (behaviour).
-- **Where**: `host_time::adjust_time` queries the outstanding
-  adjustment as zero; `clock::Clock` has no getter for
-  `Adjustment`, and `set_adjustment` always writes.
-- **Done when**: the query arm returns the outstanding gradual
-  correction the C `timedelta` held.
-
 ## The machine-independent core is still in `kernel`
 
 - **ADR**: ADR 0014.
@@ -143,6 +134,20 @@ deletes its entry; a change that opens one adds it.
 - **Where**: `crates/kernel/Cargo.toml`.
 - **Done when**: `kernel` and `wip-mach` deny `unwrap_used`,
   `expect_used`, `indexing_slicing` and `panic`.
+
+## `cov::kmem` counts misses no view of `radix_tree.rs` shows
+
+- **ADR**: ADR 0024.
+- **Where**: `cargo llvm-cov`'s summary counts 15 lines and 29 regions
+  missed in `crates/kmem/src/radix_tree.rs`, while its own
+  `llvm-cov export -format=lcov` has no zero-count record for the file,
+  the HTML report marks no row uncovered, and `llvm-cov show` prints no
+  zero-count line in any instantiation.  The committed tree measured
+  100%; the in-progress rewrite is what started it, and per-instantiation
+  gaps, unexecuted instantiations, inlining and `value_above_bottom` were
+  each ruled out by experiment.
+- **Done when**: `cov::kmem` passes again, or the counts are shown to be
+  an artifact of the summary and the gate is trusted for this file.
 
 ## `RB_DEBUGGER` panics
 

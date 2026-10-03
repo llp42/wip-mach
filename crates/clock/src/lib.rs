@@ -129,6 +129,15 @@ impl<P: Platform> Clock<P> {
         old
     }
 
+    /// The outstanding gradual adjustment, in nanoseconds.
+    pub fn adjustment(&self) -> i64 {
+        let (critical, state) = self.state.lock(&self.platform);
+        let nanos = state.adjust.get();
+        drop(state);
+        drop(critical);
+        nanos
+    }
+
     /// The interpolated value of an atomic base, retrying while a tick
     /// publishes.
     fn interpolated(&self, base: &AtomicU64) -> u64 {
@@ -217,6 +226,17 @@ mod tests {
         assert_eq!(clock.mono().as_nanos(), TICK_NANOS + 5_000);
         // One tick drained its tickdelta of the outstanding 1000 us.
         assert_eq!(clock.set_adjustment(0), 995_000);
+    }
+
+    #[test]
+    fn clock_reports_the_outstanding_adjustment() {
+        let clock = Clock::new(Fake::with_period_nsec(1));
+        assert_eq!(clock.adjustment(), 0);
+        assert_eq!(clock.set_adjustment(1_000_000), 0);
+        assert_eq!(clock.adjustment(), 1_000_000);
+        clock.tick(TICK);
+        // One tick drained its tickdelta, and the getter kept the rest.
+        assert_eq!(clock.adjustment(), 995_000);
     }
 
     #[test]

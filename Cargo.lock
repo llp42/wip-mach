@@ -368,6 +368,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdxtree-bench"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "kmem",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
