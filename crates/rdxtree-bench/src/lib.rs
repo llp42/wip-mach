@@ -1,164 +1,57 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Times [`kmem::RadixTree`] against the `kern/rdxtree` it replaced.
+//! Times [`kmem::RadixTree`] against the C tree it replaced.
 //!
-//! The old tree is `src/old/rdxtree.rs`, a verbatim snapshot of the
-//! BSD-2-Clause `crates/kernel/src/kern/rdxtree.rs` that commit `c189c8b`
-//! deleted: the bench cannot drift from what the kernel ran.  Its three
-//! kernel dependencies are shimmed here as small host modules at the
-//! paths the file imports (`kern::slab`, `utils::cell`, `vm::error`).
+//! The reference is `src/old`, a frozen copy of the C the kernel's tree
+//! was translated from, compiled by `build.rs` (ADR 0052).  The
+//! contender is [`kmem::RadixTree`], the MIT rewrite over `A: Alloc`.
+//! Both store the same `NonNull<c_void>` values under the same 32-bit
+//! keys, the reference because the kernel builds it with 32-bit keys and
+//! the contender because [`kmem::RadixKey`] is one word, so a run
+//! compares two trees and not two key widths.
 //!
-//! Both contenders allocate nodes from the same kind of free list and
-//! store the same `NonNull<c_void>` values, so a run measures the tree
-//! walk and its bookkeeping, not the allocator.  Only relative numbers
-//! are meaningful: this is a host process, not the kernel.
+//! Ids read `<tree>/<workload>/<entries>`, with `c` the reference and
+//! `new` the rewrite.  Every workload is an action the kernel performs on
+//! the name table of an IPC space, or on the reverse map beside it:
+//!
+//! | workload | the kernel's action | where |
+//! |---|---|---|
+//! | `insert_alloc` | the lowest free name, on port creation | `ipc/ipc_entry.rs:240` |
+//! | `insert_named` | an entry registered at a chosen name | `ipc/ipc_entry.rs:296` |
+//! | `lookup` | name to entry | `ipc/ipc_entry.rs:279` |
+//! | `remove` | release, which evicts once the free list is full | `ipc/ipc_entry.rs:183` |
+//! | `replace` | a fresh entry written into a slot already held | `ipc/ipc_space.rs:98` |
+//! | `walk` | `mach_port_names`, and set membership | `ipc/mach_port.rs:1112` |
+//! | `clear` | space teardown | `ipc/ipc_space.rs:341` |
+//! | `churn`, `ipc` | a live port population allocating and releasing | `ipc/ipc_entry.rs:240` |
+//! | `reverse_map` | the second map every space keeps | `ipc/ipc_space.rs:120` |
+//! | `*_sparse*` | keys spread over the whole domain, the worst descent | — |
+//!
+//! Only relative numbers mean anything: this is a host process, not the
+//! kernel, and the reference is compiled by whatever `cc` the host has.
+//! Three things are held equal so that a difference is the trees':
+//!
+//! - **The allocator.**  Both draw nodes from a process-global free list
+//!   that survives between iterations, as the kernel's node cache does,
+//!   so neither pays the host allocator for a node the other reuses.
+//! - **The teardown.**  Each routine takes its tree by value, so its
+//!   destructor runs inside the timed window; [`CTree`] drops through
+//!   `rdxtree_remove_all` and [`NewTree`] through `RadixTree::drop`.
+//! - **The assertions.**  The reference is built with `NDEBUG` because
+//!   the contender's `debug_assert!`s are compiled out in this profile.
+//!
+//! One difference is not equalised, because it is the trees': replacing a
+//! key that is *absent* inserts it in the contender and hands back null
+//! in the reference.  No workload reaches that path — every key the
+//! `replace` workload rewrites is present — so it shows up as nothing.
 
-use core::ffi::c_void;
+use core::ffi::{c_int, c_void};
+use core::mem::{MaybeUninit, offset_of, size_of};
 use core::ptr::NonNull;
-use std::alloc::{Layout, alloc, dealloc};
+use std::alloc::{Layout, alloc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, Once};
-
-/// The kernel items `old/rdxtree.rs` imports, as host shims.
-pub mod kern {
-    /// A fixed-size node cache with a free list.
-    pub mod slab {
-        use core::cell::Cell;
-        use core::ptr::NonNull;
-        use std::alloc::{Layout, alloc, dealloc};
-        use std::sync::Mutex;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        /// Outstanding blocks across every `KmemCache`. The snapshot's
-        /// node cache is a private `static`, so counting lives here.
-        static LIVE: AtomicUsize = AtomicUsize::new(0);
-
-        /// How many blocks the shims currently hold outstanding.
-        #[must_use]
-        pub fn live_blocks() -> usize {
-            LIVE.load(Ordering::Relaxed)
-        }
-
-        /// `CacheInitFlags`; only `EMPTY` exists.
-        #[derive(Clone, Copy)]
-        pub struct CacheInitFlags;
-
-        impl CacheInitFlags {
-            /// `kmem_cache_init(..., 0)`.
-            pub const EMPTY: Self = Self;
-        }
-
-        /// `KmemCache`: a free list of one block size over the host heap.
-        pub struct KmemCache {
-            size: Cell<usize>,
-            align: Cell<usize>,
-            free: Mutex<Vec<(NonNull<u8>, Layout)>>,
-        }
-
-        impl KmemCache {
-            /// An uninitialised cache, as `KmemCache::zeroed()` left one.
-            pub const fn zeroed() -> Self {
-                Self {
-                    size: Cell::new(0),
-                    align: Cell::new(0),
-                    free: Mutex::new(Vec::new()),
-                }
-            }
-
-            /// Records the block size; `ctor` is unused here.
-            pub fn init(
-                &self,
-                _name: &[u8],
-                size: usize,
-                align: usize,
-                _ctor: Option<fn(*mut u8)>,
-                _flags: CacheInitFlags,
-            ) {
-                self.size.set(size);
-                self.align.set(if align == 0 {
-                    core::mem::align_of::<usize>()
-                } else {
-                    align
-                });
-            }
-
-            /// A block from the list, or a fresh host allocation.
-            pub fn alloc(&self) -> Option<NonNull<u8>> {
-                if let Some((block, _)) = self.free.lock().unwrap().pop() {
-                    LIVE.fetch_add(1, Ordering::Relaxed);
-                    return Some(block);
-                }
-                let size = self.size.get();
-                if size == 0 {
-                    return None;
-                }
-                let layout =
-                    Layout::from_size_align(size, self.align.get()).ok()?;
-                // SAFETY: `layout` is non-zero and matches the one every
-                // later `free` of this block reuses.
-                let block = unsafe { alloc(layout) };
-                LIVE.fetch_add(1, Ordering::Relaxed);
-                NonNull::new(block)
-            }
-
-            /// Returns a block to the list.
-            pub fn free(&self, block: NonNull<u8>) {
-                let layout =
-                    Layout::from_size_align(self.size.get(), self.align.get())
-                        .expect("the cache was initialised");
-                self.free.lock().unwrap().push((block, layout));
-                LIVE.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-
-        impl Drop for KmemCache {
-            fn drop(&mut self) {
-                for (block, layout) in self.free.get_mut().unwrap().drain(..) {
-                    // SAFETY: every block came from `alloc` with this
-                    // layout and is not used again.
-                    unsafe { dealloc(block.as_ptr(), layout) };
-                }
-            }
-        }
-    }
-}
-
-/// The kernel items `old/rdxtree.rs` imports, as host shims.
-pub mod utils {
-    /// The kernel's `UnsafeCell` wrapper.
-    pub mod cell {
-        use core::cell::UnsafeCell;
-
-        /// A cell a `static` may hold.
-        pub struct SyncCell<T>(pub UnsafeCell<T>);
-
-        // SAFETY: the bench is single-threaded, and the cache guards its
-        // own list with a mutex.
-        unsafe impl<T> Sync for SyncCell<T> {}
-    }
-}
-
-/// The kernel items `old/rdxtree.rs` imports, as host shims.
-pub mod vm {
-    /// The tree's error type.
-    pub mod error {
-        /// `vm::error::Error`, the two variants the tree uses.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum Error {
-            /// The key is already used.
-            InvalidArgument,
-            /// Memory is short.
-            ResourceShortage,
-        }
-    }
-}
-
-// The snapshot keeps every line of the deleted kernel file,
-// including the helpers this bench never calls.
-#[allow(dead_code)]
-#[path = "old/rdxtree.rs"]
-mod rdxtree;
 
 /// Both trees answer the same calls; the bench drives this trait.
 pub trait Tree {
@@ -186,117 +79,252 @@ pub const fn mix(hash: u64, value: u64) -> u64 {
     hash.wrapping_mul(31).wrapping_add(value)
 }
 
-/// The old `kern/rdxtree`, over its shimmed node cache.
-pub struct OldTree {
-    tree: rdxtree::Rdxtree,
+/// The reference's tree: a height and a root that is a node or a value.
+///
+/// `bridge.c` asserts every offset and size below, and the key's width
+/// with them, so a mismatch is a build failure rather than a silent one.
+#[repr(C)]
+struct Rdxtree {
+    height: u32,
+    root: *mut c_void,
 }
 
-impl OldTree {
+/// The reference's iterator: the node it last reached and its key.
+#[repr(C)]
+struct RdxtreeIter {
+    node: *mut c_void,
+    key: u32,
+}
+
+const _: () = {
+    assert!(size_of::<Rdxtree>() == 16);
+    assert!(offset_of!(Rdxtree, root) == 8);
+    assert!(size_of::<RdxtreeIter>() == 16);
+    assert!(offset_of!(RdxtreeIter, key) == 8);
+};
+
+// The reference's entry points.  The ones its headers declare `static
+// inline` have no symbol of their own and are reached through the
+// `_bench_` wrappers `bridge.c` defines.
+unsafe extern "C" {
+    /// Initializes the reference's node cache; once per process.
+    fn rdxtree_cache_init();
+    /// Removes `key`, answering the pointer it held.
+    fn rdxtree_remove(tree: *mut Rdxtree, key: u32) -> *mut c_void;
+    /// Drops every entry and frees every node.
+    fn rdxtree_remove_all(tree: *mut Rdxtree);
+    /// Writes `ptr` into `slot`, answering the pointer it displaced.
+    fn rdxtree_replace_slot(
+        slot: *mut *mut c_void,
+        ptr: *mut c_void,
+    ) -> *mut c_void;
+    /// Steps the iterator to the next entry, or null at the end.
+    fn rdxtree_walk(tree: *mut Rdxtree, iter: *mut RdxtreeIter)
+    -> *mut c_void;
+
+    /// `rdxtree_init()`.
+    fn rdxtree_bench_init(tree: *mut Rdxtree);
+    /// `rdxtree_insert()`: zero on success, non-zero when `key` is taken.
+    fn rdxtree_bench_insert(
+        tree: *mut Rdxtree,
+        key: u32,
+        ptr: *mut c_void,
+    ) -> c_int;
+    /// `rdxtree_insert_alloc()`: zero on success, with the key written
+    /// through `keyp`.
+    fn rdxtree_bench_insert_alloc(
+        tree: *mut Rdxtree,
+        ptr: *mut c_void,
+        keyp: *mut u32,
+    ) -> c_int;
+    /// `rdxtree_lookup()`, or null when nothing is stored at `key`.
+    fn rdxtree_bench_lookup(tree: *const Rdxtree, key: u32) -> *mut c_void;
+    /// `rdxtree_lookup_slot()`, or null when nothing is stored at `key`.
+    fn rdxtree_bench_lookup_slot(
+        tree: *const Rdxtree,
+        key: u32,
+    ) -> *mut *mut c_void;
+    /// `rdxtree_iter_init()`.
+    fn rdxtree_bench_iter_init(iter: *mut RdxtreeIter);
+
+    /// How many node blocks the reference's cache holds outstanding.
+    fn rdxtree_bench_live_blocks() -> usize;
+}
+
+/// How many blocks the reference's trees currently hold.
+///
+/// The reference's cache is one process-wide cache, so this counts every
+/// tree at once; read it around one tree's fill, as the node-count
+/// example does.
+#[must_use]
+pub fn c_live_blocks() -> usize {
+    // SAFETY: the counter is a plain global with no preconditions.
+    unsafe { rdxtree_bench_live_blocks() }
+}
+
+/// The C tree the kernel's translation came from.
+pub struct CTree {
+    tree: Rdxtree,
+}
+
+impl CTree {
     /// A tree, with the node cache initialised once per process.
     #[must_use]
     pub fn new() -> Self {
         static INIT: Once = Once::new();
-        INIT.call_once(rdxtree::cache_init);
-        let mut tree: rdxtree::Rdxtree = unsafe { core::mem::zeroed() };
-        tree.init();
-        Self { tree }
+        // SAFETY: the cache is a process-wide global, and `Once` runs
+        // this before any tree can allocate from it.
+        INIT.call_once(|| unsafe { rdxtree_cache_init() });
+
+        let mut tree = MaybeUninit::<Rdxtree>::uninit();
+        // SAFETY: the initializer writes both words and reads nothing.
+        unsafe { rdxtree_bench_init(tree.as_mut_ptr()) };
+        // SAFETY: the call above initialised the whole structure.
+        Self {
+            tree: unsafe { tree.assume_init() },
+        }
     }
 }
 
-impl Default for OldTree {
+impl Default for CTree {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Tree for OldTree {
+impl Tree for CTree {
     fn new() -> Self {
-        OldTree::new()
+        CTree::new()
     }
 
     fn insert_alloc(&mut self, ptr: NonNull<c_void>) -> u32 {
-        self.tree
-            .insert_alloc(ptr)
-            .map(|(key, _)| key.into_raw())
-            .expect("the host cache does not run dry")
+        let mut key = 0_u32;
+        // SAFETY: the tree is live and exclusively borrowed, and `key`
+        // is writable; a stored value is never null, as `tree` asserts.
+        let result = unsafe {
+            rdxtree_bench_insert_alloc(
+                &raw mut self.tree,
+                ptr.as_ptr(),
+                &raw mut key,
+            )
+        };
+        assert_eq!(result, 0, "the host cache does not run dry");
+        key
     }
 
     fn insert_named(&mut self, name: u32, ptr: NonNull<c_void>) -> bool {
-        self.tree
-            .insert(rdxtree::RdxtreeKey::from_raw(name), ptr)
-            .is_ok()
+        // SAFETY: the tree is live and exclusively borrowed; a stored
+        // value is never null, as `tree` asserts.
+        let result = unsafe {
+            rdxtree_bench_insert(&raw mut self.tree, name, ptr.as_ptr())
+        };
+        result == 0
     }
 
     fn lookup(&self, name: u32) -> u64 {
-        match self.tree.lookup(
-            rdxtree::RdxtreeKey::from_raw(name),
-            rdxtree::Lookup::Value,
-        ) {
-            Some(found) => found.address() as u64,
-            None => 0,
-        }
+        // SAFETY: the tree is live and shared, which is all a lookup
+        // reads it through.
+        let found = unsafe { rdxtree_bench_lookup(&self.tree, name) };
+        found as u64
     }
 
     fn remove(&mut self, name: u32) -> u64 {
-        match self.tree.remove(rdxtree::RdxtreeKey::from_raw(name)) {
-            Some(ptr) => ptr.as_ptr() as u64,
-            None => 0,
-        }
+        // SAFETY: the tree is live and exclusively borrowed.
+        let removed = unsafe { rdxtree_remove(&raw mut self.tree, name) };
+        removed as u64
     }
 
     fn replace(&mut self, name: u32, ptr: NonNull<c_void>) -> u64 {
-        match self
-            .tree
-            .lookup(rdxtree::RdxtreeKey::from_raw(name), rdxtree::Lookup::Slot)
-        {
-            Some(rdxtree::Found::Slot(slot)) => {
-                // SAFETY: `slot` points into this tree's live storage,
-                // and the bench is single-threaded.
-                let old =
-                    unsafe { rdxtree::replace_slot(&mut *slot, ptr.as_ptr()) };
-                old as u64
-            }
-            _ => 0,
+        // SAFETY: the tree is live and shared, which is all a lookup
+        // reads it through.
+        let slot = unsafe { rdxtree_bench_lookup_slot(&self.tree, name) };
+        if slot.is_null() {
+            return 0;
         }
+        // SAFETY: a non-null slot points into this tree's live storage,
+        // the tree is exclusively borrowed so no other writer reaches
+        // it, and `replace_slot` only writes the one word.
+        let old = unsafe { rdxtree_replace_slot(slot, ptr.as_ptr()) };
+        old as u64
     }
 
     fn walk(&self) -> u64 {
-        let mut iter = rdxtree::RdxtreeIter::new();
+        let mut iter = MaybeUninit::<RdxtreeIter>::uninit();
+        // SAFETY: the initializer writes both fields and reads nothing.
+        unsafe { rdxtree_bench_iter_init(iter.as_mut_ptr()) };
+        // SAFETY: the call above initialised the whole structure.
+        let mut iter = unsafe { iter.assume_init() };
+
         let mut sum = 0_u64;
-        while let Some(ptr) = self.tree.walk(&mut iter) {
-            sum = mix(sum, ptr.as_ptr() as u64);
+        loop {
+            // SAFETY: the tree is live; the walk writes only the
+            // iterator, which this call owns exclusively, so sharing the
+            // tree is sound even though the parameter is not `const`.
+            let ptr = unsafe {
+                rdxtree_walk(&raw const self.tree as *mut _, &raw mut iter)
+            };
+            if ptr.is_null() {
+                return sum;
+            }
+            sum = mix(sum, ptr as u64);
         }
-        sum
     }
 
     fn clear(&mut self) {
-        self.tree.remove_all();
+        // SAFETY: the tree is live and exclusively borrowed; every
+        // stored value is a pointer the caller keeps, so nothing is
+        // leaked by not running a destructor over them.
+        unsafe { rdxtree_remove_all(&raw mut self.tree) };
     }
 }
 
-/// Outstanding blocks across every `HostAlloc`. `RadixTree` owns its
-/// allocator, so counting lives here rather than on the tree.
+impl Drop for CTree {
+    /// Frees every node, as the contender's `Drop` does.
+    ///
+    /// Each timed routine takes its tree by value, so this runs inside
+    /// the measured window; a tree that skipped it would win every
+    /// workload that fills one.
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// Blocks handed out and not yet given back.
 static HOST_LIVE: AtomicUsize = AtomicUsize::new(0);
 
-/// A host free list of node-sized blocks, standing in for the slab.
-pub struct HostAlloc {
-    free: Mutex<Vec<(NonNull<u8>, Layout)>>,
+/// The free list every tree's nodes come from.
+///
+/// One list for the process, as the kernel's node cache is one cache for
+/// every tree: a per-tree list would return its blocks when the tree is
+/// dropped, and the next iteration would call the host allocator for
+/// every node while the reference reused its own.
+static HOST_FREE: Mutex<FreeList> = Mutex::new(FreeList {
+    layout: None,
+    blocks: Vec::new(),
+});
+
+/// The blocks a [`HostAlloc`] has been given back, and the one block
+/// size they all are.
+struct FreeList {
+    layout: Option<Layout>,
+    blocks: Vec<NonNull<u8>>,
 }
+
+// SAFETY: the list owns the blocks it holds, and every access to it goes
+// through its mutex.  A pointer is not `Send` because it may be shared
+// with a thread that writes through it; these are not shared with
+// anything until the list hands one out.
+unsafe impl Send for FreeList {}
+
+/// A host free list of node-sized blocks, standing in for the slab.
+pub struct HostAlloc;
 
 impl HostAlloc {
-    /// An empty list.
+    /// A handle onto the process-wide list.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            free: Mutex::new(Vec::new()),
-        }
+        Self
     }
-}
-
-/// How many blocks the host allocators currently hold outstanding.
-#[must_use]
-pub fn host_live_blocks() -> usize {
-    HOST_LIVE.load(Ordering::Relaxed)
 }
 
 impl Default for HostAlloc {
@@ -305,13 +333,36 @@ impl Default for HostAlloc {
     }
 }
 
-// SAFETY: blocks stay valid until `free`, and the list is behind a mutex.
+/// How many blocks the trees currently hold.
+#[must_use]
+pub fn host_live_blocks() -> usize {
+    HOST_LIVE.load(Ordering::Relaxed)
+}
+
+/// Records the list's block size, and fails a second, different one.
+fn hold_layout(cache: &mut FreeList, layout: Layout) {
+    match cache.layout {
+        Some(held) => assert_eq!(
+            held, layout,
+            "one free list holds one block size; a tree node is one layout"
+        ),
+        None => cache.layout = Some(layout),
+    }
+}
+
+// SAFETY: blocks stay valid until they are given back, the list hands
+// each one out once, and it is behind a mutex.
 unsafe impl kmem::Alloc for HostAlloc {
     fn alloc(&self, layout: Layout) -> Result<NonNull<u8>, kmem::AllocError> {
-        if let Some((block, _)) = self.free.lock().unwrap().pop() {
+        let mut cache = HOST_FREE.lock().unwrap();
+        hold_layout(&mut cache, layout);
+
+        if let Some(block) = cache.blocks.pop() {
             HOST_LIVE.fetch_add(1, Ordering::Relaxed);
             return Ok(block);
         }
+        drop(cache);
+
         // SAFETY: `layout` is non-zero at every call of a tree node, and
         // the matching `free` reuses it.
         let block = unsafe { alloc(layout) };
@@ -320,18 +371,10 @@ unsafe impl kmem::Alloc for HostAlloc {
     }
 
     unsafe fn free(&self, block: NonNull<u8>, layout: Layout) {
-        self.free.lock().unwrap().push((block, layout));
+        let mut cache = HOST_FREE.lock().unwrap();
+        hold_layout(&mut cache, layout);
+        cache.blocks.push(block);
         HOST_LIVE.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-impl Drop for HostAlloc {
-    fn drop(&mut self) {
-        for (block, layout) in self.free.get_mut().unwrap().drain(..) {
-            // SAFETY: every block came from `alloc` with this layout and
-            // is not used again.
-            unsafe { dealloc(block.as_ptr(), layout) };
-        }
     }
 }
 
@@ -341,7 +384,7 @@ pub struct NewTree {
 }
 
 impl NewTree {
-    /// A tree over a fresh host free list.
+    /// A tree over the process's node free list.
     #[must_use]
     pub fn new() -> Self {
         Self {

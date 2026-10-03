@@ -50,6 +50,9 @@ number is never reused, so the list has gaps.
 - [0004 — Rust is the implementation language](docs/adr/0004-rust-is-the-implementation-language.md)
   — stable Rust, `cargo build` only; GNU MIG and `cc` at the MIG seam
   alone.
+- [0052 — A benchmark may vendor the reference it measures against](docs/adr/0052-a-benchmark-may-vendor-the-reference-it-measures-against.md)
+  — frozen and byte-identical below its provenance header; such a crate
+  is never linked into the kernel.
 - [0007 — Inline assembly only](docs/adr/0007-inline-assembly-only.md)
   — `asm!` / `global_asm!` / `naked_asm!`, `att_syntax`; no `.s`/`.S`
   files.

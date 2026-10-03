@@ -3,14 +3,14 @@
 
 //! Prints the node blocks each tree holds after a dense fill.
 //!
-//! Criterion times; it does not count. This answers "does the MIT
-//! rewrite use more nodes than the `kern/rdxtree` it replaced?" by
-//! reading the live-block counters the shims keep and printing the
-//! delta a filled tree holds.
+//! Criterion times; it does not count.  This answers "does the MIT
+//! rewrite use more nodes than the C it replaced?" by reading the
+//! live-block counters the two node caches keep and printing the delta a
+//! filled tree holds.
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
-use rdxtree_bench::{NewTree, OldTree, Tree, host_live_blocks, kern};
+use rdxtree_bench::{CTree, NewTree, Tree, c_live_blocks, host_live_blocks};
 
 const SIZES: [usize; 4] = [64, 1024, 32768, 131072];
 
@@ -21,15 +21,15 @@ fn main() {
         .map(|slot| NonNull::from(slot).cast::<c_void>())
         .collect();
 
-    println!("{:>8}  {:>10}  {:>10}", "n", "old", "new");
+    println!("{:>8}  {:>10}  {:>10}", "n", "c", "new");
     for &n in &SIZES {
         let old = {
-            let base = kern::slab::live_blocks();
-            let mut tree = OldTree::new();
+            let base = c_live_blocks();
+            let mut tree = CTree::new();
             for (i, &ptr) in ptrs.iter().take(n).enumerate() {
                 assert!(tree.insert_named(i as u32, ptr));
             }
-            let held = kern::slab::live_blocks() - base;
+            let held = c_live_blocks() - base;
             drop(tree);
             held
         };

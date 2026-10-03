@@ -9,11 +9,10 @@
 //! owner's [`Alloc`] and are freed on removal and on drop.  The tree
 //! never waits; a short heap is [`Error::ResourceShortage`].
 //!
-//! The performance comparison against the `kern/rdxtree` this replaced
-//! lives in the `rdxtree-bench` crate.  The old tree is a verbatim
-//! BSD-2-Clause snapshot with host shims for `kern::slab`, `utils::cell`
-//! and `vm::error`; that cannot sit beside this MIT code.  Unit tests of
-//! this tree are in `tests` below.
+//! The performance comparison against the tree this replaced lives in
+//! the `rdxtree-bench` crate, which builds a frozen copy of the reference
+//! C and times both on the workloads the kernel puts them through.  Unit
+//! tests of this tree are in `tests` below.
 //!
 //! | operation | cost |
 //! |---|---|
