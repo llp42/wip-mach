@@ -93,9 +93,11 @@ pub unsafe trait Platform: 'static {
     /// Returns whether `thread` is on a CPU now.
     ///
     /// A hint for spinning waiters; it may be stale by the time it is
-    /// read.  `thread` was read from a lock word and may have exited
-    /// since, so the platform keeps its thread records addressable after
-    /// exit (type-stable memory) or answers `false` for a dead thread.
+    /// read.  `thread` was read from a lock word, with acquire, so the
+    /// record as its thread made it is visible; but the thread may have
+    /// exited since, so the platform keeps its thread records addressable
+    /// after exit (type-stable memory) or answers `false` for a dead
+    /// thread.
     fn is_running(thread: ThreadRef) -> bool;
 
     /// Enters an irq-quiet section.

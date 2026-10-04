@@ -327,8 +327,8 @@ pub(crate) fn unpark<P: Platform>(
             first: None,
         };
         while let Some(top) = first_of(&queue, key)
-            .filter(|top| pick(top.token))
-            .map(NonNull::from)
+            // SAFETY: a waiter stays live while it is on the queue.
+            .filter(|top| pick(unsafe { top.as_ref() }.token))
         {
             // SAFETY: `top` is a waiter on this queue, which the bucket
             // lock guards, and joins `picked` to be woken below.
@@ -361,9 +361,17 @@ pub(crate) fn unpark<P: Platform>(
     })
 }
 
-/// Returns the longest waiting waiter of `key` in `queue`.
-fn first_of<'a>(queue: &'a Pin<&mut Queue>, key: usize) -> Option<&'a Waiter> {
-    queue.iter().find(|waiter| waiter.key == key)
+/// Returns the longest waiting waiter of `key` in `queue`, by the pointer
+/// it was queued with: the unpark that takes it off writes through that
+/// pointer, which one made from a `&Waiter` would not allow.
+fn first_of(queue: &Queue, key: usize) -> Option<NonNull<Waiter>> {
+    let mut cursor = queue.cursor_front();
+    loop {
+        if cursor.current()?.key == key {
+            return cursor.current_ptr();
+        }
+        cursor.move_next();
+    }
 }
 
 /// Wakes the longest waiting thread parked under `key`, if any; as

@@ -108,7 +108,10 @@ impl<P: Platform> RawMutex<P> {
     fn lock_slow(&self, me: usize) {
         let mut spins = 0;
         loop {
-            let state = self.state.load(Ordering::Relaxed);
+            // Acquire, so that the owner's thread record, which
+            // `is_running` reads, is seen as the owner made it before it
+            // wrote itself in with release.
+            let state = self.state.load(Ordering::Acquire);
             if state == 0
                 && self
                     .state
