@@ -8,5 +8,3 @@ description = "The MIG-generated Mach interfaces: native glue and raw bindings"
 repository.workspace = true
 publish = false
 links = "mach_mig"
-
-[dependencies]

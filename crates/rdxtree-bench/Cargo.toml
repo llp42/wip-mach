@@ -9,10 +9,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-kmem = { path = "../kmem" }
+kmem.workspace = true
 
 [dev-dependencies]
-criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+criterion.workspace = true
 
 [[bench]]
 name = "trees"

@@ -255,9 +255,10 @@ The crate denies Clippy's `all`, `pedantic`, `nursery`, `cargo` and
 `restriction` groups, plus a set of strict rustc lints, in its own
 `Cargo.toml`. Test-only relaxations (`unwrap`, `expect`, indexing and
 panics in tests) live in the crate's `clippy.toml`. The few
-`restriction` lints that are allowed each have their reason next to
-them. Some contradict another lint (`implicit_return`, one of each
-semicolon or visibility pair). The rest go against plain Rust idiom or
+`restriction` lints that are allowed have their reasons in
+[the lint policy](../../docs/adr/0026-lint-policy.md). Some contradict
+another lint (`implicit_return`, one of each semicolon or visibility
+pair). The rest go against plain Rust idiom or
 the repository's comment rules: `?`, `pub use`, `mod.rs`, a SAFETY
 comment inside an `unsafe fn`, or docs that respell a private name.
 Everything else is fixed in the code, not silenced. The one local

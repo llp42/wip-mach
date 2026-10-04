@@ -16,6 +16,12 @@ Every gate is a `mise` task. CI calls those tasks and runs every gate
 on every PR; the KVM-backed boot gates may move to a nightly run if
 they are too slow for every PR.
 
+`mise run check` runs the static gates and host tests in both profiles:
+`fmt`, `clippy::host`, `clippy::kernel`, `doc::host`, `doc::kernel`,
+`test::unit` and `test::unit::release`. Coverage, loom and boot gates
+are additional merge requirements. The check task's Cargo commands use
+`--locked` so validation cannot silently change dependency resolution.
+
 ## Considered Options
 
 - **Full coverage for leaf crates only**: `wip-mach` would be held to

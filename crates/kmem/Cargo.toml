@@ -8,10 +8,9 @@ description = "Fallible owning heap types over an allocator trait"
 repository.workspace = true
 publish = false
 
-[dependencies]
-
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+unfulfilled_lint_expectations = "deny"
 missing_docs = "deny"
 elided_lifetimes_in_paths = "deny"
 unused_qualifications = "deny"
@@ -31,10 +30,8 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 missing_safety_doc = "deny"
-# ADR 0018: an allocation failure is an error, never a panic.
 unwrap_used = "deny"
 expect_used = "deny"
 indexing_slicing = "deny"
 panic = "deny"
-# Contradicts rustc's `unreachable_pub`, which this crate follows.
 redundant_pub_crate = "allow"

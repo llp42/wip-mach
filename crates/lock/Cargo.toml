@@ -9,13 +9,13 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-collections = { path = "../collections" }
+collections.workspace = true
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "=0.7.2", default-features = false }
 
 [dev-dependencies]
-criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+criterion.workspace = true
 
 [[bench]]
 name = "spin"
@@ -27,6 +27,7 @@ harness = false
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+unfulfilled_lint_expectations = "deny"
 missing_docs = "deny"
 elided_lifetimes_in_paths = "deny"
 unused_qualifications = "deny"
@@ -47,5 +48,4 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 missing_safety_doc = "deny"
-# Contradicts rustc's `unreachable_pub`, which this crate follows.
 redundant_pub_crate = "allow"

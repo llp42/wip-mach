@@ -57,7 +57,7 @@ number is never reused, so the list has gaps.
   — `asm!` / `global_asm!` / `naked_asm!`, `att_syntax`; no `.s`/`.S`
   files.
 - [0022 — One feature set, two profiles](docs/adr/0022-one-feature-set-two-profiles.md)
-  — no Cargo features; `dev`, `checked`, `release`.
+  — no Cargo features; `dev` and `release`.
 - [0023 — Third-party runtime crates are the exception](docs/adr/0023-third-party-runtime-crates-are-the-exception.md)
   — `no_std`, pinned, audited, licence-compatible; none today.
 - [0024 — What a change must pass](docs/adr/0024-what-a-change-must-pass.md)

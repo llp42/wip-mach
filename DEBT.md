@@ -123,10 +123,12 @@ deletes its entry; a change that opens one adds it.
 - **Where**: `kernel/src/main.rs` allows the `cast_*` lints and
   `inline_always` crate-wide to mirror the C; 210 `#[allow]`
   attributes across `crates/`; `kernel` does not deny
-  `allow_attributes`.
+  `allow_attributes`; `collections/Cargo.toml` allows `single_call_fn`
+  despite the no-single-caller-helper rule in `AGENTS.md`.
 - **Done when**: no `#[allow(` or `#![allow(` remains in `crates/`, and
   every crate denies `allow_attributes` and
-  `allow_attributes_without_reason`.
+  `allow_attributes_without_reason`; `collections` no longer allows
+  `single_call_fn`.
 
 ## The panic lints are not denied
 
@@ -134,6 +136,28 @@ deletes its entry; a change that opens one adds it.
 - **Where**: `crates/kernel/Cargo.toml`.
 - **Done when**: `kernel` and `wip-mach` deny `unwrap_used`,
   `expect_used`, `indexing_slicing` and `panic`.
+
+## Three crates lack manifest lint rules
+
+- **ADR**: ADR 0026.
+- **Where**: `host-tests`, `mach-mig-sys` and `rdxtree-bench` have no
+  lint tables.
+- **Done when**: every crate has the baseline lint table.
+
+## Release Clippy rejects a radix-tree helper
+
+- **ADR**: ADR 0024; ADR 0026.
+- **Where**: `kmem/src/radix_tree.rs`'s `value_above_bottom` triggers
+  `clippy::missing_const_for_fn` with debug assertions off.
+- **Done when**: `mise run clippy::host` and `mise run clippy::kernel`
+  pass in both profiles.
+
+## Documentation does not pass with warnings denied
+
+- **ADR**: ADR 0024.
+- **Where**: `host-tests` has an unresolved link to `tests`; kernel
+  documentation emits rustdoc warnings.
+- **Done when**: `mise run doc::host` and `mise run doc::kernel` pass.
 
 ## `cov::kmem` counts misses no view of `radix_tree.rs` shows
 
@@ -173,9 +197,10 @@ deletes its entry; a change that opens one adds it.
 ## Gates are not `mise` tasks
 
 - **ADR**: ADR 0024.
-- **Where**: `mise.toml` has no task for the ABI suite, the Hurd smoke
-  test, `fmt`, clippy or `cargo doc`; its `test-boot-script` task runs
-  a `boot-script-tests/` directory that does not exist.
+- **Where**: `mise.toml` has no task for the ABI pack in `abi-test/`;
+  `test::abi` runs only the dev Hurd smoke test. Its
+  `test-boot-script` task runs a `boot-script-tests/` directory that
+  does not exist.
 - **Done when**: every gate of ADR 0024 is a `mise` task and every
   task runs.
 

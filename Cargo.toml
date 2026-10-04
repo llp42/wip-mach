@@ -10,22 +10,39 @@ authors = ["Leonardo Lopes Pereira <leonardolopespereira@outlook.com>"]
 license = "GPL-2.0-or-later"
 repository = "https://github.com/llp42/wip-mach"
 
-# The everyday build.  Debug assertions and overflow checks are on, so a
-# `debug_assert!` runs in a booted kernel and in host tests alike (ADR 0022).
+[workspace.dependencies]
+collections = { path = "crates/collections" }
+kmem = { path = "crates/kmem" }
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+spin = { version = "=0.12.3", default-features = false, features = ["spin_mutex"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unfulfilled_lint_expectations = "deny"
+missing_docs = "deny"
+elided_lifetimes_in_paths = "deny"
+unused_qualifications = "deny"
+trivial_numeric_casts = "deny"
+non_ascii_idents = "deny"
+meta_variable_misuse = "deny"
+let_underscore_drop = "deny"
+macro_use_extern_crate = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+missing_safety_doc = "deny"
+
 [profile.dev]
 opt-level = 2
-# Line tables only: full DWARF weighs the kernel image down.
 debug = "line-tables-only"
-debug-assertions = true
-overflow-checks = true
 panic = "abort"
 
-# What runs the Hurd, and what the benchmarks time: the checks are off.
 [profile.release]
 panic = "abort"
 lto = true
 
-# The benchmarks inherit `release`, whose LTO link dominates their build
-# time; they compare structures relative to each other, so they skip it.
 [profile.bench]
 lto = false

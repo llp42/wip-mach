@@ -79,7 +79,43 @@ run = "cargo bench -p rdxtree-bench --target x86_64-unknown-linux-gnu --bench tr
 
 [tasks."test::unit"]
 description = "Run the host unit tests of the portable kernel modules"
-run = "cargo test --workspace --target x86_64-unknown-linux-gnu"
+run = "cargo test --locked --workspace --exclude kernel --target x86_64-unknown-linux-gnu"
+
+[tasks."test::unit::release"]
+description = "Run host unit tests with release assertions and overflow behavior"
+run = "cargo test --locked --workspace --exclude kernel --target x86_64-unknown-linux-gnu --release"
+
+[tasks.fmt]
+description = "Check formatting across the workspace"
+run = "cargo fmt --all --check"
+
+[tasks."clippy::host"]
+description = "Deny host Clippy warnings in dev and release, including tests and benchmarks"
+run = [
+    "cargo clippy --locked --workspace --exclude kernel --target x86_64-unknown-linux-gnu --all-targets -- -D warnings",
+    "cargo clippy --locked --workspace --exclude kernel --target x86_64-unknown-linux-gnu --all-targets --release -- -D warnings",
+]
+
+[tasks."clippy::kernel"]
+description = "Deny Clippy warnings in freestanding crates in dev and release"
+run = [
+    "cargo clippy --locked --workspace --exclude host-tests --exclude rdxtree-bench --target x86_64-unknown-none -- -D warnings",
+    "cargo clippy --locked --workspace --exclude host-tests --exclude rdxtree-bench --target x86_64-unknown-none --release -- -D warnings",
+]
+
+[tasks."doc::host"]
+description = "Build host documentation with warnings denied"
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --locked --workspace --exclude kernel --target x86_64-unknown-linux-gnu --no-deps"
+
+[tasks."doc::kernel"]
+description = "Build kernel documentation with warnings denied"
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --locked -p kernel --target x86_64-unknown-none --no-deps"
+
+[tasks.check]
+description = "Run formatting, Clippy, documentation and host tests in both profiles"
+depends = ["fmt", "clippy::host", "clippy::kernel", "doc::host", "doc::kernel", "test::unit", "test::unit::release"]
 
 [tasks."test::abi"]
 description = "Hurd smoke test: fetch the pinned Debian GNU/Hurd image, swap in the kernel, boot it on serial, run the fixed commands and halt"
