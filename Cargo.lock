@@ -238,7 +238,6 @@ dependencies = [
  "kmem",
  "lock",
  "mach-mig-sys",
- "spin",
 ]
 
 [[package]]

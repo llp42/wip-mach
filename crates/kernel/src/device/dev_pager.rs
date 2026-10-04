@@ -13,6 +13,7 @@
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SHIFT;
 use crate::arch::x86_64::io_req::DevT;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::device::dev_lookup;
 use crate::device::dev_name::nomap;
 use crate::device::ds_routines::{MachDevice, driver_unit};
@@ -31,7 +32,7 @@ use core::mem::{align_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicI32, Ordering};
-use spin::Mutex;
+use lock::SpinLock;
 
 /// `DEV_HASH_COUNT` of `device/dev_pager.c`: the number of buckets in both
 /// tables.
@@ -90,7 +91,7 @@ static mut DEV_PAGER_HASHTABLE: [PagerBucket; DEV_HASH_COUNT] =
     [const { PagerBucket::new() }; DEV_HASH_COUNT];
 
 /// `dev_pager_hash_lock`: serializes the port-name table.
-static DEV_PAGER_HASH_LOCK: Mutex<()> = Mutex::new(());
+static DEV_PAGER_HASH_LOCK: SpinLock<(), MachPlatform> = SpinLock::new(());
 
 /// `dev_pager_hash_cache`: the `struct dev_pager_entry` slab cache.
 static mut DEV_PAGER_HASH_CACHE: KmemCache = KmemCache::zeroed();
@@ -108,7 +109,7 @@ static mut DEV_DEVICE_HASHTABLE: [DeviceBucket; DEV_HASH_COUNT] =
     [const { DeviceBucket::new() }; DEV_HASH_COUNT];
 
 /// `dev_device_hash_lock`: serializes the device-and-offset table.
-static DEV_DEVICE_HASH_LOCK: Mutex<()> = Mutex::new(());
+static DEV_DEVICE_HASH_LOCK: SpinLock<(), MachPlatform> = SpinLock::new(());
 
 /// `dev_device_hash_cache`: the `struct dev_device_entry` slab cache.
 static mut DEV_DEVICE_HASH_CACHE: KmemCache = KmemCache::zeroed();

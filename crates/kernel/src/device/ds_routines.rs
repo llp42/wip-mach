@@ -20,6 +20,7 @@ use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::io_req::{DevT, IoReq, IoReqQueue};
 use crate::arch::x86_64::irq;
 use crate::arch::x86_64::per_cpu;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::spl;
 use crate::arch::x86_64::user_access;
 use crate::config::NINTR;
@@ -57,7 +58,7 @@ use core::mem::{align_of, offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use kmem::KBox;
-use spin::Mutex;
+use lock::IrqSpinLock;
 
 /// `DEV_STATE_INIT` of <`device/dev_hdr.h`>.
 const DEV_STATE_INIT: c_short = 0;
@@ -609,9 +610,9 @@ unsafe fn io_done_list() -> Pin<&'static mut IoReqQueue> {
     unsafe { Pin::new_unchecked(&mut *IO_DONE_LIST.0.get()) }
 }
 
-/// `io_done_list_lock` of `device/ds_routines.c`.  The C held it at
-/// `splhigh()`; the callers keep that interrupt level.
-static IO_DONE_LIST_LOCK: Mutex<()> = Mutex::new(());
+/// `io_done_list_lock` of `device/ds_routines.c`.  An irq spin lock, since
+/// requests complete from interrupt handlers.
+static IO_DONE_LIST_LOCK: IrqSpinLock<(), MachPlatform> = IrqSpinLock::new(());
 
 /// `mach_device_emulation_ops` of `device/ds_routines.c`: the native Mach
 /// device emulation every device lookup installs.

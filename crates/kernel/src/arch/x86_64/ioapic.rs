@@ -11,6 +11,7 @@ use crate::arch::x86_64::apic;
 use crate::arch::x86_64::kd::keyboard::kdintr;
 use crate::arch::x86_64::per_cpu::cpu_id;
 use crate::arch::x86_64::pio::Port;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::spl;
 use crate::config::{MAX_NCPUS, NINTR};
 use crate::kern::console::{CStrArg, kprint};
@@ -20,7 +21,7 @@ use core::ffi::{c_char, c_int};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
-use spin::Mutex;
+use lock::IrqSpinLock;
 
 /// `interrupt_handler_fn` of <i386/ipl.h>: one `ivect` entry, or [`None`]
 /// where C leaves the vector unset.
@@ -228,8 +229,9 @@ pub static CALIBRATED_TICKS: AtomicU32 = AtomicU32::new(0);
 static HAS_IRQ_SPECIFIC_EOI: AtomicBool = AtomicBool::new(false);
 
 /// `ioapic_lock` of `i386/i386at/ioapic.c`: serializes the non-atomic
-/// select/window register pairs.
-static IOAPIC_LOCK: Mutex<()> = Mutex::new(());
+/// select/window register pairs.  An irq spin lock, since interrupt
+/// handlers mask and acknowledge lines.
+static IOAPIC_LOCK: IrqSpinLock<(), MachPlatform> = IrqSpinLock::new(());
 
 /// `APIC_IO_REDIR_LOW(pin)` of <i386/apic.h>: the low redirection register.
 const fn redir_low(pin: c_int) -> u32 {
@@ -300,17 +302,10 @@ fn write_entry(apic: c_int, pin: c_int, entry: RouteEntry) {
 /// The body of `ioapic_toggle_entry()` in C: change only the low word, so
 /// the mask bit flips without rewriting the entry.
 fn toggle_entry(apic: c_int, pin: c_int, mask: u32) {
-    // SAFETY: `splhigh()` is the real asm routine <machine/spl.h> declares,
-    // and its result is only handed back to `splx()`.
-    let saved = unsafe { spl::splhigh() };
-    {
-        let _guard = IOAPIC_LOCK.lock();
-        let mut entry = read_entry(apic, pin);
-        entry.set_mask(mask & 1);
-        write(apic, redir_low(pin), entry.lo);
-    }
-    // SAFETY: `saved` is the level `splhigh()` returned above.
-    unsafe { spl::splx(saved) };
+    let _guard = IOAPIC_LOCK.lock();
+    let mut entry = read_entry(apic, pin);
+    entry.set_mask(mask & 1);
+    write(apic, redir_low(pin), entry.lo);
 }
 
 /// The body of `ioapic_version()` in C.
@@ -641,37 +636,30 @@ fn toggle(apic: c_int, pin: c_int, mask: u32) {
 /// The body of `ioapic_irq_eoi()` in C, ending the interrupt on the LAPIC.
 pub(crate) fn irq_eoi(pin: c_int) {
     if pin != 0 {
-        // SAFETY: `splhigh()` is the real asm routine <machine/spl.h>
-        // declares, and its result is only handed back to `splx()`.
-        let saved = unsafe { spl::splhigh() };
-        {
-            let _guard = IOAPIC_LOCK.lock();
-            if !HAS_IRQ_SPECIFIC_EOI.load(Ordering::Relaxed) {
-                // An IOAPIC with no specific EOI needs the pin masked and
-                // edge-triggered around the acknowledgement.
-                let mut entry = read_entry(0, pin);
-                let old = entry;
-                entry.set_mask(IOAPIC_MASK_DISABLED);
-                entry.set_trigger(IOAPIC_EDGE_TRIGGERED);
-                write_entry(0, pin, entry);
-                write_entry(0, pin, old);
-            } else if let Some(ioapic) = apic::ioapic(0) {
-                // SAFETY: `ioapic` points into `apic_data`.
-                let unit = unsafe { (*ioapic.as_ptr()).ioapic };
-                if !unit.is_null() {
-                    let vector = irqinfo_vector(pin);
-                    // SAFETY: `unit` is the mapped register window.
-                    unsafe {
-                        ptr::write_volatile(
-                            &raw mut (*unit).eoi.r,
-                            u32::from(vector),
-                        );
-                    };
-                }
+        let _guard = IOAPIC_LOCK.lock();
+        if !HAS_IRQ_SPECIFIC_EOI.load(Ordering::Relaxed) {
+            // An IOAPIC with no specific EOI needs the pin masked and
+            // edge-triggered around the acknowledgement.
+            let mut entry = read_entry(0, pin);
+            let old = entry;
+            entry.set_mask(IOAPIC_MASK_DISABLED);
+            entry.set_trigger(IOAPIC_EDGE_TRIGGERED);
+            write_entry(0, pin, entry);
+            write_entry(0, pin, old);
+        } else if let Some(ioapic) = apic::ioapic(0) {
+            // SAFETY: `ioapic` points into `apic_data`.
+            let unit = unsafe { (*ioapic.as_ptr()).ioapic };
+            if !unit.is_null() {
+                let vector = irqinfo_vector(pin);
+                // SAFETY: `unit` is the mapped register window.
+                unsafe {
+                    ptr::write_volatile(
+                        &raw mut (*unit).eoi.r,
+                        u32::from(vector),
+                    );
+                };
             }
         }
-        // SAFETY: `saved` is the level `splhigh()` returned above.
-        unsafe { spl::splx(saved) };
     }
     apic::eoi();
 }

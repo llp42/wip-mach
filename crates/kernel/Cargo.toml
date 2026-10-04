@@ -21,7 +21,6 @@ elf-load = { path = "../elf-load" }
 kmem.workspace = true
 lock.workspace = true
 mach-mig-sys = { path = "../mach-mig-sys" }
-spin = { workspace = true, features = ["once"] }
 
 [lints]
 workspace = true

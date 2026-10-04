@@ -14,7 +14,7 @@ use crate::arch::x86_64::io_req::DevT;
 use crate::arch::x86_64::ioapic::{self, InterruptHandler};
 use crate::arch::x86_64::irq::{self, IrqDev, UserIntr, UserIntrQueue};
 use crate::arch::x86_64::per_cpu;
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::config::NINTR;
 use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
 use crate::ipc::ipc_kmsg;
@@ -36,7 +36,7 @@ use core::mem::{offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use kmem::KBox;
-use spin::{Mutex, MutexGuard};
+use lock::IrqSpinLock;
 
 /// `IRQGETPICMODE` of <`device/irq_status.h`>.
 const IRQGETPICMODE: c_uint = 0;
@@ -142,24 +142,9 @@ unsafe fn dev_intr_queue<'a>(dev: *mut IrqDev) -> Pin<&'a mut UserIntrQueue> {
     unsafe { Pin::new_unchecked(&mut *(*dev).intr_queue) }
 }
 
-/// `intr_lock` of `device/intr.c`, the `simple_lock_irq` around the queue
-/// and the handler lists.
-static INTR_LOCK: Mutex<()> = Mutex::new(());
-
-/// Take the lock at `splhigh`, as the `simple_lock_irq()` macro did.
-fn lock_irq() -> (MutexGuard<'static, ()>, c_int) {
-    // SAFETY: `splhigh()` is the real asm routine <machine/spl.h> declares,
-    // and its result is only handed back to `splx()`.
-    let level = unsafe { spl::splhigh() };
-    (INTR_LOCK.lock(), level)
-}
-
-/// Release the lock and restore `level`, as `simple_unlock_irq()` did.
-fn unlock_irq(guard: MutexGuard<'static, ()>, level: c_int) {
-    drop(guard);
-    // SAFETY: `level` is the value [`lock_irq()`] returned for this lock.
-    unsafe { spl::splx(level) };
-}
+/// `intr_lock` of `device/intr.c`, around the queue and the handler lists.
+/// An irq spin lock, since the shared vector handler takes it.
+static INTR_LOCK: IrqSpinLock<(), MachPlatform> = IrqSpinLock::new(());
 
 /// `e->dst_port` lost its last reference, or is unusable.
 ///
@@ -302,7 +287,7 @@ pub(crate) unsafe fn insert_intr_entry(
     )
     .ok()?;
 
-    let (guard, level) = lock_irq();
+    let guard = INTR_LOCK.lock();
     let found = unsafe { search_intr(dev, dst_port) }.is_some();
     let result = if found {
         kprint!(
@@ -329,7 +314,7 @@ pub(crate) unsafe fn insert_intr_entry(
         unsafe { dev_intr_queue(dev).push_back_ptr(new) };
         Some(new)
     };
-    unlock_irq(guard, level);
+    drop(guard);
 
     // A duplicate's unused entry drops on return, after the lock.
     result
@@ -338,7 +323,7 @@ pub(crate) unsafe fn insert_intr_entry(
 /// `user_irq_handler()` of `device/intr.c`: the vector a shared line points
 /// at.
 unsafe extern "C" fn user_irq_handler(id: c_int) {
-    let (guard, level) = lock_irq();
+    let guard = INTR_LOCK.lock();
 
     let index = usize::try_from(id).ok().filter(|index| *index < NINTR);
     // SAFETY: the lock is held, and `index` keeps the table access inside
@@ -360,7 +345,7 @@ unsafe extern "C" fn user_irq_handler(id: c_int) {
         }
     }
 
-    unlock_irq(guard, level);
+    drop(guard);
 }
 
 /// `install_user_intr_handler()` of `device/intr.c`.
@@ -417,7 +402,7 @@ pub(crate) unsafe fn install_user_intr_handler(
         (*new).flags = flags;
     }
 
-    let (guard, level) = lock_irq();
+    let guard = INTR_LOCK.lock();
     // SAFETY: the lock is held, `new` is unlinked, and `index` is inside the
     // handlers table.
     unsafe {
@@ -428,7 +413,7 @@ pub(crate) unsafe fn install_user_intr_handler(
     irq::set_handler(irq, Some(user_irq_handler));
     irq::set_unit(irq, irq);
     ioapic::unmask(irq);
-    unlock_irq(guard, level);
+    drop(guard);
 
     Ok(())
 }
@@ -489,7 +474,7 @@ pub(crate) unsafe fn intr_thread() {
             assert_wait(NonNull::new(intr_event()), 0);
             thread_set_timeout(CLOCK_HZ);
         }
-        let (mut guard, mut level) = lock_irq();
+        let mut guard = INTR_LOCK.lock();
 
         loop {
             let mut deleted = ptr::null_mut::<UserIntr>();
@@ -525,15 +510,13 @@ pub(crate) unsafe fn intr_thread() {
                         (*ptr::addr_of_mut!(irq::IRQTAB)).tot_num_intr -= 1;
                         id
                     };
-                    unlock_irq(guard, level);
                     // SAFETY: `references_dead()` returned false, so the
                     // registration's port is live and non-null; the entry
                     // and its port are live, and the C made the same drop
                     // of the lock before sending.
-                    unsafe {
-                        deliver_intr(id, NonNull::new_unchecked(dst_port))
-                    };
-                    (guard, level) = lock_irq();
+                    guard.unlocked(|| unsafe {
+                        deliver_intr(id, NonNull::new_unchecked(dst_port));
+                    });
                 }
             }
 
@@ -583,7 +566,7 @@ pub(crate) unsafe fn intr_thread() {
             }
         }
 
-        unlock_irq(guard, level);
+        drop(guard);
         // SAFETY: this thread is the one that waited above; the null
         // continuation resumes it at the top of the loop.
         unsafe { thread_block(None) };
@@ -608,7 +591,7 @@ pub(crate) fn enable_line(id: c_int) {
 pub(crate) unsafe fn irq_acknowledge(
     receive_port: *mut c_void,
 ) -> Result<c_int, c_int> {
-    let (guard, level) = lock_irq();
+    let guard = INTR_LOCK.lock();
     let entry =
         unsafe { search_intr(ptr::addr_of_mut!(irq::IRQTAB), receive_port) };
     let result = entry.map_or_else(
@@ -628,7 +611,7 @@ pub(crate) unsafe fn irq_acknowledge(
             }
         },
     );
-    unlock_irq(guard, level);
+    drop(guard);
     result
 }
 

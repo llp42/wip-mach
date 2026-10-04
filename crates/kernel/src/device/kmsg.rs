@@ -12,8 +12,7 @@ use crate::arch::x86_64::io_req::{
     D_NOWAIT, DEV_GET_SIZE, DEV_GET_SIZE_COUNT, DEV_GET_SIZE_DEVICE_SIZE,
     DEV_GET_SIZE_RECORD_SIZE, DevT, IoReq, IoReqQueue, KERN_SUCCESS,
 };
-use crate::arch::x86_64::ioapic;
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::device::ds_routines;
 use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
 use crate::utils::cell::SyncCell;
@@ -21,8 +20,7 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_long, c_uint};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::Ordering;
-use spin::{Mutex, MutexGuard};
+use lock::IrqSpinLock;
 
 /// `KMSGBUFSIZE` of `device/kmsg.c`.
 const KMSGBUFSIZE: usize = 16 * 1024;
@@ -37,8 +35,9 @@ struct Ring {
     in_use: bool,
 }
 
-/// `kmsg_lock` of `device/kmsg.c`, holding the ring it guards.
-static KMSG: Mutex<Ring> = Mutex::new(Ring {
+/// `kmsg_lock` of `device/kmsg.c`, holding the ring it guards.  An irq spin
+/// lock, since interrupt handlers print.
+static KMSG: IrqSpinLock<Ring, MachPlatform> = IrqSpinLock::new(Ring {
     buffer: [0; KMSGBUFSIZE],
     write: 0,
     read: 0,
@@ -86,38 +85,23 @@ impl KmsgError {
     }
 }
 
-/// Take the lock at `splhigh`, as the `simple_lock_irq()` macro did.
-fn lock_irq() -> (MutexGuard<'static, Ring>, c_int) {
-    // SAFETY: `splhigh()` is the real asm routine <machine/spl.h> declares,
-    // and its result is only handed back to `splx()`.
-    let level = unsafe { spl::splhigh() };
-    (KMSG.lock(), level)
-}
-
-/// Release the lock and restore `level`, as `simple_unlock_irq()` did.
-fn unlock_irq(guard: MutexGuard<'static, Ring>, level: c_int) {
-    drop(guard);
-    // SAFETY: `level` is the value [`lock_irq()`] returned for this lock.
-    unsafe { spl::splx(level) };
-}
-
 /// `kmsgopen()` of `device/kmsg.c`.
 pub(crate) fn open() -> Result<DeviceSuccess, DeviceError> {
-    let (mut ring, level) = lock_irq();
+    let mut ring = KMSG.lock();
     if ring.in_use {
-        unlock_irq(ring, level);
+        drop(ring);
         return Err(DeviceError::AlreadyOpen);
     }
     ring.in_use = true;
-    unlock_irq(ring, level);
+    drop(ring);
     Ok(DeviceSuccess::Success)
 }
 
 /// `kmsgclose()` of `device/kmsg.c`.
 pub(crate) fn close() {
-    let (mut ring, level) = lock_irq();
+    let mut ring = KMSG.lock();
     ring.in_use = false;
-    unlock_irq(ring, level);
+    drop(ring);
 }
 
 /// Copy the readable run of the ring into `ior`'s buffer and advance the read
@@ -163,11 +147,11 @@ pub(crate) unsafe fn read(
         return Err(KmsgError::Kern(kr));
     }
 
-    let (mut ring, level) = lock_irq();
+    let mut ring = KMSG.lock();
     if ring.read == ring.write {
         // SAFETY: the request is live.
         if unsafe { (*ior).mode } & D_NOWAIT != 0 {
-            unlock_irq(ring, level);
+            drop(ring);
             return Err(KmsgError::Device(DeviceError::WouldBlock));
         }
 
@@ -177,7 +161,7 @@ pub(crate) unsafe fn read(
             (*ior).done = Some(kmsg_read_done);
             read_queue().push_back_ptr(NonNull::new_unchecked(ior));
         }
-        unlock_irq(ring, level);
+        drop(ring);
         return Ok(DeviceSuccess::IoQueued);
     }
 
@@ -185,7 +169,7 @@ pub(crate) unsafe fn read(
     let amt = unsafe { copy_out(&mut ring, ior) };
     // SAFETY: the request is live.
     unsafe { (*ior).residual = (*ior).count - c_long::from(amt) };
-    unlock_irq(ring, level);
+    drop(ring);
     Ok(DeviceSuccess::Success)
 }
 
@@ -197,7 +181,7 @@ pub(crate) unsafe fn read(
 /// through `ior`'s `done` slot, as `iodone()` invokes it without the lock
 /// held.
 unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
-    let (mut ring, level) = lock_irq();
+    let mut ring = KMSG.lock();
     if ring.read == ring.write {
         // SAFETY: the request is live and requeued at once, as the C did,
         // with the lock held.
@@ -205,7 +189,7 @@ unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
             (*ior).done = Some(kmsg_read_done);
             read_queue().push_back_ptr(NonNull::new_unchecked(ior));
         }
-        unlock_irq(ring, level);
+        drop(ring);
         return 0;
     }
 
@@ -213,7 +197,7 @@ unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
     let amt = unsafe { copy_out(&mut ring, ior) };
     // SAFETY: the request is live.
     unsafe { (*ior).residual = (*ior).count - c_long::from(amt) };
-    unlock_irq(ring, level);
+    drop(ring);
 
     unsafe { ds_routines::ds_read_done(ior) };
     c_int::from(true)
@@ -221,14 +205,7 @@ unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
 
 /// `kmsg_putchar()` of `device/kmsg.c`.
 pub(crate) fn putchar(c: c_int) {
-    // Before the interrupt system is up, the console's early output is
-    // single-threaded, as in C, so the level stays where it is.
-    let (mut ring, level) = if ioapic::SPL_INIT.load(Ordering::Relaxed) {
-        let (ring, level) = lock_irq();
-        (ring, Some(level))
-    } else {
-        (KMSG.lock(), None)
-    };
+    let mut ring = KMSG.lock();
 
     // The C stored the `int` into a `char` buffer, keeping its low byte.
     let write = ring.write;
@@ -243,11 +220,6 @@ pub(crate) fn putchar(c: c_int) {
         // SAFETY: the dequeued entry is a live read request, as the C's cast
         // asserted.
         unsafe { ds_routines::iodone(ptr::from_mut(ior)) };
-    }
-
-    match level {
-        Some(level) => unlock_irq(ring, level),
-        None => drop(ring),
     }
 }
 

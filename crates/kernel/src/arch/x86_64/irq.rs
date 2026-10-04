@@ -11,12 +11,12 @@
 //! <device/intr.h>.
 
 use crate::arch::x86_64::ioapic::{self, InterruptHandler};
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::config::NINTR;
 use collections::simple_queue::{self, SimpleQueue};
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of};
-use spin::Mutex;
+use lock::IrqSpinLock;
 
 /// `struct irqdev` of <device/intr.h>: one interrupt controller's table.
 #[repr(C)]
@@ -73,18 +73,19 @@ const _: () = {
 
 /// `struct nested_irq` of `i386/i386/irq.c`: one line's disable count in its
 /// own lock.  The C gave each entry a whole cache line, which the alignment
-/// preserves.
+/// preserves.  An irq spin lock, since an interrupt handler may disable its
+/// line.
 #[repr(C, align(64))]
 #[allow(missing_docs)]
 struct NestedIrq {
-    ndisabled: Mutex<c_int>,
+    ndisabled: IrqSpinLock<c_int, MachPlatform>,
 }
 
 const _: () = assert!(size_of::<NestedIrq>() == 64);
 
 static NESTED_IRQS: [NestedIrq; NINTR] = [const {
     NestedIrq {
-        ndisabled: Mutex::new(0),
+        ndisabled: IrqSpinLock::new(0),
     }
 }; NINTR];
 
@@ -195,18 +196,11 @@ fn disable(irq: c_uint) {
         return;
     };
 
-    // SAFETY: `splhigh()` is the real asm routine <machine/spl.h> declares,
-    // and its result is only handed back to `splx()`.
-    let saved = unsafe { spl::splhigh() };
-    {
-        let mut ndisabled = nested.ndisabled.lock();
-        *ndisabled = ndisabled.wrapping_add(1);
-        if *ndisabled == 1 {
-            ioapic::mask(pin);
-        }
+    let mut ndisabled = nested.ndisabled.lock();
+    *ndisabled = ndisabled.wrapping_add(1);
+    if *ndisabled == 1 {
+        ioapic::mask(pin);
     }
-    // SAFETY: `saved` is the level `splhigh()` returned above.
-    unsafe { spl::splx(saved) };
 }
 
 /// `__enable_irq()` of `i386/i386/irq.c`: lower the line's disable count and
@@ -222,18 +216,11 @@ fn enable(irq: c_uint) {
         return;
     };
 
-    // SAFETY: `splhigh()` is the real asm routine <machine/spl.h> declares,
-    // and its result is only handed back to `splx()`.
-    let saved = unsafe { spl::splhigh() };
-    {
-        let mut ndisabled = nested.ndisabled.lock();
-        *ndisabled = ndisabled.wrapping_sub(1);
-        if *ndisabled == 0 {
-            ioapic::unmask(pin);
-        }
+    let mut ndisabled = nested.ndisabled.lock();
+    *ndisabled = ndisabled.wrapping_sub(1);
+    if *ndisabled == 0 {
+        ioapic::unmask(pin);
     }
-    // SAFETY: `saved` is the level `splhigh()` returned above.
-    unsafe { spl::splx(saved) };
 }
 
 /// `init_irqs()` of `i386/i386/irq.c`.

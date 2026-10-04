@@ -1161,13 +1161,15 @@ pub(crate) mod default_manager {
     use super::{Error, Host, IpcPort, c_void, ipc_port, null_mut};
     use crate::arch::x86_64::per_cpu;
     use crate::kern::debug::kpanic;
+    use crate::kern::kheap::Kalloc;
     use crate::kern::rcu::Rcu;
     use crate::kern::sched_prim::{
         THREAD_AWAKENED, assert_wait, clear_wait, thread_block,
         thread_wakeup_prim,
     };
     use core::ptr::{self, NonNull};
-    use spin::Once;
+    use core::sync::atomic::{AtomicPtr, Ordering};
+    use kmem::KBox;
 
     /// A published default-manager port, `IP_NULL` before the default
     /// pager registers.
@@ -1215,12 +1217,17 @@ pub(crate) mod default_manager {
         }
     }
 
-    /// The published default-manager port; `init()` creates it.
-    static DEFAULT_MANAGER: Once<Rcu<ManagerPort>> = Once::new();
+    /// The published default-manager port: null until `init()` stores a
+    /// leaked box, which is never freed.
+    static DEFAULT_MANAGER: AtomicPtr<Rcu<ManagerPort>> =
+        AtomicPtr::new(null_mut());
 
     /// The `Rcu`, or `None` before `init()`.
     fn manager() -> Option<&'static Rcu<ManagerPort>> {
-        DEFAULT_MANAGER.get()
+        let manager = DEFAULT_MANAGER.load(Ordering::Acquire);
+        // SAFETY: a non-null pointer is the leaked box `init()` stored with
+        // release, never freed.
+        unsafe { manager.as_ref() }
     }
 
     /// The event `reference()` sleeps on until a manager registers.
@@ -1331,15 +1338,22 @@ pub(crate) mod default_manager {
         manager().is_some_and(|manager| manager.read().is_valid())
     }
 
-    /// `memory_manager_default_init()` in C.
+    /// `memory_manager_default_init()` in C.  Runs once, during boot.
+    ///
+    /// # Panics
+    ///
+    /// If the kernel heap cannot hold the published port.
     pub fn init() {
-        DEFAULT_MANAGER.call_once(|| {
-            // SAFETY: `IP_NULL` is a valid argument.
-            let null = unsafe { ManagerPort::new(null_mut()) };
-            Rcu::try_new(null).unwrap_or_else(|_| {
-                kpanic!("default_manager::init", "out of memory\n")
-            })
-        });
+        // SAFETY: `IP_NULL` is a valid argument.
+        let null = unsafe { ManagerPort::new(null_mut()) };
+        let Some(manager) = Rcu::try_new(null)
+            .ok()
+            .and_then(|manager| KBox::try_new(manager, Kalloc).ok())
+        else {
+            kpanic!("default_manager::init", "out of memory\n")
+        };
+        DEFAULT_MANAGER
+            .store(ptr::from_mut(KBox::leak(manager)), Ordering::Release);
     }
 }
 

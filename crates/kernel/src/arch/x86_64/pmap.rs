@@ -23,6 +23,7 @@ use crate::arch::x86_64::model_dep::pmap_grab_page;
 use crate::arch::x86_64::mp_desc::interrupt_processor;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::arch::x86_64::phys::kvtophys;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::spl;
 use crate::config::MAX_NCPUS;
 use crate::glue;
@@ -45,7 +46,7 @@ use core::mem::{offset_of, size_of};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
 use core::sync::atomic::{AtomicI32, AtomicIsize, AtomicPtr, Ordering, fence};
-use spin::mutex::SpinMutex;
+use lock::SpinLock;
 
 /// `LINEAR_DS` of <i386/gdt.h>: the flat data selector `gdt_fill()` builds
 /// with base zero, which makes an offset in it a linear address.
@@ -460,10 +461,11 @@ static PV_FREE_LIST_LOCK: SimpleLock = SimpleLock::new();
 
 /// One lock per managed page, guarding that page's pv list and attribute
 /// byte; `pmap_init()` fills it in before any pv list is used.
-static mut PV_LOCKS: &[SpinMutex<()>] = &[];
+static mut PV_LOCKS: &[SpinLock<(), MachPlatform>] = &[];
 
 // `pmap_init()` carves the locks out right after the pv head table.
-const _: () = assert!(align_of::<SpinMutex<()>>() <= align_of::<PvEntry>());
+const _: () =
+    assert!(align_of::<SpinLock<(), MachPlatform>>() <= align_of::<PvEntry>());
 
 /// `pmap_phys_attributes` of i386/intel/pmap.c: one attribute byte per
 /// physical page.
@@ -905,7 +907,7 @@ fn phys_attribute(pai: usize) -> *mut u8 {
 /// # Panics
 ///
 /// Panics if `pai` is not a managed page's index.
-fn pv_lock(pai: usize) -> &'static SpinMutex<()> {
+fn pv_lock(pai: usize) -> &'static SpinLock<(), MachPlatform> {
     // SAFETY: `pmap_init()` writes the table once, before any pv list is
     // used, and it is only read from then on.
     let locks = unsafe { PV_LOCKS };
@@ -1258,7 +1260,8 @@ pub(crate) unsafe fn pmap_virtual_space(
 pub(crate) fn pmap_init() {
     let npages = vm_page::table_size();
     let size = round_page(
-        (size_of::<PvEntry>() + size_of::<SpinMutex<()>>() + 1) * npages,
+        (size_of::<PvEntry>() + size_of::<SpinLock<(), MachPlatform>>() + 1)
+            * npages,
     );
 
     // SAFETY: `kernel_map` is the live kernel map by the time `pmap_init()`
@@ -1276,12 +1279,12 @@ pub(crate) fn pmap_init() {
     unsafe {
         PV_HEAD_TABLE.store(addr as *mut PvEntry, Ordering::Relaxed);
         addr += size_of::<PvEntry>() * npages;
-        let locks = addr as *mut SpinMutex<()>;
+        let locks = addr as *mut SpinLock<(), MachPlatform>;
         for i in 0..npages {
-            ptr::write(locks.add(i), SpinMutex::new(()));
+            ptr::write(locks.add(i), SpinLock::new(()));
         }
         PV_LOCKS = slice::from_raw_parts(locks, npages);
-        addr += size_of::<SpinMutex<()>>() * npages;
+        addr += size_of::<SpinLock<(), MachPlatform>>() * npages;
         PMAP_PHYS_ATTRIBUTES.store(addr as *mut u8, Ordering::Relaxed);
     }
 

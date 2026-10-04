@@ -7,8 +7,9 @@
 //! <`device/dev_hdr.h`> declares.
 //!
 //! The C table's number lock was a file `static`; the Rust one is a
-//! [`Mutex`], still held before any device's `ref_lock`.
+//! [`SpinLock`], still held before any device's `ref_lock`.
 
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::device::dev_name;
 use crate::device::ds_routines::{
     DevOps, Device, MACH_DEVICE_EMULATION_OPS, MachDevice,
@@ -23,7 +24,7 @@ use core::ffi::{c_char, c_int, c_short, c_uint, c_void};
 use core::mem::size_of;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
-use spin::Mutex;
+use lock::SpinLock;
 
 /// `NDEVHASH` of `device/dev_lookup.c`: the device-number buckets.
 const NDEVHASH: usize = 8;
@@ -51,7 +52,7 @@ type NumberBucket = List<'static, MachDeviceNumberAdapter>;
 
 /// `dev_number_lock`: serializes the table, and is held before any device's
 /// `ref_lock`, as <`device/dev_hdr.h`> requires.
-static DEV_NUMBER_LOCK: Mutex<()> = Mutex::new(());
+static DEV_NUMBER_LOCK: SpinLock<(), MachPlatform> = SpinLock::new(());
 
 /// `dev_hdr_cache`: the `struct mach_device` slab cache.
 static mut DEV_HDR_CACHE: KmemCache = KmemCache::zeroed();
