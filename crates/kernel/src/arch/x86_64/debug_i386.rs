@@ -4,56 +4,17 @@
 //   Laboratory at the University of Utah (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The saved-state dump and the debug trace, which `i386/i386/debug_i386.c`
-//! used to define and `i386/i386/debug.h` declares.
+//! The saved-state dump, which `i386/i386/debug_i386.c` used to define and
+//! `i386/i386/debug.h` declares.
 //!
-//! The C kept the trace under `#ifdef DEBUG`, which no configured kernel
-//! defines, and the assembly stub that filled the buffer is deleted; the
-//! Rust build keeps the buffer and its dump.
+//! The C's debug trace sat under `#ifdef DEBUG`, which no configured kernel
+//! defines, and is not carried.
 
 use crate::arch::x86_64::pcb::I386SavedState;
 use crate::arch::x86_64::trap;
 use crate::kern::console::{CStrArg, kprint};
-use crate::kern::task::Task;
-use core::ffi::{c_char, c_int, c_long, c_uint};
-use core::mem::{align_of, offset_of, size_of};
+use core::ffi::{c_long, c_uint};
 use core::ptr;
-
-/// `DEBUG_TRACE_LEN` of <i386/debug.h>: the entries after which the trace
-/// buffer wraps.
-const DEBUG_TRACE_LEN: usize = 512;
-
-/// `struct debug_trace_entry` of `i386/i386/debug_i386.c`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-#[allow(missing_docs)]
-pub struct DebugTraceEntry {
-    pub filename: *mut c_char,
-    pub linenum: c_int,
-}
-
-const _: () = {
-    assert!(size_of::<DebugTraceEntry>() == 16);
-    assert!(align_of::<DebugTraceEntry>() == align_of::<*mut c_char>());
-    assert!(offset_of!(DebugTraceEntry, filename) == 0);
-    assert!(offset_of!(DebugTraceEntry, linenum) == 8);
-};
-
-/// `debug_trace_buf` of `i386/i386/debug_i386.c`.
-pub static mut DEBUG_TRACE_BUF: [DebugTraceEntry; DEBUG_TRACE_LEN] =
-    [DebugTraceEntry {
-        filename: ptr::null_mut(),
-        linenum: 0,
-    }; DEBUG_TRACE_LEN];
-
-/// `debug_trace_pos` of `i386/i386/debug_i386.c`.
-pub static mut DEBUG_TRACE_POS: c_int = 0;
-
-/// `syscall_trace` of `i386/i386/debug_i386.c`.
-pub static mut SYSCALL_TRACE: c_int = 0;
-
-/// `syscall_trace_task` of `i386/i386/debug_i386.c`.
-pub static mut SYSCALL_TRACE_TASK: *mut Task = ptr::null_mut();
 
 /// `dump_ss()` of <i386/debug.h>.
 ///

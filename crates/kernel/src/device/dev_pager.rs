@@ -433,8 +433,7 @@ pub(crate) unsafe fn device_map_page(
     offset: VmOffset,
 ) -> VmOffset {
     let Some(rec) = NonNull::new(dsp.cast::<DevPager>()) else {
-        // SAFETY: the fictitious address is a read-only C global.
-        return unsafe { VM_PAGE_FICTITIOUS_ADDR };
+        return VM_PAGE_FICTITIOUS_ADDR;
     };
 
     unsafe {

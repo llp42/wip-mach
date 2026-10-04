@@ -437,18 +437,19 @@ static mut DEFAULT_PSET: ProcessorSet = ProcessorSet::zeroed();
 static ALL_PSETS: SyncCell<PsetList> =
     SyncCell(UnsafeCell::new(PsetList::new()));
 
-/// `all_psets_count` of <kern/processor.h>.
-static mut ALL_PSETS_COUNT: c_int = 0;
+/// `all_psets_count` of <kern/processor.h>: how many sets `all_psets` holds,
+/// under [`ALL_PSETS_LOCK`].
+static ALL_PSETS_COUNT: SyncCell<u32> = SyncCell(UnsafeCell::new(0));
 
 /// `all_psets_lock` of <kern/processor.h>.
-static mut ALL_PSETS_LOCK: SimpleLock = SimpleLock::new();
+static ALL_PSETS_LOCK: SimpleLock = SimpleLock::new();
 
 /// `pset_cache` of kern/processor.c: the `struct processor_set` slab cache.
 static mut PSET_CACHE: KmemCache = KmemCache::zeroed();
 
 /// `slave_pset` of <kern/processor.h>: the set of every CPU but the boot
 /// CPU.
-static mut SLAVE_PSET: *mut ProcessorSet = ptr::null_mut();
+static SLAVE_PSET: AtomicPtr<ProcessorSet> = AtomicPtr::new(ptr::null_mut());
 
 /// The live `default_pset` static.
 pub(crate) fn default_pset() -> *mut ProcessorSet {
@@ -490,14 +491,14 @@ pub(crate) unsafe fn next_pset(
     cursor.current_ptr()
 }
 
-/// The live `all_psets_count` counter.
-pub(crate) fn all_psets_count() -> *mut c_int {
-    ptr::addr_of_mut!(ALL_PSETS_COUNT)
+/// The live `all_psets_count` counter, under `all_psets_lock`.
+pub(crate) fn all_psets_count() -> *mut u32 {
+    ALL_PSETS_COUNT.0.get()
 }
 
 /// The live `all_psets_lock`.
-pub(crate) fn all_psets_lock() -> *mut SimpleLock {
-    ptr::addr_of_mut!(ALL_PSETS_LOCK)
+pub(crate) fn all_psets_lock() -> &'static SimpleLock {
+    &ALL_PSETS_LOCK
 }
 
 /// `master_processor` of <`kern/processor.h`>: the boot CPU's processor
@@ -508,8 +509,7 @@ pub(crate) fn boot_processor() -> *mut Processor {
 
 /// The live `slave_pset`, or null before `pset_sys_init()` sets it.
 pub(crate) fn slave_pset() -> *mut ProcessorSet {
-    // SAFETY: only the boot's `pset_sys_init()` writes it.
-    unsafe { SLAVE_PSET }
+    SLAVE_PSET.load(Ordering::Relaxed)
 }
 
 /// The `pset_cache` the boot initialized.
@@ -795,18 +795,12 @@ impl ProcessorSet {
         // SAFETY: the lock guards the list, and the C order is
         // `all_psets_lock` before the set's `ref_lock`.
         let all_psets_lock = all_psets_lock();
-        // SAFETY: `all_psets_lock()` returns the live global lock.
-        unsafe {
-            (*all_psets_lock).lock();
-        }
+        all_psets_lock.lock();
         self.ref_lock.lock();
         self.ref_count = self.ref_count.wrapping_sub(1);
         if self.ref_count > 0 {
             self.ref_lock.unlock();
-            // SAFETY: the lock taken just above.
-            unsafe {
-                (*all_psets_lock).unlock();
-            }
+            all_psets_lock.unlock();
             return;
         }
 
@@ -832,10 +826,7 @@ impl ProcessorSet {
         }
 
         self.ref_lock.unlock();
-        // SAFETY: the lock taken above.
-        unsafe {
-            (*all_psets_lock).unlock();
-        }
+        all_psets_lock.unlock();
 
         // SAFETY: the set came from `pset_cache` and nothing references it any
         // more; `.addr()` is the address the allocator handed out.
@@ -1428,7 +1419,7 @@ pub(crate) unsafe fn bootstrap() {
             Processor::init(processor_at(cpu).as_ptr(), cpu);
         }
 
-        (*all_psets_lock()).init();
+        all_psets_lock().init();
         all_psets().push_back_ptr(NonNull::new_unchecked(default_pset()));
         *all_psets_count() = 1;
         (*default_pset()).active = 1;
@@ -1465,11 +1456,11 @@ pub(crate) unsafe fn create(
         (*pset).active = 1;
 
         let lock = all_psets_lock();
-        (*lock).lock();
+        lock.lock();
         all_psets().push_back_ptr(NonNull::new_unchecked(pset));
         let count = all_psets_count();
         *count = (*count).wrapping_add(1);
-        (*lock).unlock();
+        lock.unlock();
 
         ipc_host::pset_enable(&mut *pset);
     }
@@ -1515,7 +1506,7 @@ pub(crate) unsafe fn system_init() {
     // this call sets; the set allocator takes the cache just initialized.
     unsafe {
         let result = create(crate::kern::host::realhost().cast::<c_void>());
-        SLAVE_PSET = result.unwrap_or(ptr::null_mut());
+        SLAVE_PSET.store(result.unwrap_or(ptr::null_mut()), Ordering::Relaxed);
     }
 }
 

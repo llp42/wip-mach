@@ -285,11 +285,11 @@ unsafe fn block_and_backoff(
 unsafe fn release_page(m: *mut VmPage) {
     unsafe {
         page_wakeup_done(m);
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         if !(*m).is_active() && !(*m).is_inactive() {
             vm_page::activate(m);
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 }
 
@@ -382,9 +382,9 @@ pub(crate) unsafe fn wire_fast(
 
     // SAFETY: the page is live; the C wires it under the page-queues lock.
     unsafe {
-        (*ptr::addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         vm_page::wire(m);
-        (*ptr::addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
         (*m.as_ptr()).set_busy(true);
     }
 
@@ -395,9 +395,9 @@ pub(crate) unsafe fn wire_fast(
     {
         unsafe {
             page_wakeup_done(m.as_ptr());
-            (*ptr::addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_page::unwire(m.as_ptr());
-            (*ptr::addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
             return give_up(object);
         }
     }
@@ -601,13 +601,13 @@ impl FaultState {
         if SOFTWARE_REFERENCE_BITS == 0 {
             // SAFETY: the queue lock guards the page queues.
             unsafe {
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 if (*self.m).is_inactive() {
                     VM_STAT.reactivations += 1;
                     (*current_task()).reactivations += 1;
                 }
                 vm_page::queues_remove(self.m);
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
             }
         }
 
@@ -663,13 +663,13 @@ impl FaultState {
             // queue lock guards the page table.
             unsafe {
                 page_free(self.m);
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_resident::insert(
                     real_m,
                     NonNull::new_unchecked(self.object),
                     self.offset,
                 );
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
             }
             self.m = real_m.as_ptr();
 
@@ -705,9 +705,9 @@ impl FaultState {
                 vm_object::absent_release(self.object);
                 (*self.m).set_busy(true);
 
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_page::queues_remove(self.m);
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
             }
         }
 
@@ -848,13 +848,13 @@ impl FaultState {
             self.m = fictitious.as_ptr();
             // SAFETY: the queue lock guards the page table.
             unsafe {
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_resident::insert(
                     fictitious,
                     NonNull::new_unchecked(self.object),
                     self.offset,
                 );
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
             }
         }
 
@@ -1143,10 +1143,10 @@ impl FaultState {
                 );
                 (*self.object).lock.lock();
 
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_page::deactivate(self.m);
                 pmap_page_protect((*self.m).phys_addr, VmProt::NONE.bits());
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
 
                 page_wakeup_done(self.m);
                 paging_end(self.object);
@@ -1166,13 +1166,13 @@ impl FaultState {
                 (*self.object).lock.lock();
                 page_free(self.first_m);
                 self.first_m = ptr::null_mut();
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_resident::insert(
                     NonNull::new_unchecked(copy_m),
                     NonNull::new_unchecked(self.object),
                     self.offset,
                 );
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
             }
             self.m = copy_m;
 
@@ -1228,10 +1228,10 @@ impl FaultState {
         // page; the queue lock guards the pmap flush.
         unsafe {
             vm_resident::copy(NonNull::new_unchecked(self.m), allocated);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             pmap_page_protect((*self.m).phys_addr, VmProt::NONE.bits());
             (*copy_m).set_dirty(true);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
 
         // SAFETY: the copy object is live and locked.
@@ -1266,9 +1266,9 @@ impl FaultState {
             // SAFETY: the queue lock guards the page queues; the page
             // is live and busy.
             unsafe {
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_page::activate(copy_m);
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
                 page_wakeup_done(copy_m);
             }
         }
@@ -1924,7 +1924,7 @@ unsafe fn fault_success(
     // the page's state.
     unsafe {
         (*(*result_page).object).lock.lock();
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         if change_wiring {
             if wired {
                 vm_page::wire(NonNull::new_unchecked(result_page));
@@ -1939,7 +1939,7 @@ unsafe fn fault_success(
         } else {
             vm_page::activate(result_page);
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 
     // SAFETY: `verify` left the map read-locked, and the page is the live,
@@ -2098,9 +2098,9 @@ pub(crate) unsafe fn unwire(map: &VmMap, entry: NonNull<VmMapEntry>) {
             // SAFETY: the fault returned the live, busy page and holds its
             // object lock.
             unsafe {
-                (*ptr::addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_page::unwire(result_page);
-                (*ptr::addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
                 page_wakeup_done(result_page);
                 cleanup((*result_page).object, NonNull::new(fault.top_page));
             }
@@ -2372,11 +2372,11 @@ unsafe fn copy_cleanup(page: *mut VmPage, top_page: *mut VmPage) {
     unsafe {
         (*object).lock.lock();
         page_wakeup_done(page);
-        (*ptr::addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         if !(*page).is_active() && !(*page).is_inactive() {
             vm_page::activate(page);
         }
-        (*ptr::addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
         cleanup(object, NonNull::new(top_page));
     }
 }

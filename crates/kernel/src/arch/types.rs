@@ -13,6 +13,9 @@ pub type VmOffset = usize;
 /// `uintptr_t` in the C.
 pub type VmSize = usize;
 
+/// A [`VmOffset`] shared between CPUs without a lock.
+pub type AtomicVmOffset = AtomicUsize;
+
 /// A [`VmSize`] shared between CPUs without a lock.
 pub type AtomicVmSize = AtomicUsize;
 

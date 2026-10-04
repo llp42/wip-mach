@@ -15,7 +15,7 @@ use clock::{
 use core::ffi::c_int;
 use core::pin::Pin;
 use core::ptr::{self, NonNull, addr_of_mut};
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{AtomicPtr, Ordering, fence};
 
 /// The machine capabilities `clock` needs, as this kernel provides them.
 pub(crate) struct MachPlatform;
@@ -65,7 +65,7 @@ impl TimePage for MachPlatform {
 
 /// `mtime` of `kern/mach_clock.c`: the page `mapable_time_init()` wired, or
 /// null before that.
-static mut MTIME: *mut MappedTimeValue = ptr::null_mut();
+static MTIME: AtomicPtr<MappedTimeValue> = AtomicPtr::new(ptr::null_mut());
 
 /// Publish both domains to the mapped time page (the `clock` crate's
 /// [`TimePage`] hook).
@@ -76,10 +76,7 @@ pub(crate) fn publish_mapped_time(wall_nanos: u64, uptime_nanos: u64) {
 
 /// `update_mapped_time()` in `kern/mach_clock.c`.
 fn update_mapped_time(value: TimeValue64) {
-    // SAFETY: `MTIME` is the page `mapable_time_init()` wired before any
-    // clock interrupt can publish, and it is never unmapped.  Its only
-    // writer is the master CPU's clock interrupt, where this runs.
-    let mtime = unsafe { MTIME };
+    let mtime = MTIME.load(Ordering::Relaxed);
     if mtime.is_null() {
         return;
     }
@@ -88,8 +85,10 @@ fn update_mapped_time(value: TimeValue64) {
     // the truncation is part of the interface `include/mach/time_value.h`
     // documents.  The volatile stores and SeqCst fences are the C's
     // `volatile` pointer and `__sync_synchronize()`.
-    // SAFETY: `mtime` is the page above; every field written is a plain
-    // scalar of the `mapped_time_value_t` mirror.
+    // SAFETY: `mtime` is the page `mapable_time_init()` wired, never
+    // unmapped, and its only writer is the master CPU's clock interrupt,
+    // where this runs; every field written is a plain scalar of the
+    // `mapped_time_value_t` mirror.
     unsafe {
         addr_of_mut!((*mtime).check_seconds)
             .write_volatile(value.seconds as c_int);
@@ -108,17 +107,14 @@ fn update_mapped_time(value: TimeValue64) {
 
 /// `update_mapped_uptime()` in `kern/mach_clock.c`.
 fn update_mapped_uptime(value: TimeValue64) {
-    // SAFETY: `MTIME` is the page `mapable_time_init()` wired before any clock
-    // interrupt can publish, and it is never unmapped. Its only writer
-    // is the master CPU's clock interrupt, where this runs; this runs
-    // beside it.
-    let mtime = unsafe { MTIME };
+    let mtime = MTIME.load(Ordering::Relaxed);
     if mtime.is_null() {
         return;
     }
 
-    // SAFETY: `MTIME` is the page above; the uptime fields are plain
-    // scalars of the same mirror.
+    // SAFETY: `mtime` is the page `mapable_time_init()` wired, never
+    // unmapped, and written only from the master CPU's clock interrupt; the
+    // uptime fields are plain scalars of the same mirror.
     unsafe {
         addr_of_mut!((*mtime).check_upseconds64).write_volatile(value.seconds);
         fence(Ordering::SeqCst);
@@ -141,22 +137,17 @@ pub(crate) fn mapable_time_init() {
 
     // SAFETY: `page` is the wired page just allocated, so zeroing it and
     // recording it is what the C `memset()` and assignment did.
-    unsafe {
-        (page as *mut u8).write_bytes(0, crate::vm::types::PAGE_SIZE);
-        MTIME = page as *mut MappedTimeValue;
-    }
+    unsafe { (page as *mut u8).write_bytes(0, crate::vm::types::PAGE_SIZE) };
+    MTIME.store(page as *mut MappedTimeValue, Ordering::Relaxed);
     // Publish whatever the machine clock holds at this boot step. The
     // earlier `set_wall` publish landed on a null `MTIME`.
     publish_mapped_time(CLOCK.wall().as_nanos(), CLOCK.mono().as_nanos());
 }
 
-/// The mapped time page: `mtime` of `kern/mach_clock.c`.
-///
-/// # Safety
-///
-/// The page is live only after `mapable_time_init()` ran at boot.
-pub(crate) unsafe fn mapped_time_page() -> *mut MappedTimeValue {
-    unsafe { MTIME }
+/// The mapped time page: `mtime` of `kern/mach_clock.c`, null until
+/// `mapable_time_init()` ran at boot.
+pub(crate) fn mapped_time_page() -> *mut MappedTimeValue {
+    MTIME.load(Ordering::Relaxed)
 }
 
 /// The one machine clock (ADR 0038). Only cpu0 calls [`Clock::tick`].

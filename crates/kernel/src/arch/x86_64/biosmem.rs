@@ -24,6 +24,7 @@ use core::cmp::{max, min};
 use core::ffi::{CStr, c_int, c_uint};
 use core::mem::size_of;
 use core::ptr::with_exposed_provenance;
+use core::sync::atomic::Ordering;
 
 /// `BIOSMEM_MAX_BOOT_DATA` of `biosmem.c`.
 const BIOSMEM_MAX_BOOT_DATA: usize = 64;
@@ -669,9 +670,8 @@ fn bootstrap_common(s: &mut State) {
         die("biosmem_bootstrap_common", NOSEG_MSG);
     };
 
-    // SAFETY: `apboot_addr` is <i386/model_dep.h>'s global, written once
-    // here, on the only CPU running.
-    unsafe { crate::arch::x86_64::mp_desc::APBOOT_ADDR = phys_start };
+    crate::arch::x86_64::mp_desc::APBOOT_ADDR
+        .store(phys_start, Ordering::Relaxed);
 
     let phys_start = phys_start.wrapping_add(PAGE_SIZE);
     set_segment(s, vm_page::SEG_DMA, phys_start, phys_end);

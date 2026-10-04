@@ -19,7 +19,7 @@ use core::arch::asm;
 use core::ffi::{c_char, c_int};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use spin::Mutex;
 
 /// `interrupt_handler_fn` of <i386/ipl.h>: one `ivect` entry, or [`None`]
@@ -203,15 +203,16 @@ const fn iunit_image() -> [c_int; NINTR] {
 /// `src/arch/x86_64/spl.rs` reads and writes.
 pub static mut CURR_IPL: [c_int; MAX_NCPUS] = [0; MAX_NCPUS];
 
-/// `spl_init` of <i386/spl.h>.
-pub static mut SPL_INIT: c_int = 0;
+/// `spl_init` of <i386/spl.h>: whether the interrupt system is up.
+pub static SPL_INIT: AtomicBool = AtomicBool::new(false);
 
-/// `pic_mode` of `i386/i386at/ioapic.c`: the PIC mode the platform runs in.
-pub static mut PIC_MODE: c_int = ACPI_PICMODE_APIC;
+/// `pic_mode` of `i386/i386at/ioapic.c`: the PIC mode the platform runs in,
+/// always the APIC now that the 8259 driver is gone.
+pub const PIC_MODE: c_int = ACPI_PICMODE_APIC;
 
 /// `timer_pin` of <i386/apic.h>: the pin `ioapic_configure()` remapped the
 /// timer to.
-pub static mut TIMER_PIN: c_int = 0;
+pub static TIMER_PIN: AtomicI32 = AtomicI32::new(0);
 
 /// `irqinfo` of <i386/apic.h>: one entry per interrupt line.
 pub static mut IRQINFO: [IrqInfo; NINTR] = [IrqInfo {
@@ -219,12 +220,9 @@ pub static mut IRQINFO: [IrqInfo; NINTR] = [IrqInfo {
     vector: 0,
 }; NINTR];
 
-/// `lapic_timer_val` of `i386/i386at/ioapic.c`.
-pub static mut LAPIC_TIMER_VAL: u32 = 0;
-
 /// `calibrated_ticks` of `i386/i386at/ioapic.c`: the LAPIC timer ticks per
 /// Mach tick.
-pub static mut CALIBRATED_TICKS: u32 = 0;
+pub static CALIBRATED_TICKS: AtomicU32 = AtomicU32::new(0);
 
 /// `has_irq_specific_eoi` of `i386/i386at/ioapic.c`.
 static HAS_IRQ_SPECIFIC_EOI: AtomicBool = AtomicBool::new(false);
@@ -490,18 +488,14 @@ fn calibrate_timer() {
         apic::reg_write(&raw mut (*unit).lvt_timer, IOAPIC_INT_BASE);
     }
 
-    // SAFETY: `calibrated_ticks` is written only here and read by
-    // `lapic_enable_timer()`, both at boot on one CPU.
-    if unsafe { CALIBRATED_TICKS } == 0 {
+    if CALIBRATED_TICKS.load(Ordering::Relaxed) == 0 {
         // SAFETY: `splhigh()` is the real asm routine <machine/spl.h>
         // declares, and its result is only handed back to `splx()`.
         let saved = unsafe { spl::splhigh() };
         // SAFETY: `spl0()` is the real asm routine <machine/spl.h> declares.
         unsafe { spl::spl0() };
         let ticks = measure_10x_apic_hz() / 10;
-        // SAFETY: `calibrated_ticks` is written only here and read by
-        // `lapic_enable_timer()`, both at boot on one CPU.
-        unsafe { CALIBRATED_TICKS = ticks };
+        CALIBRATED_TICKS.store(ticks, Ordering::Relaxed);
         // SAFETY: `saved` is the level `splhigh()` returned above.
         unsafe { spl::splx(saved) };
     }
@@ -510,8 +504,7 @@ fn calibrate_timer() {
 /// The body of `lapic_enable_timer()` in C.
 fn enable_timer() {
     let unit = apic::lapic_ptr();
-    // SAFETY: `calibrated_ticks` is written and read at boot on one CPU.
-    let ticks = unsafe { CALIBRATED_TICKS };
+    let ticks = CALIBRATED_TICKS.load(Ordering::Relaxed);
 
     // SAFETY: `unit` is the mapped local-APIC page; the stores are the C's
     // volatile register writes, including the divider rewrite that buggy
@@ -580,9 +573,7 @@ fn configure() {
         if pin == 0 {
             timer_gsi = gsi;
         } else if gsi == timer_gsi {
-            // SAFETY: `timer_pin` is this module's global, read at boot by
-            // `startrtclock()`.
-            unsafe { TIMER_PIN = pin };
+            TIMER_PIN.store(pin, Ordering::Relaxed);
             entry.set_vector(IOAPIC_INT_BASE);
             write_entry(apic, pin, entry);
             mask(0);

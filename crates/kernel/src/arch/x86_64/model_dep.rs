@@ -22,7 +22,7 @@ use crate::arch::x86_64::multiboot::{
     MultibootLoaderFlags, MultibootModule, MultibootRawInfo,
     MultibootRawModule, load_modules,
 };
-use crate::arch::x86_64::pmap::KERNEL_PMAP;
+use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_extract;
 use crate::arch::x86_64::spl;
 use crate::arch::x86_64::{
@@ -42,6 +42,7 @@ use core::arch::asm;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 /// `ELF_SHT_SYMTAB` of i386/i386at/elf.h.
 const ELF_SHT_SYMTAB: u32 = 2;
@@ -62,7 +63,8 @@ pub(crate) static mut BOOT_INFO: MultibootRawInfo =
 
 /// `kernel_cmdline` of `i386/i386at/model_dep.c`: the boot command line, `""`
 /// until `i386at_init` can copy the loader's line to safe memory.
-pub static mut KERNEL_CMDLINE: *mut c_char = c"".as_ptr().cast_mut();
+static KERNEL_CMDLINE: AtomicPtr<c_char> =
+    AtomicPtr::new(c"".as_ptr().cast_mut());
 
 /// The boot loader's information block, frozen by the boot sequence.
 #[must_use]
@@ -92,12 +94,12 @@ pub(crate) fn boot_modules() -> Vec<MultibootModule> {
 pub(crate) fn kernel_cmdline() -> &'static CStr {
     // SAFETY: `i386at_init` is the line's only writer, its string is
     // NUL-terminated, and it lives as long as the kernel.
-    unsafe { CStr::from_ptr(KERNEL_CMDLINE) }
+    unsafe { CStr::from_ptr(KERNEL_CMDLINE.load(Ordering::Relaxed)) }
 }
 
 /// `rebootflag` of `i386/i386at/model_dep.c`: set when ctrl-alt-del should
 /// reboot the machine.
-pub static mut REBOOTFLAG: c_int = 0;
+pub static REBOOTFLAG: AtomicBool = AtomicBool::new(false);
 
 /// `struct elf_shdr` of `i386/i386at/elf.h`, the section header
 /// `register_boot_data` walks; `addr` and `offset` are the C's
@@ -179,12 +181,12 @@ pub(crate) fn mapped_time_page(prot: VmProt) -> Option<VmOffset> {
         return None;
     }
 
-    // SAFETY: `mapable_time_init()` wired the page at boot, before `/dev/time`
-    // can be opened.
-    let address = unsafe { clock_platform::mapped_time_page() } as VmOffset;
+    // `mapable_time_init()` wired the page at boot, before `/dev/time` can be
+    // opened.
+    let address = clock_platform::mapped_time_page() as VmOffset;
     // SAFETY: `kernel_pmap` is the kernel's own pmap, so it maps `address`;
     // the C called `pmap_extract` with the same two values.
-    let phys = unsafe { pmap_extract(KERNEL_PMAP, address) };
+    let phys = unsafe { pmap_extract(kernel_pmap_ptr(), address) };
     Some(phys >> PAGE_SHIFT)
 }
 
@@ -305,19 +307,20 @@ pub(crate) fn machine_init() {
 /// Patch the realmode GDT and the far jump after it with the address the AP
 /// boot code was copied to.
 fn patch_realmode_gdt() {
+    // The AP boot page sits below 4 GiB, so the C's narrowing to the realmode
+    // `u32` fields loses nothing.
+    let apboot = mp_desc::APBOOT_ADDR.load(Ordering::Relaxed) as u32;
     // SAFETY: `gdt_descr_tmp` and `apboot_jmp_offset` are `cpuboot.S`'s
     // objects, and `machine_init` is their only writer.
     unsafe {
-        // The AP boot page sits below 4 GiB, so the C's narrowing to the
-        // realmode `u32` fields loses nothing.
         let base = phystokv(
             ptr::addr_of_mut!(cpuboot::gdt_descr_tmp.linear_base).addr(),
         ) as *mut u32;
-        *base = (*base).wrapping_add(mp_desc::APBOOT_ADDR as u32);
+        *base = (*base).wrapping_add(apboot);
         let jmp =
             phystokv(ptr::addr_of_mut!(cpuboot::apboot_jmp_offset).addr())
                 as *mut u32;
-        *jmp = (*jmp).wrapping_add(mp_desc::APBOOT_ADDR as u32);
+        *jmp = (*jmp).wrapping_add(apboot);
     }
 }
 
@@ -340,8 +343,7 @@ pub(crate) fn halt_all_cpus(reboot: c_int) -> ! {
         // C took it under the same flag.
         unsafe { crate::arch::x86_64::kd::kdreboot() };
     } else {
-        // SAFETY: `rebootflag` has no other writer, and this CPU stops here.
-        unsafe { REBOOTFLAG = 1 };
+        REBOOTFLAG.store(true, Ordering::Relaxed);
         kprint!("Shutdown completed successfully, now in tight loop.\n");
         kprint!(
             "You can safely power off the system or hit ctl-alt-del to reboot\n"
@@ -642,12 +644,10 @@ fn i386at_init() {
                 length,
             )
         };
-        // SAFETY: `KERNEL_CMDLINE` and `BOOT_INFO` are written only here and
-        // only on the boot CPU.
-        unsafe {
-            KERNEL_CMDLINE = kv_ptr_mut::<c_char>(phystokv(mem));
-            BOOT_INFO.cmdline = mem as u32;
-        }
+        KERNEL_CMDLINE
+            .store(kv_ptr_mut::<c_char>(phystokv(mem)), Ordering::Relaxed);
+        // SAFETY: `BOOT_INFO` is written only here and only on the boot CPU.
+        unsafe { BOOT_INFO.cmdline = mem as u32 };
     }
 
     if flags.contains(MultibootLoaderFlags::MODULES) && mods_count != 0 {
@@ -687,9 +687,7 @@ fn i386at_init() {
     pmap::pmap_remove_temporary_mapping();
 
     mp_desc::interrupt_stack_alloc();
-    // SAFETY: `spl_init` is `ioapic.rs`'s global, and this is its only writer
-    // once the real IOAPIC is up.
-    unsafe { ioapic::SPL_INIT = 1 };
+    ioapic::SPL_INIT.store(true, Ordering::Relaxed);
 }
 
 /// `c_boot_entry()` of <`i386/i386/model_dep.h`>, the C entry `boothdr.S` calls.
@@ -733,9 +731,7 @@ pub(crate) fn c_boot_entry(bi: VmOffset) {
 pub(crate) fn startrtclock() {
     // The C's non-APIC branch (`clkstart()` plus `unmask_irq(0)`) went with
     // the 8259 driver; APIC support is unconditional now.
-    // SAFETY: `timer_pin` is read after `ioapic_configure` picked it, and the
-    // boot path is single-threaded.
-    let pin = unsafe { ioapic::TIMER_PIN };
+    let pin = ioapic::TIMER_PIN.load(Ordering::Relaxed);
     ioapic::unmask(pin);
     ioapic::calibrate_lapic_timer();
     if per_cpu::cpu_id() != CpuId::BOOT {

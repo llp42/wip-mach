@@ -20,6 +20,7 @@ use crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS;
 use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 /// `MACH_PORT_NAME_NULL` of <mach/port.h>: the name no entry holds.
 const MACH_PORT_NAME_NULL: c_uint = 0;
@@ -29,11 +30,11 @@ static mut IPC_SPACE_CACHE: KmemCache = KmemCache::zeroed();
 
 /// `ipc_space_kernel` of `ipc/ipc_space.c`: the space holding the kernel's
 /// naked receive rights.
-static mut KERNEL_SPACE: *mut c_void = ptr::null_mut();
+static KERNEL_SPACE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 /// `ipc_space_reply` of `ipc/ipc_space.c`: the space holding the kernel's reply
 /// ports.
-static mut REPLY_SPACE: *mut c_void = ptr::null_mut();
+static REPLY_SPACE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 /// `zero_entry` of `ipc/ipc_space.c`: the placeholder for the reserved zeroth
 /// entry.
@@ -262,13 +263,11 @@ pub(crate) fn create_special() -> Result<IpcSpace, KernError> {
 /// results the C ignored.
 pub(crate) fn create_specials() {
     if let Ok(space) = create_special() {
-        // SAFETY: bootstrap is the only writer, before any reader runs.
-        unsafe { KERNEL_SPACE = space.as_ptr() };
+        KERNEL_SPACE.store(space.as_ptr(), Ordering::Relaxed);
     }
 
     if let Ok(space) = create_special() {
-        // SAFETY: bootstrap is the only writer, before any reader runs.
-        unsafe { REPLY_SPACE = space.as_ptr() };
+        REPLY_SPACE.store(space.as_ptr(), Ordering::Relaxed);
     }
 }
 
@@ -276,14 +275,14 @@ pub(crate) fn create_specials() {
 pub(crate) fn kernel() -> IpcSpace {
     // SAFETY: `create_specials()` is the only writer, and it runs in
     // `ipc_bootstrap()` before any caller that needs the space.
-    unsafe { IpcSpace::from_raw(KERNEL_SPACE) }
+    unsafe { IpcSpace::from_raw(KERNEL_SPACE.load(Ordering::Relaxed)) }
 }
 
 /// The reply space, live from `ipc_bootstrap()` on.
 pub(crate) fn reply() -> IpcSpace {
     // SAFETY: `create_specials()` is the only writer, and it runs in
     // `ipc_bootstrap()` before any caller that needs the space.
-    unsafe { IpcSpace::from_raw(REPLY_SPACE) }
+    unsafe { IpcSpace::from_raw(REPLY_SPACE.load(Ordering::Relaxed)) }
 }
 
 /// `ipc_space_destroy()` in C.

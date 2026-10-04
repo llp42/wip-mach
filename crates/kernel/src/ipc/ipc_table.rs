@@ -16,6 +16,7 @@ use core::mem::offset_of;
 use core::num::NonZeroUsize;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 /// `struct ipc_table_size` of <`ipc/ipc_table.h>`: one table size.
 #[repr(C)]
@@ -35,9 +36,10 @@ const IPC_TABLE_DNREQUESTS_SIZE: usize = 64;
 /// The byte size of `struct ipc_port_request`, which every table size counts.
 pub(crate) const IPC_PORT_REQUEST_SIZE: VmSize = size_of::<IpcPortRequest>();
 
-/// `ipc_port_dngrow()` in `ipc/ipc_port.c` reads the C symbol and walks the
-/// table it points at; nothing else touches it.
-pub static mut IPC_TABLE_DNREQUESTS: *mut IpcTableSize = ptr::null_mut();
+/// `ipc_table_dnrequests` of `ipc/ipc_table.c`: the dead-name request table
+/// sizes, which `ipc_port_dngrow()` walks.
+pub static IPC_TABLE_DNREQUESTS: AtomicPtr<IpcTableSize> =
+    AtomicPtr::new(ptr::null_mut());
 
 /// Fill `its` with the sizes of the tables the C `ipc_table_fill()` describes:
 /// powers of two up to the page size, then page-sized increments that double
@@ -111,8 +113,7 @@ pub(crate) unsafe fn ipc_table_init() {
         )
     };
 
-    // SAFETY: this is the only writer, and it runs before any reader.
-    unsafe { *ptr::addr_of_mut!(IPC_TABLE_DNREQUESTS) = table.as_ptr() };
+    IPC_TABLE_DNREQUESTS.store(table.as_ptr(), Ordering::Relaxed);
 
     // SAFETY: `table` is a fresh allocation of `IPC_TABLE_DNREQUESTS_SIZE`
     // entries, so the whole slice is writable and unshared.

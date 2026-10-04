@@ -507,7 +507,7 @@ unsafe fn page_state(page: *mut VmPage) -> c_uint {
             page_ref.set_dirty(true);
         }
 
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         if page_ref.is_inactive() {
             state |= VPI_STATE_INACTIVE;
         }
@@ -530,7 +530,7 @@ unsafe fn page_state(page: *mut VmPage) -> c_uint {
             state |= VPI_STATE_REFERENCE;
             page_ref.set_reference(true);
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
 
         state
     }

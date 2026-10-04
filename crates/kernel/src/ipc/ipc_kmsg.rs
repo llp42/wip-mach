@@ -36,6 +36,7 @@ use core::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
 use core::mem::{size_of, size_of_val};
 use core::ops::{BitOr, BitOrAssign};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
+use core::sync::atomic::Ordering;
 
 /// `IKM_SIZE_NETWORK` of <`ipc/ipc_kmsg.h>`: the size marking a message the
 /// network code owns.
@@ -1047,8 +1048,7 @@ unsafe fn entry_lookup_failed(header: *mut MachMsgHeader, port_name: c_uint) {
         header_id,
     );
 
-    // SAFETY: the debug switch is written only by the debugger.
-    if unsafe { mach_port::MACH_PORT_DEALLOCATE_DEBUG } != 0 {
+    if mach_port::MACH_PORT_DEALLOCATE_DEBUG.load(Ordering::Relaxed) != 0 {
         // SAFETY: the C string literal is NUL-terminated.
         unsafe { soft_debugger(c"ipc_entry_lookup".as_ptr()) };
     }

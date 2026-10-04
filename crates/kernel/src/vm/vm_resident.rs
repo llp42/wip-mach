@@ -7,10 +7,10 @@
 
 //! Resident memory management, which `vm/vm_resident.c` used to define.
 
-use crate::arch::types::{VmOffset, VmSize};
+use crate::arch::types::{AtomicVmOffset, VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
 use crate::arch::x86_64::phys;
-use crate::arch::x86_64::pmap::KERNEL_PMAP;
+use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_enter;
 use crate::arch::x86_64::pmap::pmap_virtual_space;
 use crate::ipc::HashInfoBucket;
@@ -54,23 +54,23 @@ const VM_PAGE_FICTITIOUS_QUANTUM: c_int = 5;
 
 /// `virtual_space_start` of `vm/vm_resident.c`: the first kernel virtual
 /// address `pmap_steal_memory()` hands out.
-static mut VIRTUAL_SPACE_START: VmOffset = 0;
+static VIRTUAL_SPACE_START: AtomicVmOffset = AtomicVmOffset::new(0);
 
 /// `virtual_space_end` of `vm/vm_resident.c`: the end of the range
 /// `pmap_steal_memory()` hands out.
-static mut VIRTUAL_SPACE_END: VmOffset = 0;
+static VIRTUAL_SPACE_END: AtomicVmOffset = AtomicVmOffset::new(0);
 
 /// `vm_page_queue_free_lock` of `vm/vm_resident.c`: the lock on the free page
 /// queue and the fictitious-page list.
-pub(crate) static mut VM_PAGE_QUEUE_FREE_LOCK: SimpleLock = SimpleLock::new();
+pub(crate) static VM_PAGE_QUEUE_FREE_LOCK: SimpleLock = SimpleLock::new();
 
 /// `vm_page_queue_lock` of `vm/vm_resident.c`: the lock on the active and
 /// inactive page queues.
-pub(crate) static mut VM_PAGE_QUEUE_LOCK: SimpleLock = SimpleLock::new();
+pub(crate) static VM_PAGE_QUEUE_LOCK: SimpleLock = SimpleLock::new();
 
 /// `vm_page_fictitious_addr` of `vm/vm_resident.c`: the fake physical address
 /// of a fictitious page.
-pub(crate) static mut VM_PAGE_FICTITIOUS_ADDR: VmOffset = VmOffset::MAX;
+pub(crate) const VM_PAGE_FICTITIOUS_ADDR: VmOffset = VmOffset::MAX;
 
 /// `vm_page_fictitious_count` of `vm/vm_resident.c`: how many fictitious pages
 /// are free.  `vm_page_queue_free_lock` serializes every access, so the
@@ -192,22 +192,15 @@ unsafe fn bucket_ptr(
 pub(crate) fn pmap_steal_memory(size: VmSize) -> Result<VmOffset, VmSize> {
     let size = round_page(size);
 
-    // SAFETY: the statics are this module's boot pair, and the caller runs
-    // before anything else has taken a mapping out of them.
-    let mut start = unsafe { VIRTUAL_SPACE_START };
-    // SAFETY: the statics are this module's boot pair, and the caller runs
-    // before anything else has taken a mapping out of them.
-    let mut end = unsafe { VIRTUAL_SPACE_END };
+    let mut start = VIRTUAL_SPACE_START.load(Ordering::Relaxed);
+    let mut end = VIRTUAL_SPACE_END.load(Ordering::Relaxed);
     if start == end {
         // SAFETY: the pair is empty, so the pmap has yet to report a range.
         unsafe { pmap_virtual_space(&raw mut start, &raw mut end) };
         start = round_page(start);
         end = trunc_page(end);
-        // SAFETY: the locals hold the range the pmap just reported.
-        unsafe {
-            VIRTUAL_SPACE_START = start;
-            VIRTUAL_SPACE_END = end;
-        }
+        VIRTUAL_SPACE_START.store(start, Ordering::Relaxed);
+        VIRTUAL_SPACE_END.store(end, Ordering::Relaxed);
     }
 
     let addr = start;
@@ -215,8 +208,7 @@ pub(crate) fn pmap_steal_memory(size: VmSize) -> Result<VmOffset, VmSize> {
     if new_start < start {
         return Err(size);
     }
-    // SAFETY: the check above kept the new value inside the address space.
-    unsafe { VIRTUAL_SPACE_START = new_start };
+    VIRTUAL_SPACE_START.store(new_start, Ordering::Relaxed);
 
     let limit = addr.wrapping_add(size);
     let mut vaddr = round_page(addr);
@@ -226,7 +218,7 @@ pub(crate) fn pmap_steal_memory(size: VmSize) -> Result<VmOffset, VmSize> {
         // range just reserved; the C maps the page without wiring it.
         unsafe {
             pmap_enter(
-                NonNull::new(KERNEL_PMAP),
+                NonNull::new(kernel_pmap_ptr()),
                 vaddr,
                 paddr,
                 (VmProt::READ | VmProt::WRITE).bits(),
@@ -245,8 +237,8 @@ pub(crate) fn bootstrap() -> (VmOffset, VmOffset) {
     // SAFETY: the bootstrap runs once, before any other user of the two
     // locks, and the fictitious list is not yet linked.
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).init();
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).init();
+        VM_PAGE_QUEUE_FREE_LOCK.init();
+        VM_PAGE_QUEUE_LOCK.init();
         (*state()).fictitious = NodeList::new();
     }
 
@@ -303,15 +295,10 @@ pub(crate) fn bootstrap() -> (VmOffset, VmOffset) {
 
     vm_page::setup();
 
-    // SAFETY: the bootstrap owns the pair until the table is reported.
-    let start = round_page(unsafe { VIRTUAL_SPACE_START });
-    // SAFETY: the bootstrap owns the pair until the table is reported.
-    let end = trunc_page(unsafe { VIRTUAL_SPACE_END });
-    // SAFETY: the bootstrap owns the pair until the table is reported.
-    unsafe {
-        VIRTUAL_SPACE_START = start;
-        VIRTUAL_SPACE_END = end;
-    }
+    let start = round_page(VIRTUAL_SPACE_START.load(Ordering::Relaxed));
+    let end = trunc_page(VIRTUAL_SPACE_END.load(Ordering::Relaxed));
+    VIRTUAL_SPACE_START.store(start, Ordering::Relaxed);
+    VIRTUAL_SPACE_END.store(end, Ordering::Relaxed);
 
     (start, end)
 }
@@ -558,7 +545,7 @@ unsafe fn fictitious_list() -> Pin<&'static mut NodeList> {
 ///
 /// The caller must not hold `vm_page_queue_free_lock`.
 pub(crate) unsafe fn grab_fictitious() -> Option<NonNull<VmPage>> {
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock() };
+    VM_PAGE_QUEUE_FREE_LOCK.lock();
 
     let page = {
         // SAFETY: the free lock is held.
@@ -572,8 +559,7 @@ pub(crate) unsafe fn grab_fictitious() -> Option<NonNull<VmPage>> {
         })
     };
 
-    // SAFETY: the lock was taken above.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+    VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
     page
 }
@@ -588,7 +574,7 @@ pub(crate) unsafe fn grab_fictitious() -> Option<NonNull<VmPage>> {
 unsafe fn release_fictitious(mem: NonNull<VmPage>) {
     let page = mem.as_ptr();
 
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock() };
+    VM_PAGE_QUEUE_FREE_LOCK.lock();
 
     // SAFETY: the free lock is held and the page is live.
     unsafe {
@@ -602,8 +588,7 @@ unsafe fn release_fictitious(mem: NonNull<VmPage>) {
     }
     VM_PAGE_FICTITIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    // SAFETY: the lock was taken above.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+    VM_PAGE_QUEUE_FREE_LOCK.unlock();
 }
 
 /// `vm_page_more_fictitious()` in C: allocate more fictitious pages into the
@@ -652,14 +637,14 @@ pub(crate) unsafe fn convert(
     let (object, offset) = unsafe { ((*page).object, (*page).offset) };
 
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         remove(fict);
 
         (*real.as_ptr()).copy_body_from(&*page);
         (*real.as_ptr()).set_fictitious(false);
 
         insert(real, NonNull::new_unchecked(object), offset);
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 
     // SAFETY: the page is the fictitious one just unlinked from every list.
@@ -702,8 +687,8 @@ pub(crate) unsafe fn grab_contig(
 
     let page = unsafe { vm_page::alloc_pa(order, selector, VM_PT_KERNEL) };
     let Some(page) = NonNull::new(page) else {
-        // SAFETY: the allocator returned with the free lock held.
-        unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+        // The allocator returned with the free lock held.
+        VM_PAGE_QUEUE_FREE_LOCK.unlock();
         return None;
     };
 
@@ -714,8 +699,8 @@ pub(crate) unsafe fn grab_contig(
         i += 1;
     }
 
-    // SAFETY: the lock was taken by the allocator.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+    // The lock was taken by the allocator.
+    VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
     Some(page)
 }
@@ -834,10 +819,10 @@ pub(crate) unsafe fn rename(
     // SAFETY: the page-queue lock is the live lock the pageout daemon also
     // takes, and the caller holds the object's lock.
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         remove(page);
         insert(page, object, offset);
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 }
 
@@ -858,9 +843,9 @@ pub(crate) unsafe fn alloc_flags(
     // SAFETY: the page-queue lock is the live lock, and the caller holds the
     // object's lock.
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         insert(page, object, offset);
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 
     Some(page)
@@ -953,9 +938,9 @@ pub(crate) unsafe fn grab(flags: c_uint) -> Option<NonNull<VmPage>> {
         unsafe { (*page.as_ptr()).set_free(false) };
     }
 
-    // SAFETY: `vm_page_alloc_pa()` returns with the free lock held, on both
+    // `vm_page_alloc_pa()` returns with the free lock held, on both
     // the found and the exhausted path.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+    VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
     page
 }
@@ -974,7 +959,7 @@ pub(crate) unsafe fn release(
 ) {
     let ptr = page.as_ptr();
 
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock() };
+    VM_PAGE_QUEUE_FREE_LOCK.lock();
 
     // SAFETY: the free lock serializes the flag, and the page is live.
     if unsafe { (*ptr).is_free() } {
@@ -1006,8 +991,7 @@ pub(crate) unsafe fn release(
         }
     }
 
-    // SAFETY: the lock was taken above and nothing released it since.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+    VM_PAGE_QUEUE_FREE_LOCK.unlock();
 }
 
 /// `vm_page_zero_fill()` in C: zero the page's physical memory.

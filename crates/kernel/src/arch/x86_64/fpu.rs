@@ -31,7 +31,7 @@ use crate::kern::types::KernError;
 use core::ffi::{c_int, c_long, c_uint, c_ushort, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
 /// `CR0.NE`: the x87 numeric-error reporting enable.
 pub(crate) const CR0_NE: usize = 0x20;
@@ -376,7 +376,8 @@ static FP_XSAVE_SUPPORT_HI: AtomicU32 = AtomicU32::new(0);
 static MXCSR_FEATURE_MASK: AtomicU32 = AtomicU32::new(0xffff_ffff);
 
 /// The default FPU state a new thread starts from, built once at boot.
-static mut FP_DEFAULT_STATE: *mut I386FpSaveState = ptr::null_mut();
+static FP_DEFAULT_STATE: AtomicPtr<I386FpSaveState> =
+    AtomicPtr::new(ptr::null_mut());
 
 /// The slab cache the FPU save areas come from.
 static mut IFPS_CACHE: KmemCache = KmemCache::zeroed();
@@ -914,7 +915,7 @@ unsafe fn fpinit(thread: *mut Thread) {
     // SAFETY: `fpu_module_init()` set `FP_DEFAULT_STATE` before any
     // thread could reach this init, and the default image matches the
     // save kind.
-    unsafe { fpu_rstor(FP_DEFAULT_STATE) };
+    unsafe { fpu_rstor(FP_DEFAULT_STATE.load(Ordering::Relaxed)) };
     let control = unsafe { (*(*thread).pcb).init_control };
     if control != 0 {
         fldcw(control);
@@ -1068,13 +1069,12 @@ pub(crate) unsafe fn fpu_module_init() {
             offset_of!(I386FpSaveState, save) + xfp_save_size() as usize,
         );
     };
-    // SAFETY: `fpu_module_init()` is the only writer, before any FPU user.
-    unsafe { FP_DEFAULT_STATE = state };
+    FP_DEFAULT_STATE.store(state, Ordering::Relaxed);
 
     clear_ts();
     fninit();
     // SAFETY: the default image was just built and matches the save kind.
-    unsafe { fpu_save(FP_DEFAULT_STATE) };
+    unsafe { fpu_save(state) };
     set_ts();
 }
 
@@ -1653,7 +1653,7 @@ pub(crate) unsafe fn fp_load(thread: *mut Thread) {
         if ifps.is_null() {
             ifps = alloc_fp_state();
             ptr::copy_nonoverlapping(
-                FP_DEFAULT_STATE.cast::<u8>(),
+                FP_DEFAULT_STATE.load(Ordering::Relaxed).cast::<u8>(),
                 ifps.cast::<u8>(),
                 offset_of!(I386FpSaveState, save) + xfp_save_size() as usize,
             );

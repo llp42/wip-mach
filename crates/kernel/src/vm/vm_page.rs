@@ -10,7 +10,7 @@
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
-use crate::arch::x86_64::pmap::KERNEL_PMAP;
+use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_clear_modify;
 use crate::arch::x86_64::pmap::pmap_clear_reference;
 use crate::arch::x86_64::pmap::pmap_extract;
@@ -1762,10 +1762,8 @@ unsafe fn seg_balance_page(
     remote_seg: *mut VmPageSeg,
     priv_alloc: bool,
 ) -> bool {
-    unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
-        (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock();
-    }
+    VM_PAGE_QUEUE_LOCK.lock();
+    VM_PAGE_QUEUE_FREE_LOCK.lock();
     unsafe { seg_double_lock(seg, remote_seg) };
 
     let unusable = unsafe { !seg_usable(seg) };
@@ -1781,8 +1779,8 @@ unsafe fn seg_balance_page(
         // SAFETY: the locks were taken above.
         unsafe {
             seg_double_unlock(seg, remote_seg);
-            (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock();
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_FREE_LOCK.unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
         return false;
     }
@@ -1806,8 +1804,8 @@ unsafe fn seg_balance_page(
         // SAFETY: the locks were taken above.
         unsafe {
             seg_double_unlock(seg, remote_seg);
-            (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock();
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_FREE_LOCK.unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
         return false;
     }
@@ -1819,7 +1817,7 @@ unsafe fn seg_balance_page(
     // SAFETY: the locks were taken above.
     unsafe {
         seg_double_unlock(seg, remote_seg);
-        (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock();
+        VM_PAGE_QUEUE_FREE_LOCK.unlock();
     }
 
     if dest.is_null() {
@@ -1871,14 +1869,14 @@ unsafe fn seg_balance_page(
     // SAFETY: the free lock and the segment lock are taken in the C's
     // order, and the source page is live.
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock();
+        VM_PAGE_QUEUE_FREE_LOCK.lock();
         vm_resident::init(&mut *src);
         (*src).set_free(true);
         (*seg).lock.lock();
         set_type(NonNull::new_unchecked(src), 0, VM_PT_FREE);
         seg_free_to_buddy(seg, src, 0);
         (*seg).lock.unlock();
-        (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock();
+        VM_PAGE_QUEUE_FREE_LOCK.unlock();
     }
 
     // SAFETY: the destination page is live, the object lock and the
@@ -1897,7 +1895,7 @@ unsafe fn seg_balance_page(
             deactivate(dest);
         }
 
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 
     true
@@ -2207,7 +2205,7 @@ pub(crate) fn setup() {
     let mut va = va;
     while va < (table as usize) {
         // SAFETY: `pmap_extract()` reads the boot pmap for a mapped address.
-        let pa = unsafe { pmap_extract(KERNEL_PMAP, va) };
+        let pa = unsafe { pmap_extract(kernel_pmap_ptr(), va) };
         // SAFETY: the address was just mapped by the pmap over the page
         // table, so it has a descriptor.
         let Some(page) = lookup_pa(pa) else {
@@ -2291,14 +2289,14 @@ pub(crate) unsafe fn check(page: *const VmPage) {
             die("vm_page_check", "vm_page: page both fictitious and private");
         }
 
-        if unsafe { (*page).phys_addr } != unsafe { VM_PAGE_FICTITIOUS_ADDR } {
+        if unsafe { (*page).phys_addr } != VM_PAGE_FICTITIOUS_ADDR {
             die("vm_page_check", "vm_page: invalid fictitious page");
         }
 
         return;
     }
 
-    if unsafe { (*page).phys_addr } == unsafe { VM_PAGE_FICTITIOUS_ADDR } {
+    if unsafe { (*page).phys_addr } == VM_PAGE_FICTITIOUS_ADDR {
         die("vm_page_check", "vm_page: real page has fictitious address");
     }
 
@@ -2366,7 +2364,7 @@ pub(crate) unsafe fn alloc_pa(
     let seg_index = select_alloc_seg(selector);
 
     loop {
-        unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock() };
+        VM_PAGE_QUEUE_FREE_LOCK.lock();
 
         let mut i = seg_index;
         while i < segs_size() {
@@ -2383,8 +2381,7 @@ pub(crate) unsafe fn alloc_pa(
         let thread = per_cpu::thread();
         // SAFETY: the null check short-circuits, so `thread` is live.
         if thread.is_null() || unsafe { (*thread).vm_privilege } != 0 {
-            // SAFETY: the lock was taken above.
-            unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+            VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
             let mut i = seg_index;
             while i < segs_size() {
@@ -2689,7 +2686,7 @@ pub(crate) unsafe fn queues_remove(page: *mut VmPage) {
 /// The caller must hold no page lock: neither the free lock nor the
 /// page-queues lock.
 unsafe fn check_usable() -> bool {
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock() };
+    VM_PAGE_QUEUE_FREE_LOCK.lock();
 
     let mut i = 0;
     while i < segs_size() {
@@ -2810,7 +2807,7 @@ unsafe fn evict_one(external: bool, active: bool, alloc_paused: bool) -> bool {
     let mut reclaim;
 
     loop {
-        unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock() };
+        VM_PAGE_QUEUE_LOCK.lock();
 
         if page.is_null() {
             page = unsafe {
@@ -2822,8 +2819,7 @@ unsafe fn evict_one(external: bool, active: bool, alloc_paused: bool) -> bool {
             };
 
             if page.is_null() {
-                // SAFETY: the lock was taken above.
-                unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock() };
+                VM_PAGE_QUEUE_LOCK.unlock();
                 return false;
             }
 
@@ -2889,7 +2885,7 @@ unsafe fn evict_one(external: bool, active: bool, alloc_paused: bool) -> bool {
             // page-queues lock is held, as its C caller had it.
             unsafe {
                 vm_resident::free(NonNull::new_unchecked(page));
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
 
                 if (*object).ref_count == 0
                     && (*object).resident_page_count == 0
@@ -2903,8 +2899,7 @@ unsafe fn evict_one(external: bool, active: bool, alloc_paused: bool) -> bool {
             return true;
         }
 
-        // SAFETY: the lock was taken above.
-        unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock() };
+        VM_PAGE_QUEUE_LOCK.unlock();
 
         if default_manager::is_set() {
             // SAFETY: the object lock is held and the C calls the object's
@@ -2962,7 +2957,7 @@ unsafe fn evict_reactivate(
             let task = (*thread).task;
             (*task).reactivations = (*task).reactivations.wrapping_add(1);
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 }
 
@@ -2989,28 +2984,20 @@ unsafe fn evict_once(alloc_paused: bool) -> bool {
 pub(crate) unsafe fn evict(should_wait: *mut c_int) -> bool {
     unsafe { *should_wait = c_int::from(true) };
 
-    unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock();
-    }
+    VM_PAGE_QUEUE_FREE_LOCK.lock();
     vm_resident::VM_PAGE_EXTERNAL_LAUNDRY_COUNT.store(0, Ordering::Relaxed);
     // SAFETY: the state is live for the kernel's lifetime.
     let alloc_paused = unsafe { (*state()).alloc_paused };
-    // SAFETY: the lock was taken above.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+    VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
-    unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
-    }
+    VM_PAGE_QUEUE_LOCK.lock();
     let pause = vm_resident::VM_PAGE_LAUNDRY_COUNT.load(Ordering::Relaxed)
         >= VM_PAGE_MAX_LAUNDRY;
-    // SAFETY: the lock was taken above.
-    unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
-    }
+    VM_PAGE_QUEUE_LOCK.unlock();
 
     if pause {
-        // SAFETY: the C returns with the free lock held.
-        unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock() };
+        // The C returns with the free lock held.
+        VM_PAGE_QUEUE_FREE_LOCK.lock();
         return false;
     }
 
@@ -3027,8 +3014,8 @@ pub(crate) unsafe fn evict(should_wait: *mut c_int) -> bool {
         i += 1;
     }
 
-    // SAFETY: the C re-takes the free lock before the decision.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock() };
+    // The C re-takes the free lock before the decision.
+    VM_PAGE_QUEUE_FREE_LOCK.lock();
 
     if vm_resident::VM_PAGE_LAUNDRY_COUNT.load(Ordering::Relaxed) == 0
         && vm_resident::VM_PAGE_EXTERNAL_LAUNDRY_COUNT.load(Ordering::Relaxed)
@@ -3046,8 +3033,7 @@ pub(crate) unsafe fn evict(should_wait: *mut c_int) -> bool {
         }
     }
 
-    // SAFETY: the lock was taken above.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+    VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
     // SAFETY: the C's eviction caller holds no page lock.
     unsafe { check_usable() }
@@ -3055,8 +3041,7 @@ pub(crate) unsafe fn evict(should_wait: *mut c_int) -> bool {
 
 /// `vm_page_refill_inactive()` in C.
 pub(crate) fn refill_inactive() {
-    // SAFETY: the caller holds no page-queues lock.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock() };
+    VM_PAGE_QUEUE_LOCK.lock();
 
     let mut i = 0;
     while i < segs_size() {
@@ -3065,8 +3050,7 @@ pub(crate) fn refill_inactive() {
         i += 1;
     }
 
-    // SAFETY: the lock was taken above.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock() };
+    VM_PAGE_QUEUE_LOCK.unlock();
 }
 
 /// `vm_page_wait()` in C.
@@ -3076,12 +3060,11 @@ pub(crate) fn refill_inactive() {
 /// The caller must not hold `vm_page_queue_free_lock` and must be ready to
 /// block.
 pub(crate) unsafe fn wait(continuation: Option<unsafe extern "C" fn()>) {
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).lock() };
+    VM_PAGE_QUEUE_FREE_LOCK.lock();
 
     // SAFETY: the state is live for the kernel's lifetime.
     if !unsafe { (*state()).alloc_paused } {
-        // SAFETY: the lock was taken above.
-        unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+        VM_PAGE_QUEUE_FREE_LOCK.unlock();
         return;
     }
 
@@ -3091,7 +3074,7 @@ pub(crate) unsafe fn wait(continuation: Option<unsafe extern "C" fn()>) {
             NonNull::new(addr_of_mut!((*state()).alloc_paused).cast()),
             0,
         );
-        (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock();
+        VM_PAGE_QUEUE_FREE_LOCK.unlock();
         thread_block(continuation);
     }
 }

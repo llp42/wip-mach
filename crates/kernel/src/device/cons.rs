@@ -20,6 +20,7 @@ use crate::utils::cell::SyncCell;
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_short};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 /// The `constab[]` entries `i386/i386at/cons_conf.c` spelled out, terminator
 /// included.
@@ -65,32 +66,27 @@ const CN_DEAD: c_short = 0;
 const CONSBUFSIZE: usize = 1024;
 
 /// `cn_inited` of `device/cons.c`.
-static mut CN_INITED: bool = false;
+static CN_INITED: AtomicBool = AtomicBool::new(false);
 
 /// `cn_tab` of `device/cons.c`: the chosen console.
-static mut CN_TAB: *mut ConsDev = ptr::null_mut();
+static CN_TAB: AtomicPtr<ConsDev> = AtomicPtr::new(ptr::null_mut());
 
-/// `romgetc` of `device/cons.c`: the boot ROM's character input, if any.
-///
-/// [`getc()`] invokes it with the wait flag cast to `c_char`, exactly as
-/// the C passed its literal `1`/`0`; whoever installs it must ensure it is
-/// safe to call from that context.
-pub static mut ROMGETC: Option<unsafe fn(c_char) -> c_int> = None;
+/// `consbuf`, `consbp` and `consbufused` of `device/cons.c`: the output held
+/// until a console is chosen, a ring only the boot CPU fills.
+struct PendingOutput {
+    buf: [c_char; CONSBUFSIZE],
+    /// The slot the next byte goes to, which is also the oldest byte once
+    /// the ring has wrapped.
+    next: usize,
+    used: bool,
+}
 
-/// `romputc` of `device/cons.c`: the boot ROM's character output, if any.
-///
-/// [`putc()`] invokes it with the character to emit; whoever installs it
-/// must ensure it is safe to call from that context.
-pub static mut ROMPUTC: Option<unsafe fn(c_char)> = None;
-
-/// `consbuf` of `device/cons.c`: the output held until a console is chosen.
-static mut CONSBUF: [c_char; CONSBUFSIZE] = [0; CONSBUFSIZE];
-
-/// `consbp` of `device/cons.c`.
-static mut CONSBP: *mut c_char = ptr::addr_of_mut!(CONSBUF).cast::<c_char>();
-
-/// `consbufused` of `device/cons.c`.
-static mut CONSBUFUSED: bool = false;
+static PENDING: SyncCell<PendingOutput> =
+    SyncCell(UnsafeCell::new(PendingOutput {
+        buf: [0; CONSBUFSIZE],
+        next: 0,
+        used: false,
+    }));
 
 /// `cninit()` of `device/cons.c`: find and initialize the console.
 ///
@@ -99,8 +95,7 @@ static mut CONSBUFUSED: bool = false;
 /// Called once, during the boot, after the device tables and `constab` exist
 /// and before any console user runs.
 pub(crate) unsafe fn init() {
-    // SAFETY: the flag is this module's and the boot is single-threaded.
-    if unsafe { CN_INITED } {
+    if CN_INITED.load(Ordering::Relaxed) {
         return;
     }
 
@@ -122,9 +117,8 @@ pub(crate) unsafe fn init() {
                 || unsafe { (*cp).cn_pri } > unsafe { (*chosen).cn_pri })
         {
             chosen = cp;
-            // SAFETY: `cn_tab` is this module's, and the C named the best
-            // entry as soon as it saw one.
-            unsafe { CN_TAB = cp };
+            // The C named the best entry as soon as it saw one.
+            CN_TAB.store(cp, Ordering::Relaxed);
         }
         // SAFETY: the probe entry is inside `constab`, whose terminator ends
         // the walk.
@@ -158,8 +152,7 @@ pub(crate) unsafe fn init() {
     // SAFETY: the console is initialized, so the pending buffer can be
     // flushed through it.
     unsafe { flush_pending() };
-    // SAFETY: this boot step is the flag's only writer.
-    unsafe { CN_INITED = true };
+    CN_INITED.store(true, Ordering::Relaxed);
 }
 
 /// The `consbufused` flush at the end of `cninit()`.
@@ -169,32 +162,28 @@ pub(crate) unsafe fn init() {
 /// The console must be initialized; the buffer is this module's and nothing
 /// else flushes it concurrently.
 unsafe fn flush_pending() {
-    // SAFETY: the flag and pointer are this module's.
-    if !unsafe { CONSBUFUSED } {
+    // No reference is held across `putc()`: with a console chosen it never
+    // reaches the buffer, but the cell is not borrowed while it runs.
+    let pending = PENDING.0.get();
+    // SAFETY: the caller guarantees nothing else touches the buffer.
+    let (used, start) = unsafe { ((*pending).used, (*pending).next) };
+    if !used {
         return;
     }
-    let base = ptr::addr_of_mut!(CONSBUF).cast::<c_char>();
-    // SAFETY: `CONSBP` is this module's cursor into the buffer.
-    let start = unsafe { CONSBP };
-    let mut cbp = start;
+    let mut i = start;
     loop {
-        // SAFETY: `cbp` walks the 1024-byte buffer, which is initialized.
-        let byte = unsafe { *cbp };
+        // SAFETY: as above; `i` stays inside the ring.
+        let byte = unsafe { (*pending).buf[i] };
         if byte != 0 {
             unsafe { putc(byte) };
         }
-        // SAFETY: the walk stays inside the buffer, as the C's did.
-        cbp = unsafe { cbp.add(1) };
-        // SAFETY: `base` is the buffer's start, one past which ends it.
-        if cbp == unsafe { base.add(CONSBUFSIZE) } {
-            cbp = base;
-        }
-        if cbp == start {
+        i = (i + 1) % CONSBUFSIZE;
+        if i == start {
             break;
         }
     }
-    // SAFETY: this routine is the flag's only writer.
-    unsafe { CONSBUFUSED = false };
+    // SAFETY: as above.
+    unsafe { (*pending).used = false };
 }
 
 /// `cngetc()` and `cnmaygetc()` of `device/cons.c`.
@@ -204,17 +193,13 @@ unsafe fn flush_pending() {
 /// The console and ROM tables are the machine's; `wait` selects the blocking
 /// or polling read, exactly as the C passed `1` or `0`.
 pub(crate) unsafe fn getc(wait: c_int) -> c_int {
-    // SAFETY: `CN_TAB` is the chosen entry, or null before `cninit()`.
-    let tab = unsafe { CN_TAB };
+    // The chosen entry, or null before `cninit()`.
+    let tab = CN_TAB.load(Ordering::Relaxed);
     if !tab.is_null() {
         // SAFETY: a chosen console has `cn_getc` filled by its probe.
         if let Some(cn_getc) = unsafe { (*tab).cn_getc } {
             return unsafe { cn_getc((*tab).cn_dev, wait) };
         }
-    }
-    // SAFETY: the ROM pointer is null until a boot ROM installs one.
-    if let Some(romgetc) = unsafe { ROMGETC } {
-        return unsafe { romgetc(wait as c_char) };
     }
     0
 }
@@ -232,30 +217,20 @@ pub(crate) unsafe fn putc(c: c_char) {
 
     kmsg::putchar(c_int::from(c));
 
-    // SAFETY: `CN_TAB` is the chosen entry, or null before `cninit()`.
-    let tab = unsafe { CN_TAB };
-    if !tab.is_null() {
-        // SAFETY: a chosen console has `cn_putc` filled by its probe.
-        if let Some(cn_putc) = unsafe { (*tab).cn_putc } {
-            unsafe {
-                cn_putc((*tab).cn_dev, c_int::from(c));
-                if c == b'\n' as c_char {
-                    cn_putc((*tab).cn_dev, c_int::from(b'\r'));
-                }
-            }
-        }
-    // SAFETY: the ROM pointer is null until a boot ROM installs one.
-    } else if let Some(romputc) = unsafe { ROMPUTC } {
-        unsafe {
-            romputc(c);
-            if c == b'\n' as c_char {
-                romputc(b'\r' as c_char);
-            }
-        }
-    } else {
+    // The chosen entry, or null before `cninit()`.
+    let tab = CN_TAB.load(Ordering::Relaxed);
+    if tab.is_null() {
         // SAFETY: the buffer is this module's and no console exists yet, so
         // the C buffered the byte.
         unsafe { buffer_char(c) };
+    // SAFETY: a chosen console has `cn_putc` filled by its probe.
+    } else if let Some(cn_putc) = unsafe { (*tab).cn_putc } {
+        unsafe {
+            cn_putc((*tab).cn_dev, c_int::from(c));
+            if c == b'\n' as c_char {
+                cn_putc((*tab).cn_dev, c_int::from(b'\r'));
+            }
+        }
     }
 }
 
@@ -267,22 +242,13 @@ pub(crate) unsafe fn putc(c: c_char) {
 /// Nothing else may write the buffer concurrently: the C ran this before any
 /// console existed.
 unsafe fn buffer_char(c: c_char) {
-    let base = ptr::addr_of_mut!(CONSBUF).cast::<c_char>();
-    // SAFETY: the flag, pointer and buffer are this module's.
-    if !unsafe { CONSBUFUSED } {
-        unsafe {
-            CONSBP = base;
-            CONSBUFUSED = true;
-            ptr::write_bytes(base, 0, CONSBUFSIZE);
-        }
+    // SAFETY: the caller guarantees nothing else touches the buffer.
+    let pending = unsafe { &mut *PENDING.0.get() };
+    if !pending.used {
+        pending.buf = [0; CONSBUFSIZE];
+        pending.next = 0;
+        pending.used = true;
     }
-    // SAFETY: `CONSBP` always addresses the 1024-byte buffer.
-    unsafe {
-        let slot = CONSBP;
-        slot.write(c);
-        CONSBP = slot.add(1);
-        if CONSBP >= base.add(CONSBUFSIZE) {
-            CONSBP = base;
-        }
-    }
+    pending.buf[pending.next] = c;
+    pending.next = (pending.next + 1) % CONSBUFSIZE;
 }

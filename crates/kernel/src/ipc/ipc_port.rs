@@ -201,7 +201,7 @@ pub(crate) unsafe fn dngrow(port: IpcPort) -> Result<(), KernError> {
     // entry when the port already has a table.
     let its = unsafe {
         if old.is_null() {
-            ipc_table::IPC_TABLE_DNREQUESTS
+            ipc_table::IPC_TABLE_DNREQUESTS.load(Ordering::Relaxed)
         } else {
             (*old).size().add(1)
         }

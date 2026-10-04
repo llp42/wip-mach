@@ -196,12 +196,10 @@ pub(crate) unsafe fn processor_sets(
     let size_needed;
 
     loop {
-        // SAFETY: the lock guards `all_psets`.
-        unsafe { (*lock).lock() };
+        // The lock guards `all_psets`.
+        lock.lock();
         // SAFETY: the lock is held.
-        let count = unsafe { *processor::all_psets_count() };
-        // The count is the number of live sets, never negative.
-        let count = count as usize;
+        let count = unsafe { *processor::all_psets_count() } as usize;
         let needed = count.wrapping_mul(size_of::<usize>());
         if needed <= size {
             actual = count;
@@ -209,8 +207,7 @@ pub(crate) unsafe fn processor_sets(
             break;
         }
 
-        // SAFETY: the lock taken above.
-        unsafe { (*lock).unlock() };
+        lock.unlock();
         if let Some(old) = NonNull::new(addr) {
             // SAFETY: `addr` came from `kalloc(size)`.
             unsafe { kfree(old, size) };
@@ -240,8 +237,7 @@ pub(crate) unsafe fn processor_sets(
             psets.add(i).write(pset.cast());
         }
     }
-    // SAFETY: the lock taken above.
-    unsafe { (*lock).unlock() };
+    lock.unlock();
 
     let mut psets = psets;
     if size_needed < size {

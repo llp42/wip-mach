@@ -10,7 +10,7 @@
 //!
 //! The `extern "C"` edge is in [`mp_desc_ffi`].
 
-use crate::arch::types::VmOffset;
+use crate::arch::types::{AtomicVmOffset, VmOffset};
 use crate::arch::x86_64::apic;
 use crate::arch::x86_64::fpu;
 use crate::arch::x86_64::model_dep;
@@ -135,7 +135,7 @@ pub static mut INT_STACK_TOP: [VmOffset; MAX_NCPUS] = [0; MAX_NCPUS];
 
 /// `apboot_addr` of <`i386/model_dep.h>`: the physical page the AP boot code
 /// was copied to.
-pub static mut APBOOT_ADDR: VmOffset = 0;
+pub static APBOOT_ADDR: AtomicVmOffset = AtomicVmOffset::new(0);
 
 /// `mp_desc_table` of <`i386/mp_desc.h>`: one allocated table set per CPU other
 /// than the boot CPU, which shares the `gdt.c`/`ktss.c` tables.
@@ -339,13 +339,14 @@ const CPU_SUBTYPE_AT386: c_int = 1;
 fn copy_apboot() {
     let begin = ptr::addr_of!(cpuboot::apboot).addr();
     let length = ptr::addr_of!(cpuboot::apbootend).addr() - begin;
+    let target = phystokv(APBOOT_ADDR.load(Ordering::Relaxed));
     // SAFETY: `apboot_addr` names the page `biosmem_bootstrap()` reserved for
     // this copy, `apboot`/`apbootend` bracket the image, and this runs on one
     // CPU before any AP starts.
     unsafe {
         let source = ptr::with_exposed_provenance::<c_void>(phystokv(begin));
         crate::utils::string::memcpy(
-            ptr::with_exposed_provenance_mut::<c_void>(phystokv(APBOOT_ADDR)),
+            ptr::with_exposed_provenance_mut::<c_void>(target),
             source,
             length,
         );
@@ -375,8 +376,8 @@ pub(crate) fn start_other_cpus() {
     }
 
     let bsp = apic::apic_id();
-    // SAFETY: `apboot_addr` is the physical page `copy_apboot` filled.
-    smp::startup_cpus(bsp, unsafe { APBOOT_ADDR } as c_ulong);
+    // `apboot_addr` is the physical page `copy_apboot` filled.
+    smp::startup_cpus(bsp, APBOOT_ADDR.load(Ordering::Relaxed) as c_ulong);
 
     for cpu in CpuId::online().skip(1) {
         kprint!("Waiting for AP {}\n", cpu);

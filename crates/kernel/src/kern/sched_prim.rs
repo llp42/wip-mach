@@ -349,7 +349,7 @@ pub(crate) unsafe fn sched_init() {
     // module the action globals, and this is the boot step that builds them.
     unsafe {
         processor::bootstrap();
-        (*machine::action_lock()).init();
+        machine::action_lock().init();
     }
 
     SCHED_TICK.store(0, Ordering::Relaxed);
@@ -1520,7 +1520,7 @@ pub(crate) unsafe fn do_thread_scan() {
         // has its own lock taken by `do_runq_scan()`.
         unsafe {
             let lock = processor::all_psets_lock();
-            (*lock).lock();
+            lock.lock();
             let head = processor::all_psets();
             let mut cursor = head.cursor_front();
             while let Some(pset) = cursor.current_ptr() {
@@ -1531,7 +1531,7 @@ pub(crate) unsafe fn do_thread_scan() {
                     break;
                 }
             }
-            (*lock).unlock();
+            lock.unlock();
         }
 
         if !restart_needed {

@@ -1417,9 +1417,8 @@ unsafe fn pagefree_physmem(addr: VmOffset, _size: VmSize) {
 ///
 /// `addr..addr + size` must be a region [`pagealloc_virtual`] returned.
 unsafe fn pagefree_virtual(addr: VmOffset, size: VmSize) {
-    // SAFETY: the boot globals are live for the kernel's lifetime.
-    let start = unsafe { KERNEL_VIRTUAL_START };
-    let end = unsafe { KERNEL_VIRTUAL_END };
+    let start = KERNEL_VIRTUAL_START.load(Ordering::Relaxed);
+    let end = KERNEL_VIRTUAL_END.load(Ordering::Relaxed);
 
     if addr < start || addr.wrapping_add(size) > end {
         kpanic!(

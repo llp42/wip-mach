@@ -10,7 +10,7 @@
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
-use crate::arch::x86_64::pmap::KERNEL_PMAP;
+use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_enter;
 use crate::arch::x86_64::pmap::pmap_map_bd;
 use crate::arch::x86_64::pmap::pmap_pageable;
@@ -32,7 +32,7 @@ use crate::vm::vm_object::{self, allocate, deallocate, reference};
 use crate::vm::vm_resident::VM_PAGE_QUEUE_LOCK;
 use crate::vm::{vm_page, vm_resident};
 use core::ffi::{c_char, c_int, c_uint, c_void};
-use core::ptr::{self, NonNull, addr_of_mut, with_exposed_provenance_mut};
+use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// `VM_PAGE_HIGHMEM` of <`vm/vm_page.h>`: the page may come from high physical
@@ -50,9 +50,6 @@ static mut KERNEL_MAP_STORE: VmMap = VmMap::zeroed();
 
 /// `kernel_map` of <`vm/vm_kern.h>`: the kernel map `kmem_init()` builds.
 pub static mut KERNEL_MAP: *mut VmMap = &raw mut KERNEL_MAP_STORE;
-
-/// `kernel_pageable_map` of <`vm/vm_kern.h>`: never set.
-pub static mut KERNEL_PAGEABLE_MAP: *mut VmMap = ptr::null_mut();
 
 /// `projected_buffer_collect()` in C: unmap every projected buffer of `map`.
 pub(crate) fn projected_buffer_collect(
@@ -678,8 +675,7 @@ pub(crate) unsafe fn alloc_pages(
     protection: VmProt,
     flags: c_uint,
 ) {
-    // SAFETY: `kernel_pmap` is the boot pmap.
-    unsafe { pmap_pageable(KERNEL_PMAP, start, end, c_int::from(false)) };
+    pmap_pageable(kernel_pmap_ptr(), start, end, c_int::from(false));
 
     while start < end {
         let object_ref = unsafe { NonNull::new_unchecked(object) };
@@ -709,9 +705,9 @@ pub(crate) unsafe fn alloc_pages(
         // SAFETY: the page-queues lock is the live lock and the object lock
         // is held.
         unsafe {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_page::wire(mem);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
         // SAFETY: the page is wired; the C unlocks the object before entering
         // the mapping.
@@ -721,7 +717,7 @@ pub(crate) unsafe fn alloc_pages(
         // address is live; the C masks the page's lock bits out.
         unsafe {
             pmap_enter(
-                NonNull::new(KERNEL_PMAP),
+                NonNull::new(kernel_pmap_ptr()),
                 start,
                 (*mem.as_ptr()).phys_addr,
                 (protection & !(*mem.as_ptr()).page_lock()).bits(),
@@ -754,7 +750,7 @@ pub(crate) unsafe fn copyinmap(
     length: c_int,
 ) -> c_int {
     // SAFETY: `kernel_pmap` is the boot pmap.
-    if map.pmap == unsafe { KERNEL_PMAP } {
+    if map.pmap == kernel_pmap_ptr() {
         unsafe {
             ptr::copy_nonoverlapping(
                 fromaddr,
@@ -796,7 +792,7 @@ pub(crate) unsafe fn copyoutmap(
     length: c_int,
 ) -> c_int {
     // SAFETY: `kernel_pmap` is the boot pmap.
-    if map.pmap == unsafe { KERNEL_PMAP } {
+    if map.pmap == kernel_pmap_ptr() {
         unsafe {
             ptr::copy_nonoverlapping(
                 fromaddr,

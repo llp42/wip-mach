@@ -8,7 +8,7 @@
 //! The virtual memory bootstrap, which `vm/vm_init.c` used to define and
 //! `vm/vm_init.h` declares.
 
-use crate::arch::x86_64::pmap::KERNEL_PMAP;
+use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_init;
 use crate::kern::debug::kpanic;
 use crate::kern::slab::{kalloc_init, slab_bootstrap, slab_init};
@@ -34,7 +34,7 @@ fn bootstrap() {
         VmMap::init_module();
         if let Err(error) = vm_kern::kmem_init(
             NonNull::new_unchecked(KERNEL_MAP),
-            KERNEL_PMAP,
+            kernel_pmap_ptr(),
             start,
             end,
         ) {

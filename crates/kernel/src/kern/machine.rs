@@ -142,7 +142,7 @@ static ACTION_QUEUE: SyncCell<ProcessorQueue> =
     SyncCell(UnsafeCell::new(ProcessorQueue::new()));
 
 /// `action_lock` of kern/machine.c.
-static mut ACTION_LOCK: SimpleLock = SimpleLock::new();
+static ACTION_LOCK: SimpleLock = SimpleLock::new();
 
 /// The C `machine_slot[cpu]` of <mach/machine.h>.
 pub(crate) fn slot(cpu: CpuId) -> *mut MachineSlot {
@@ -236,8 +236,8 @@ unsafe fn action_queue() -> Pin<&'static mut ProcessorQueue> {
 }
 
 /// The live `action_lock`.
-pub(crate) fn action_lock() -> *mut SimpleLock {
-    ptr::addr_of_mut!(ACTION_LOCK)
+pub(crate) fn action_lock() -> &'static SimpleLock {
+    &ACTION_LOCK
 }
 
 /// The `RB_*` flag word of <sys/reboot.h>, the `host_reboot()` options.
@@ -372,7 +372,7 @@ unsafe fn request_action(
             core::hint::spin_loop();
         }
 
-        (*action_lock()).lock();
+        action_lock().lock();
 
         match (*processor).state.load(Ordering::Acquire) {
             ProcessorState::Idle => {
@@ -403,7 +403,7 @@ unsafe fn request_action(
             }
         }
 
-        (*action_lock()).unlock();
+        action_lock().unlock();
         (*pset).idle_lock.unlock();
 
         let _ = thread_wakeup_prim(action_event(), 0, THREAD_AWAKENED);
@@ -876,21 +876,21 @@ unsafe fn engine() -> ! {
             }
 
             let mut s = spl::splsched();
-            (*action_lock()).lock();
+            action_lock().lock();
 
             while let Some(processor) = action_queue().pop_front() {
                 let processor = ptr::from_mut(processor);
-                (*action_lock()).unlock();
+                action_lock().unlock();
                 spl::splx(s);
 
                 doaction(processor);
 
                 s = spl::splsched();
-                (*action_lock()).lock();
+                action_lock().lock();
             }
 
             assert_wait(NonNull::new(action_event()), 0);
-            (*action_lock()).unlock();
+            action_lock().unlock();
             spl::splx(s);
 
             thread_block(Some(resume));

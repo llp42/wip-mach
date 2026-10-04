@@ -631,15 +631,9 @@ pub(crate) unsafe fn irq_acknowledge(
 
 /// The status reply for `flavor`, or [`None`] for a flavor the device does
 /// not serve.
-pub(crate) fn getstat(flavor: c_uint) -> Option<(c_int, u32)> {
+pub(crate) const fn getstat(flavor: c_uint) -> Option<(c_int, u32)> {
     match flavor {
-        IRQGETPICMODE => {
-            // SAFETY: `pic_mode` is the machine global the APIC setup
-            // initialized before the device layer starts and never wrote
-            // again.
-            let mode = unsafe { ioapic::PIC_MODE };
-            Some((mode, 1))
-        }
+        IRQGETPICMODE => Some((ioapic::PIC_MODE, 1)),
         _ => None,
     }
 }

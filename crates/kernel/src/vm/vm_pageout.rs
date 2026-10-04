@@ -39,7 +39,7 @@ use crate::vm::vm_user::VM_STAT;
 use crate::vm::{vm_page, vm_resident};
 use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_uint, c_void};
-use core::ptr::{self, NonNull, addr_of_mut};
+use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering;
 
 /// `VM_PAGEOUT_TIMEOUT` of `vm/vm_pageout.c`, in milliseconds.
@@ -88,22 +88,22 @@ pub(crate) unsafe fn setup(
         // SAFETY: the page-queues lock is the live lock and the object lock
         // is held.
         unsafe {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_resident::remove(m);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
         // SAFETY: the object lock is held and the page is live.
         unsafe { vm_object::page_wakeup_done(page) };
 
         // SAFETY: the holding page replaces the page at the same offset.
         unsafe {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_resident::insert(
                 holding_page,
                 NonNull::new_unchecked(old_object),
                 (*page).offset,
             );
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
 
         // SAFETY: `existence_info` is the object's external state map, and
@@ -122,9 +122,9 @@ pub(crate) unsafe fn setup(
         unsafe { (*new_object.as_ptr()).lock.lock() };
         // SAFETY: the object lock and the page-queues lock guard the move.
         unsafe {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_resident::insert(m, new_object, new_offset);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
 
             (*page).set_dirty(true);
             (*page).set_precious(false);
@@ -159,9 +159,9 @@ pub(crate) unsafe fn setup(
 
         // SAFETY: the page-queues lock is the live lock.
         unsafe {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_page::deactivate(page);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
 
         // SAFETY: the object lock is held and the page is live.
@@ -214,7 +214,7 @@ unsafe fn finish_pageout(
     // SAFETY: the page-queues lock is the live lock, and the old object is
     // unlocked while the new one is locked.
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         VM_STAT.pageouts += 1;
         if (*result.as_ptr()).is_laundry() {
             (*result.as_ptr()).set_laundry(false);
@@ -234,7 +234,7 @@ unsafe fn finish_pageout(
             }
             vm_page::activate(result.as_ptr());
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
 
         // SAFETY: the new object's lock was taken above.
         (*new_object.as_ptr()).lock.unlock();
@@ -266,9 +266,9 @@ pub(crate) unsafe fn page(m: NonNull<VmPage>, initial: bool, flush: bool) {
         // SAFETY: the page-queues lock is the live lock and the object lock
         // is held, as `vm_page_free` requires.
         unsafe {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_resident::free(m);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
         return;
     }
@@ -341,9 +341,9 @@ pub(crate) unsafe fn page(m: NonNull<VmPage>, initial: bool, flush: bool) {
     unsafe {
         (*old_object).lock.lock();
         if let Some(holding_page) = holding_page {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_resident::free(holding_page);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
         vm_object::paging_end(old_object);
     }
@@ -361,8 +361,8 @@ unsafe fn scan(should_wait: *mut c_int) -> bool {
     if unsafe { vm_page::balance() } {
         return true;
     }
-    // SAFETY: the lock was taken by `balance`.
-    unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+    // The lock was taken by `balance`.
+    VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
     // The C's `if (0)`-guarded `consider_thread_collect()` call never ran, so
     // it is not carried over.
@@ -405,7 +405,7 @@ pub(crate) unsafe fn pageout() -> ! {
             unsafe {
                 thread_sleep(
                     VM_PAGEOUT_REQUESTED.0.get().cast::<c_void>(),
-                    addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK),
+                    ptr::from_ref(&VM_PAGE_QUEUE_FREE_LOCK).cast_mut(),
                     0,
                 );
             };
@@ -420,12 +420,11 @@ pub(crate) unsafe fn pageout() -> ! {
                 thread_set_timeout(
                     VM_PAGEOUT_TIMEOUT.wrapping_mul(CLOCK_HZ) / 1000,
                 );
-                (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock();
+                VM_PAGE_QUEUE_FREE_LOCK.unlock();
                 thread_block(None);
             }
         } else {
-            // SAFETY: the free lock is held.
-            unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_FREE_LOCK)).unlock() };
+            VM_PAGE_QUEUE_FREE_LOCK.unlock();
         }
     }
 }

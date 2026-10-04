@@ -14,7 +14,7 @@ use crate::ipc::ipc_port;
 use crate::ipc::{IpcPort, MachMsgHeader, MachMsgType, MigReplyHeader};
 use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
-use crate::kern::task::KERNEL_TASK;
+use crate::kern::task::kernel_task;
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr;
@@ -234,16 +234,16 @@ pub(crate) unsafe fn server(request: Kmsg) -> Option<Kmsg> {
             // the kernel task is live from `task_init()`.
             unsafe {
                 routine(head.cast(), reply.header().cast());
-                (*KERNEL_TASK).messages_received =
-                    (*KERNEL_TASK).messages_received.wrapping_add(1);
+                (*kernel_task()).messages_received =
+                    (*kernel_task()).messages_received.wrapping_add(1);
             }
         }
         None => {
             // SAFETY: the headers are live and writable.
             if unsafe { notify(head, reply.header()) } {
                 unsafe {
-                    (*KERNEL_TASK).messages_received =
-                        (*KERNEL_TASK).messages_received.wrapping_add(1);
+                    (*kernel_task()).messages_received =
+                        (*kernel_task()).messages_received.wrapping_add(1);
                 }
             } else {
                 // SAFETY: the reply header is live and writable.
@@ -255,8 +255,8 @@ pub(crate) unsafe fn server(request: Kmsg) -> Option<Kmsg> {
         }
     }
     unsafe {
-        (*KERNEL_TASK).messages_sent =
-            (*KERNEL_TASK).messages_sent.wrapping_add(1);
+        (*kernel_task()).messages_sent =
+            (*kernel_task()).messages_sent.wrapping_add(1);
     };
 
     // SAFETY: the request header is live; the switch handles exactly the two

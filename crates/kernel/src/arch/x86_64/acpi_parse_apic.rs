@@ -19,10 +19,11 @@ use crate::vm::types::VmProt;
 use crate::vm::vm_kern::KERNEL_MAP;
 use crate::vm::vm_kern::{self, VM_MIN_KERNEL_ADDRESS};
 use crate::vm::vm_map::VmMap;
-use core::ffi::{c_int, c_uint, c_void};
+use core::ffi::{c_int, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
 use core::slice;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 /// `ACPI_RSDP_ALIGN` of <`i386at/acpi_parse_apic.h`>.
 const ACPI_RSDP_ALIGN: usize = 16;
@@ -310,11 +311,7 @@ const _: () = {
 };
 
 /// `hpet_addr` of <i386/apic.h>: the mapped HPET register window.
-pub(crate) static mut HPET_ADDR: *mut u32 = ptr::null_mut();
-
-/// `lapic_addr` of `i386/i386at/acpi_parse_apic.c`: the local-APIC address
-/// the MADT named.
-pub(crate) static mut LAPIC_ADDR: c_uint = 0;
+pub(crate) static HPET_ADDR: AtomicPtr<u32> = AtomicPtr::new(ptr::null_mut());
 
 /// `phystokv()` of <`i386/vm_param.h`>.
 const fn phystokv(phys: VmOffset) -> VmOffset {
@@ -554,10 +551,10 @@ fn inspect_entry(phys: VmOffset, madt: &mut Option<NonNull<AcpiApic>>) {
             1024,
             VmProt::READ | VmProt::WRITE,
         );
-        // SAFETY: `hpet_addr` is the C global, written only from this loop.
-        unsafe {
-            HPET_ADDR = mapped.map_or(ptr::null_mut(), NonNull::as_ptr);
-        };
+        HPET_ADDR.store(
+            mapped.map_or(ptr::null_mut(), NonNull::as_ptr),
+            Ordering::Relaxed,
+        );
         kprint!("HPET at physical address 0x{:x}\n", address);
     }
 }
@@ -708,10 +705,6 @@ fn setup(apic: NonNull<AcpiApic>) -> Result<(), AcpiError> {
     let address = unsafe {
         ptr::read_unaligned(ptr::addr_of!((*apic.as_ptr()).lapic_addr))
     };
-    // SAFETY: `lapic_addr` is the C global <i386at/acpi_parse_apic.h>
-    // declares, written once at boot.
-    unsafe { LAPIC_ADDR = address };
-
     let Some(unit) = map_table::<ApicLocalUnit>(
         from_u32(address),
         size_of::<ApicLocalUnit>(),

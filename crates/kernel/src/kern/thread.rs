@@ -41,7 +41,7 @@ use crate::kern::sched_prim::{
 };
 use crate::kern::slab::{CacheInitFlags, KmemCache, kalloc, kfree};
 use crate::kern::syscall_subr::depress_abort;
-use crate::kern::task::{KERNEL_TASK, Task, add_time64, current_task};
+use crate::kern::task::{Task, add_time64, current_task, kernel_task};
 use crate::kern::timer::{TIMER_RATE, Timer, TimerSave, read_times};
 use crate::kern::types::KernError;
 use crate::utils::cell::SyncCell;
@@ -424,8 +424,7 @@ impl Thread {
                 CacheInitFlags::EMPTY,
             );
             (*ptr::addr_of_mut!(THREAD_TEMPLATE)).write(Self::new());
-            let reaper_lock = &raw mut REAPER_LOCK;
-            (*reaper_lock).init();
+            REAPER_LOCK.init();
             STACK_LOCK_DATA.init();
             crate::arch::x86_64::pcb::pcb_module_init();
         }
@@ -1511,7 +1510,7 @@ unsafe fn reaper_queue() -> Pin<&'static mut ThreadQueue> {
 }
 
 /// `reaper_lock` of kern/thread.c: protects `reaper_queue`.
-static mut REAPER_LOCK: SimpleLock = SimpleLock::new();
+static REAPER_LOCK: SimpleLock = SimpleLock::new();
 
 /// `stack_lock_data` of kern/thread.c: protects the cached-stack free list,
 /// at splsched.
@@ -1663,7 +1662,7 @@ impl Thread {
             let cur_thread = per_cpu::thread();
             if !cur_thread.is_null() {
                 let cur_task = current_task();
-                if cur_task != KERNEL_TASK
+                if cur_task != kernel_task()
                     && parent_task == cur_task
                     && (*cur_thread).vm_privilege != 0
                 {
@@ -2197,9 +2196,9 @@ impl Thread {
                 Self::hold(thread);
 
                 let s = spl::splsched();
-                (*ptr::addr_of_mut!(REAPER_LOCK)).lock();
+                REAPER_LOCK.lock();
                 reaper_queue().push_back_ptr(NonNull::new_unchecked(thread));
-                (*ptr::addr_of_mut!(REAPER_LOCK)).unlock();
+                REAPER_LOCK.unlock();
 
                 (*thread).lock.lock();
                 (*thread).set_state((*thread).state() | TH_HALTED);
@@ -2539,11 +2538,11 @@ pub(crate) unsafe extern "C" fn reaper_thread_continue() {
         // both waits release it.
         unsafe {
             let mut s = spl::splsched();
-            (*ptr::addr_of_mut!(REAPER_LOCK)).lock();
+            REAPER_LOCK.lock();
 
             let mut entry = reaper_queue().cursor_front_mut().remove_current();
             while let Some(thread) = entry {
-                (*ptr::addr_of_mut!(REAPER_LOCK)).unlock();
+                REAPER_LOCK.unlock();
                 spl::splx(s);
 
                 let thread = ptr::from_mut(thread);
@@ -2551,11 +2550,11 @@ pub(crate) unsafe extern "C" fn reaper_thread_continue() {
                 Thread::deallocate(thread);
 
                 s = spl::splsched();
-                (*ptr::addr_of_mut!(REAPER_LOCK)).lock();
+                REAPER_LOCK.lock();
                 entry = reaper_queue().cursor_front_mut().remove_current();
             }
             assert_wait(NonNull::new(reaper_event()), 0);
-            (*ptr::addr_of_mut!(REAPER_LOCK)).unlock();
+            REAPER_LOCK.unlock();
             spl::splx(s);
             thread_block(Some(reaper_thread_continue));
         }

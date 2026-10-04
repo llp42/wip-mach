@@ -7,7 +7,7 @@
 //! declares.
 
 use crate::arch::x86_64::clock_platform;
-use crate::arch::x86_64::model_dep::{self, KERNEL_CMDLINE};
+use crate::arch::x86_64::model_dep;
 use crate::arch::x86_64::pcb;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::arch::x86_64::pmap;
@@ -23,7 +23,7 @@ use crate::kern::machine;
 use crate::kern::processor::{self, processor_at};
 use crate::kern::sched_prim;
 use crate::kern::smp::CpuId;
-use crate::kern::task::{self, KERNEL_TASK};
+use crate::kern::task::{self, kernel_task};
 use crate::kern::thread::{self, TH_RUN, TH_UNINT, Thread};
 use crate::kern::thread_swap;
 use crate::kern::timer;
@@ -56,8 +56,9 @@ pub(crate) fn reboot_on_panic() -> c_int {
 /// Runs once, on the interrupt stack of the boot processor, before any other
 /// CPU or thread exists.
 pub(crate) unsafe fn setup_main() {
-    // SAFETY: the boot set `KERNEL_CMDLINE` before `setup_main` ran.
-    if unsafe { command_line_has_halt() } {
+    // The C's `strstr(kernel_cmdline, "-H ")`.
+    let line = model_dep::kernel_cmdline().to_bytes();
+    if line.windows(3).any(|window| window == b"-H ") {
         // The store runs before any other CPU starts, and the C `Panic()`
         // read the same word without synchronization.
         REBOOT_ON_PANIC.store(0, Ordering::Relaxed);
@@ -106,7 +107,7 @@ pub(crate) unsafe fn setup_main() {
         gsync::setup();
 
         let startup_thread =
-            Thread::create(KERNEL_TASK).unwrap_or(ptr::null_mut());
+            Thread::create(kernel_task()).unwrap_or(ptr::null_mut());
         let _ = Thread::set_name(startup_thread, c"startup".as_ptr());
         (*startup_thread).start(Some(start_kernel_threads));
         thread_swap::thread_doswapin(startup_thread);
@@ -116,16 +117,6 @@ pub(crate) unsafe fn setup_main() {
 
         cpu_launch_first_thread(startup_thread);
     }
-}
-
-/// The `strstr(kernel_cmdline, "-H ")` test of `setup_main()`.
-///
-/// # Safety
-///
-/// `kernel_cmdline` must point at the live NUL-terminated boot command line.
-unsafe fn command_line_has_halt() -> bool {
-    let line = unsafe { core::ffi::CStr::from_ptr(KERNEL_CMDLINE) };
-    line.to_bytes().windows(3).any(|window| window == b"-H ")
 }
 
 /// `start_kernel_threads()` in C: create the kernel's service threads and the
@@ -145,7 +136,7 @@ pub(crate) unsafe extern "C" fn start_kernel_threads() {
         // SAFETY: the kernel task is live, and the slot below is writable;
         // the C ignored a failure the same way.
         unsafe {
-            let th = Thread::create(KERNEL_TASK).unwrap_or(ptr::null_mut());
+            let th = Thread::create(kernel_task()).unwrap_or(ptr::null_mut());
 
             let mut name = [0; 10];
             write_cstr(&mut name, format_args!("idle/{cpu}"));
@@ -161,37 +152,37 @@ pub(crate) unsafe extern "C" fn start_kernel_threads() {
     // kernel thread, as the C started them.
     unsafe {
         let _ = thread::kernel_thread(
-            KERNEL_TASK,
+            kernel_task(),
             c"reaper".as_ptr(),
             Some(thread::reaper_thread_continue),
             ptr::null_mut(),
         );
         let _ = thread::kernel_thread(
-            KERNEL_TASK,
+            kernel_task(),
             c"rcu".as_ptr(),
             Some(crate::kern::rcu::gp_thread_continue),
             ptr::null_mut(),
         );
         let _ = thread::kernel_thread(
-            KERNEL_TASK,
+            kernel_task(),
             c"swapin".as_ptr(),
             Some(swapin_thread_continuation),
             ptr::null_mut(),
         );
         let _ = thread::kernel_thread(
-            KERNEL_TASK,
+            kernel_task(),
             c"sched".as_ptr(),
             Some(sched_prim::sched_thread_entry),
             ptr::null_mut(),
         );
         let _ = thread::kernel_thread(
-            KERNEL_TASK,
+            kernel_task(),
             c"intr".as_ptr(),
             Some(crate::device::intr::intr_thread_entry),
             ptr::null_mut(),
         );
         let _ = thread::kernel_thread(
-            KERNEL_TASK,
+            kernel_task(),
             c"action".as_ptr(),
             Some(machine::action_thread),
             ptr::null_mut(),
@@ -199,7 +190,7 @@ pub(crate) unsafe extern "C" fn start_kernel_threads() {
 
         crate::arch::x86_64::mp_desc::start_other_cpus();
         device_init::device_service_create();
-        record_time_stamp(&raw mut (*KERNEL_TASK).creation_time);
+        record_time_stamp(&raw mut (*kernel_task()).creation_time);
         crate::kern::bootstrap::create();
     }
 

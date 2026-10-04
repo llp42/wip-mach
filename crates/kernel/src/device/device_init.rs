@@ -63,13 +63,13 @@ pub(crate) unsafe fn device_service_create() {
     // both start routines take no argument.
     unsafe {
         crate::kern::thread::kernel_thread(
-            crate::kern::task::KERNEL_TASK,
+            crate::kern::task::kernel_task(),
             c"io_done".as_ptr(),
             Some(io_done_thread),
             ptr::null_mut(),
         );
         crate::kern::thread::kernel_thread(
-            crate::kern::task::KERNEL_TASK,
+            crate::kern::task::kernel_task(),
             c"net".as_ptr(),
             Some(crate::device::net_io::net_thread),
             ptr::null_mut(),

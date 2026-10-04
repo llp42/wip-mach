@@ -50,7 +50,7 @@ use core::pin::Pin;
 use core::ptr::{
     self, NonNull, addr_of, addr_of_mut, null_mut, with_exposed_provenance_mut,
 };
-use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, Ordering};
 
 /// `TASK_PORT_REGISTER_MAX` of <`mach/mach_param.h>`: the registered send
 /// rights a task holds.
@@ -260,21 +260,28 @@ const _: () = {
 };
 
 /// `kernel_task` of <kern/task.h>: the kernel's own task, the first created.
-pub static mut KERNEL_TASK: *mut Task = null_mut();
+static KERNEL_TASK: AtomicPtr<Task> = AtomicPtr::new(null_mut());
+
+/// The kernel's own task, live from `task_init` on.
+#[must_use]
+pub(crate) fn kernel_task() -> *mut Task {
+    KERNEL_TASK.load(Ordering::Relaxed)
+}
 
 /// The kernel task's self port, live from `task_init` on.
 #[must_use]
 pub(crate) fn kernel_task_self_port() -> *mut c_void {
     // SAFETY: `task_init` created the kernel task before any caller.
-    unsafe { (*KERNEL_TASK).itk_self }
+    unsafe { (*kernel_task()).itk_self }
 }
 
 /// `task_cache` of kern/task.c: the `struct task` slab cache.
 static mut TASK_CACHE: KmemCache = KmemCache::zeroed();
 
 /// `new_task_notification` of kern/task.c: the port new-task notifications
-/// go to, or null.
-pub static mut NEW_TASK_NOTIFICATION: *mut c_void = null_mut();
+/// go to, or null.  Set at most once, by `register_new_task_notification`.
+pub static NEW_TASK_NOTIFICATION: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
 
 /// `task_collect_allowed` of kern/task.c: whether the collector may run, a
 /// switch a debugger sets.
@@ -354,8 +361,7 @@ pub(crate) unsafe fn init() {
         // on its next line; a shortage this early is fatal either way.
         kpanic!("task_init", "task_init: cannot create the kernel task")
     };
-    // SAFETY: this is the only writer, and it runs once.
-    unsafe { KERNEL_TASK = task };
+    KERNEL_TASK.store(task, Ordering::Relaxed);
 
     // SAFETY: the new kernel task is live and the name is static.
     let _ = unsafe { set_name(task, b"gnumach") };
@@ -561,15 +567,16 @@ pub(crate) unsafe fn create_kernel_task(
         },
     }
 
-    // SAFETY: the notification global is the C's `ipc_port_t`; both
-    // conversions and the references follow the C body.  `reference()`
-    // accepts a null parent.
+    let notification = NEW_TASK_NOTIFICATION.load(Ordering::Acquire);
+    // SAFETY: the notification is the C's `ipc_port_t`; both conversions and
+    // the references follow the C body.  `reference()` accepts a null
+    // parent.
     unsafe {
-        if !NEW_TASK_NOTIFICATION.is_null() {
+        if !notification.is_null() {
             reference(task);
             reference(parent.map_or(null_mut(), NonNull::as_ptr));
             glue::mach_notify_new_task(
-                NEW_TASK_NOTIFICATION,
+                notification,
                 convert_task_to_port(task).map_or(null_mut(), IpcPort::as_ptr),
                 parent.map_or(null_mut(), |parent| {
                     convert_task_to_port(parent.as_ptr())
@@ -1464,7 +1471,7 @@ unsafe fn collect_scan() {
     unsafe {
         let all_psets_lock = processor::all_psets_lock();
 
-        (*all_psets_lock).lock();
+        all_psets_lock.lock();
         let mut pset_entry = processor::next_pset(None);
         while let Some(pset) = pset_entry {
             let pset = pset.as_ptr();
@@ -1476,7 +1483,7 @@ unsafe fn collect_scan() {
                 reference(task);
                 (*pset).reference();
                 (*pset).lock.unlock();
-                (*all_psets_lock).unlock();
+                all_psets_lock.unlock();
 
                 (*task).machine.collect();
                 pmap_collect(NonNull::new(
@@ -1493,7 +1500,7 @@ unsafe fn collect_scan() {
                 }
                 prev_pset = pset;
 
-                (*all_psets_lock).lock();
+                all_psets_lock.lock();
                 (*pset).lock.lock();
                 // `task` is referenced, so it stays linked.
                 task_entry = next_task(pset, task);
@@ -1502,7 +1509,7 @@ unsafe fn collect_scan() {
             // `all_psets_lock` still guards `pset`'s link.
             pset_entry = processor::next_pset(Some(pset));
         }
-        (*all_psets_lock).unlock();
+        all_psets_lock.unlock();
 
         if !prev_task.is_null() {
             deallocate(prev_task);

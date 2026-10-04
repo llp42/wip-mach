@@ -14,7 +14,7 @@
 //! This is the header's PAE build, with the L4 table and the four-level
 //! walk from it down to the page-table entry: the `__x86_64__` layout.
 
-use crate::arch::types::{VmOffset, VmSize};
+use crate::arch::types::{AtomicVmOffset, VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
 use crate::arch::x86_64::biosmem;
 use crate::arch::x86_64::locore;
@@ -33,16 +33,18 @@ use crate::kern::machine::slot as machine_slot;
 use crate::kern::slab::{CacheInitFlags, KmemCache};
 use crate::kern::smp::CpuId;
 use crate::kern::thread::Thread;
+use crate::utils::cell::SyncCell;
 use crate::vm::types::VmProt;
 use crate::vm::vm_kern::{self, KERNEL_MAP, VM_MIN_KERNEL_ADDRESS};
 use crate::vm::vm_map::{VmMap, round_page};
 use crate::vm::vm_page;
 use core::arch::asm;
+use core::cell::UnsafeCell;
 use core::ffi::c_int;
 use core::mem::{offset_of, size_of};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
-use core::sync::atomic::{AtomicI32, AtomicIsize, Ordering, fence};
+use core::sync::atomic::{AtomicI32, AtomicIsize, AtomicPtr, Ordering, fence};
 use spin::mutex::SpinMutex;
 
 /// `LINEAR_DS` of <i386/gdt.h>: the flat data selector `gdt_fill()` builds
@@ -416,16 +418,14 @@ impl PmapUpdateList {
 static mut KERNEL_PMAP_STORE: Pmap = Pmap::zeroed();
 
 /// `kernel_pmap` of <vm/pmap.h>: the kernel's physical map.
-pub static mut KERNEL_PMAP: *mut Pmap = ptr::null_mut();
+static KERNEL_PMAP: AtomicPtr<Pmap> = AtomicPtr::new(ptr::null_mut());
 
 /// `PMAP_NULL`: the C's null map pointer.
 const PMAP_NULL: *mut Pmap = ptr::null_mut();
 
 /// The kernel pmap the C global holds.
 pub(crate) fn kernel_pmap_ptr() -> *mut Pmap {
-    // SAFETY: `kernel_pmap` is written once, in `pmap_bootstrap()`, before
-    // any other CPU runs.
-    unsafe { KERNEL_PMAP }
+    KERNEL_PMAP.load(Ordering::Relaxed)
 }
 
 /// `pmap_system_lock` of i386/intel/pmap.c: the pmap-system read/write lock.
@@ -437,20 +437,23 @@ static PMAP_INITIALIZED: AtomicI32 = AtomicI32::new(0);
 /// `pmap_debug` of i386/intel/pmap.c: the flag that turns on the enter trace.
 static PMAP_DEBUG: AtomicI32 = AtomicI32::new(0);
 
-/// `kernel_virtual_start` of i386/intel/pmap.c.
-pub static mut KERNEL_VIRTUAL_START: VmOffset = 0;
+/// `kernel_virtual_start` of i386/intel/pmap.c: the start of the kernel
+/// virtual range `pmap_bootstrap()` sets once.
+pub static KERNEL_VIRTUAL_START: AtomicVmOffset = AtomicVmOffset::new(0);
 
-/// `kernel_virtual_end` of i386/intel/pmap.c.
-pub static mut KERNEL_VIRTUAL_END: VmOffset = 0;
+/// `kernel_virtual_end` of i386/intel/pmap.c: the end of that range.
+pub static KERNEL_VIRTUAL_END: AtomicVmOffset = AtomicVmOffset::new(0);
 
 /// `kernel_page_dir` of <i386/pmap.h>: the kernel's page directory.
-static mut KERNEL_PAGE_DIR: *mut VmOffset = ptr::null_mut();
+static KERNEL_PAGE_DIR: AtomicPtr<VmOffset> = AtomicPtr::new(ptr::null_mut());
 
 /// `pv_head_table` of i386/intel/pmap.c: one pv list head per physical page.
-static mut PV_HEAD_TABLE: *mut PvEntry = ptr::null_mut();
+static PV_HEAD_TABLE: AtomicPtr<PvEntry> = AtomicPtr::new(ptr::null_mut());
 
-/// `pv_free_list` of i386/intel/pmap.c: the free pv entries, at `SPLVM`.
-static mut PV_FREE_LIST: *mut PvEntry = ptr::null_mut();
+/// `pv_free_list` of i386/intel/pmap.c: the free pv entries, under
+/// [`PV_FREE_LIST_LOCK`] at `SPLVM`.
+static PV_FREE_LIST: SyncCell<*mut PvEntry> =
+    SyncCell(UnsafeCell::new(ptr::null_mut()));
 
 /// `pv_free_list_lock` of i386/intel/pmap.c.
 static PV_FREE_LIST_LOCK: SimpleLock = SimpleLock::new();
@@ -464,7 +467,7 @@ const _: () = assert!(align_of::<SpinMutex<()>>() <= align_of::<PvEntry>());
 
 /// `pmap_phys_attributes` of i386/intel/pmap.c: one attribute byte per
 /// physical page.
-static mut PMAP_PHYS_ATTRIBUTES: *mut u8 = ptr::null_mut();
+static PMAP_PHYS_ATTRIBUTES: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 
 /// `cpus_active` of <i386/pmap.h>: the CPUs that may use a pmap.
 pub static CPUS_ACTIVE: CpuSet = CpuSet::new();
@@ -887,9 +890,14 @@ unsafe fn cache_free(cache: *mut KmemCache, obj: *mut u8) {
 
 /// `pai_to_pvh()` of i386/intel/pmap.c: the pv list head of a page index.
 fn pv_head(pai: usize) -> *mut PvEntry {
-    // SAFETY: the caller's index is inside the table `pmap_init()` allocated
-    // for every managed page.
-    unsafe { PV_HEAD_TABLE.wrapping_add(pai) }
+    PV_HEAD_TABLE.load(Ordering::Relaxed).wrapping_add(pai)
+}
+
+/// The attribute byte of a page index.
+fn phys_attribute(pai: usize) -> *mut u8 {
+    PMAP_PHYS_ATTRIBUTES
+        .load(Ordering::Relaxed)
+        .wrapping_add(pai)
 }
 
 /// Returns the lock guarding the pv list and attribute byte of page `pai`.
@@ -909,9 +917,10 @@ fn pv_alloc() -> *mut PvEntry {
     // SAFETY: the free list is only touched under its own lock.
     unsafe {
         PV_FREE_LIST_LOCK.lock();
-        let entry = PV_FREE_LIST;
+        let list = PV_FREE_LIST.0.get();
+        let entry = *list;
         if !entry.is_null() {
-            PV_FREE_LIST = (*entry).next;
+            *list = (*entry).next;
         }
         PV_FREE_LIST_LOCK.unlock();
         entry
@@ -924,8 +933,9 @@ fn pv_free(entry: *mut PvEntry) {
     // list is only touched under its own lock.
     unsafe {
         PV_FREE_LIST_LOCK.lock();
-        (*entry).next = PV_FREE_LIST;
-        PV_FREE_LIST = entry;
+        let list = PV_FREE_LIST.0.get();
+        (*entry).next = *list;
+        *list = entry;
         PV_FREE_LIST_LOCK.unlock();
     }
 }
@@ -1046,8 +1056,7 @@ fn bootstrap_pae() {
     // and this runs single-threaded with mapping off.
     unsafe { init_alloc_aligned(PDPNUM_KERNEL * PAGE_SIZE, &raw mut addr) };
     let page_dir = with_exposed_provenance_mut::<VmOffset>(phystokv(addr));
-    // SAFETY: the boot allocator returned this page for the kernel directory.
-    unsafe { KERNEL_PAGE_DIR = page_dir };
+    KERNEL_PAGE_DIR.store(page_dir, Ordering::Relaxed);
     // SAFETY: the boot allocator returned this page for the kernel directory;
     // the directory is PDPNUM_KERNEL pages.
     unsafe {
@@ -1081,9 +1090,7 @@ fn bootstrap_pae() {
 /// `pmap_bootstrap()` in i386/intel/pmap.c: build the kernel's page tables
 /// with mapping off, so only physical addresses are reachable.
 pub(crate) fn pmap_bootstrap() {
-    // SAFETY: this runs before any other CPU, and nothing reads the global
-    // before the store.
-    unsafe { KERNEL_PMAP = &raw mut KERNEL_PMAP_STORE };
+    KERNEL_PMAP.store(&raw mut KERNEL_PMAP_STORE, Ordering::Relaxed);
 
     // SAFETY: the lock's storage is unshared at this point in the boot.
     unsafe { LockData::init(&raw mut PMAP_SYSTEM_LOCK, false) };
@@ -1094,21 +1101,13 @@ pub(crate) fn pmap_bootstrap() {
         (*kernel_pmap_ptr()).ref_count = 1;
     }
 
-    let virtual_start = phystokv(biosmem::directmap_end());
-    // SAFETY: the kernel virtual range is written here for the first time.
-    unsafe {
-        KERNEL_VIRTUAL_START = virtual_start;
-        KERNEL_VIRTUAL_END = virtual_start.wrapping_add(VM_KERNEL_MAP_SIZE);
-        if KERNEL_VIRTUAL_END < KERNEL_VIRTUAL_START
-            || KERNEL_VIRTUAL_END
-                > VM_MAX_KERNEL_ADDRESS.wrapping_sub(PAGE_SIZE)
-        {
-            KERNEL_VIRTUAL_END = VM_MAX_KERNEL_ADDRESS.wrapping_sub(PAGE_SIZE);
-        }
+    let start = phystokv(biosmem::directmap_end());
+    let mut end = start.wrapping_add(VM_KERNEL_MAP_SIZE);
+    if end < start || end > VM_MAX_KERNEL_ADDRESS.wrapping_sub(PAGE_SIZE) {
+        end = VM_MAX_KERNEL_ADDRESS.wrapping_sub(PAGE_SIZE);
     }
-
-    // SAFETY: the kernel virtual range was just written above.
-    let (start, end) = unsafe { (KERNEL_VIRTUAL_START, KERNEL_VIRTUAL_END) };
+    KERNEL_VIRTUAL_START.store(start, Ordering::Relaxed);
+    KERNEL_VIRTUAL_END.store(end, Ordering::Relaxed);
     kprint!("kernel virtual area: {:x}-{:x}\n", start, end);
 
     bootstrap_pae();
@@ -1124,9 +1123,9 @@ pub(crate) fn pmap_bootstrap() {
     // SAFETY: the kernel directory is live from `bootstrap_pae()` above, and
     // the physical memory it maps is the machine's RAM.
     unsafe {
-        let directory = KERNEL_PAGE_DIR;
+        let directory = KERNEL_PAGE_DIR.load(Ordering::Relaxed);
         let mut va = phystokv(0);
-        while va >= phystokv(0) && va < KERNEL_VIRTUAL_END {
+        while va >= phystokv(0) && va < end {
             let pde = directory.wrapping_add(lin2pdenum_cont(kvtolin(va)));
             let ptable = with_exposed_provenance_mut::<VmOffset>(phystokv(
                 pmap_grab_page(),
@@ -1157,8 +1156,8 @@ pub(crate) fn pmap_bootstrap() {
                 pte = pte.wrapping_add(1);
             }
             while pte < ptable.wrapping_add(NPTES) {
-                let window_start = KERNEL_VIRTUAL_END - MAPWINDOW_SIZE;
-                if va >= window_start && va < KERNEL_VIRTUAL_END {
+                let window_start = end - MAPWINDOW_SIZE;
+                if va >= window_start && va < end {
                     let index = (va - window_start) >> PAGE_SHIFT;
                     let win = (&raw mut MAPWINDOWS)
                         .cast::<PmapMapwindow>()
@@ -1246,9 +1245,11 @@ pub(crate) unsafe fn pmap_virtual_space(
     startp: *mut VmOffset,
     endp: *mut VmOffset,
 ) {
+    let start = KERNEL_VIRTUAL_START.load(Ordering::Relaxed);
+    let end = KERNEL_VIRTUAL_END.load(Ordering::Relaxed);
     unsafe {
-        *startp = KERNEL_VIRTUAL_START;
-        *endp = KERNEL_VIRTUAL_END.wrapping_sub(MAPWINDOW_SIZE);
+        *startp = start;
+        *endp = end.wrapping_sub(MAPWINDOW_SIZE);
     }
 }
 
@@ -1273,7 +1274,7 @@ pub(crate) fn pmap_init() {
     // head table, its locks and the attribute bytes; the locks are written
     // in place and the slice over them is published before any pv use.
     unsafe {
-        PV_HEAD_TABLE = addr as *mut PvEntry;
+        PV_HEAD_TABLE.store(addr as *mut PvEntry, Ordering::Relaxed);
         addr += size_of::<PvEntry>() * npages;
         let locks = addr as *mut SpinMutex<()>;
         for i in 0..npages {
@@ -1281,7 +1282,7 @@ pub(crate) fn pmap_init() {
         }
         PV_LOCKS = slice::from_raw_parts(locks, npages);
         addr += size_of::<SpinMutex<()>>() * npages;
-        PMAP_PHYS_ATTRIBUTES = addr as *mut u8;
+        PMAP_PHYS_ATTRIBUTES.store(addr as *mut u8, Ordering::Relaxed);
     }
 
     // SAFETY: each cache's storage is unshared and this runs once.  The
@@ -1385,7 +1386,10 @@ pub(crate) unsafe fn pmap_create(size: VmSize) -> *mut Pmap {
         // the same `PDPNUM` pages from `pmap_bootstrap()` on.
         unsafe {
             ptr::copy_nonoverlapping(
-                KERNEL_PAGE_DIR.cast::<u8>().wrapping_add(i * PAGE_SIZE),
+                KERNEL_PAGE_DIR
+                    .load(Ordering::Relaxed)
+                    .cast::<u8>()
+                    .wrapping_add(i * PAGE_SIZE),
                 page_dir[i].cast::<u8>(),
                 PAGE_SIZE,
             );
@@ -1556,9 +1560,8 @@ unsafe fn remove_range(
     let count = (epte as usize - spte as usize) / size_of::<VmOffset>();
     let end = va.wrapping_add(count * PAGE_SIZE);
     if pmap == kernel_pmap_ptr()
-        // SAFETY: `pmap_bootstrap()` set the kernel virtual range once.
-        && (va < unsafe { KERNEL_VIRTUAL_START }
-            || end > unsafe { KERNEL_VIRTUAL_END })
+        && (va < KERNEL_VIRTUAL_START.load(Ordering::Relaxed)
+            || end > KERNEL_VIRTUAL_END.load(Ordering::Relaxed))
     {
         kpanic!(
             "pmap_remove_range",
@@ -1613,7 +1616,7 @@ unsafe fn remove_range(
                 // SAFETY: the attributes array has a byte per managed page,
                 // and `pv` serializes this byte.
                 unsafe {
-                    let attr = PMAP_PHYS_ATTRIBUTES.wrapping_add(pai);
+                    let attr = phys_attribute(pai);
                     *attr |= (*lpte as u8) & (PHYS_MODIFIED | PHYS_REFERENCED);
                     *lpte = 0;
                 }
@@ -1801,7 +1804,7 @@ unsafe fn page_protect(phys: VmOffset, prot: c_int) {
                     // SAFETY: the pv lock is covered by the system write
                     // lock here, and `p` walks the page's run.
                     unsafe {
-                        let attr = PMAP_PHYS_ATTRIBUTES.wrapping_add(pai);
+                        let attr = phys_attribute(pai);
                         *attr |=
                             (*p as u8) & (PHYS_MODIFIED | PHYS_REFERENCED);
                         *p = 0;
@@ -2120,9 +2123,8 @@ unsafe fn enter(
     }
 
     if pmap == kernel_pmap_ptr()
-        // SAFETY: `pmap_bootstrap()` set the kernel virtual range once.
-        && (v < unsafe { KERNEL_VIRTUAL_START }
-            || v >= unsafe { KERNEL_VIRTUAL_END })
+        && (v < KERNEL_VIRTUAL_START.load(Ordering::Relaxed)
+            || v >= KERNEL_VIRTUAL_END.load(Ordering::Relaxed))
     {
         kpanic!(
             "pmap_enter",
@@ -2538,7 +2540,7 @@ unsafe fn attribute_clear(phys: VmOffset, bits: c_int) {
     }
 
     // SAFETY: the attribute byte is serialized by the system write lock.
-    unsafe { *PMAP_PHYS_ATTRIBUTES.wrapping_add(pai) &= !(bits as u8) };
+    unsafe { *phys_attribute(pai) &= !(bits as u8) };
 
     write_unlock(spl);
 }
@@ -2560,9 +2562,7 @@ unsafe fn attribute_test(phys: VmOffset, bits: c_int) -> bool {
     let pv_h = pv_head(pai);
 
     // SAFETY: the attribute byte is serialized by the system write lock.
-    if c_int::from(unsafe { *PMAP_PHYS_ATTRIBUTES.wrapping_add(pai) }) & bits
-        != 0
-    {
+    if c_int::from(unsafe { *phys_attribute(pai) }) & bits != 0 {
         write_unlock(spl);
         return true;
     }

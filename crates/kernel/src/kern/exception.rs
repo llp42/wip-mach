@@ -31,6 +31,7 @@ use crate::kern::thread::Thread;
 use core::ffi::{c_int, c_long, c_uint, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// `KERN_SUCCESS` of <`mach/kern_return.h`>.
 const KERN_SUCCESS: c_int = 0;
@@ -143,8 +144,8 @@ const _: () = {
 };
 
 /// `exception_raise_misses` of kern/exception.c: how often the optimized
-/// handoff failed.  A plain counter a debugger reads, never synchronized.
-static mut EXCEPTION_RAISE_MISSES: c_int = 0;
+/// handoff failed, a counter for a debugger to read.
+static EXCEPTION_RAISE_MISSES: AtomicU32 = AtomicU32::new(0);
 
 /// Whether `thread` has a halt or terminate reason pending.
 const fn should_halt(thread: *const Thread) -> bool {
@@ -381,11 +382,7 @@ impl Rights {
     /// The caller owns the message, the destination right and the reply
     /// port's send-once right, and holds no lock.
     unsafe fn slow(self) -> ! {
-        // SAFETY: the counter is a plain C `int` only this path writes.
-        unsafe {
-            let misses = ptr::addr_of_mut!(EXCEPTION_RAISE_MISSES);
-            *misses = (*misses).wrapping_add(1);
-        }
+        EXCEPTION_RAISE_MISSES.fetch_add(1, Ordering::Relaxed);
 
         let head = unsafe { self.kmsg.header() };
         let exc = head.cast::<MachException>();

@@ -29,7 +29,8 @@ use crate::vm::types::VmObject;
 use crate::vm::vm_map::VmMap;
 use crate::vm::vm_user::{self, VmCacheStatistics};
 use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
-use core::ptr::NonNull;
+use core::ptr::{self, NonNull};
+use core::sync::atomic::Ordering;
 
 /// `vm_cache_statistics()` of `vm/vm_user.c`.
 ///
@@ -114,14 +115,18 @@ pub unsafe extern "C" fn register_new_task_notification(
         return c_int::from(KernError::InvalidHost);
     }
 
-    // SAFETY: the global is the C `ipc_port_t`, never borrowed as a Rust
-    // reference; this read is the C body's own unlocked access.
-    if !unsafe { task::NEW_TASK_NOTIFICATION }.is_null() {
-        return c_int::from(KernError::NoAccess);
+    // Only the first registration wins; the C's unlocked test and store let
+    // two racing ones both succeed.
+    let registered = task::NEW_TASK_NOTIFICATION.compare_exchange(
+        ptr::null_mut(),
+        notification,
+        Ordering::Release,
+        Ordering::Relaxed,
+    );
+    match registered {
+        Ok(_) => 0,
+        Err(_) => c_int::from(KernError::NoAccess),
     }
-
-    unsafe { task::NEW_TASK_NOTIFICATION = notification };
-    0
 }
 
 /// `gsync_wait()` of kern/gsync.c.

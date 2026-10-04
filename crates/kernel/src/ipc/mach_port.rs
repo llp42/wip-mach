@@ -30,7 +30,7 @@ use core::ffi::{CStr, c_char, c_int, c_uint, c_ulong, c_void};
 use core::mem::{align_of, offset_of, size_of, size_of_val};
 use core::ptr::{self, NonNull};
 use core::slice;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 /// `MACH_PORT_NAME_NULL` of <mach/port.h>: the name no entry holds.
 const MACH_PORT_NAME_NULL: c_uint = 0;
@@ -94,7 +94,7 @@ const IO_DEAD: *mut c_void = usize::MAX as *mut c_void;
 
 /// `mach_port_deallocate_debug` of <`ipc/ipc_space.h>`: the debug switch the
 /// bogus-name diagnostics check, which `ipc/mach_port.c` defined.
-pub(crate) static mut MACH_PORT_DEALLOCATE_DEBUG: c_int = 0;
+pub(crate) static MACH_PORT_DEALLOCATE_DEBUG: AtomicI32 = AtomicI32::new(0);
 
 /// `mach_port_status_t` of <mach/port.h>: the record
 /// `mach_port_get_receive_status()` fills in.
@@ -248,8 +248,7 @@ unsafe fn report_bogus_port(space: IpcSpace, name: c_uint, action: &CStr) {
         c_ulong::from(name),
     );
 
-    // SAFETY: the debug switch is written only by the debugger.
-    if unsafe { MACH_PORT_DEALLOCATE_DEBUG } != 0 {
+    if MACH_PORT_DEALLOCATE_DEBUG.load(Ordering::Relaxed) != 0 {
         // SAFETY: the C string literal is NUL-terminated.
         unsafe { soft_debugger(c"mach_port_deallocate".as_ptr()) };
     }
@@ -803,8 +802,7 @@ pub(crate) unsafe fn mod_refs(
                     },
                 );
 
-                // SAFETY: the debug switch is written only by the debugger.
-                if unsafe { MACH_PORT_DEALLOCATE_DEBUG } != 0 {
+                if MACH_PORT_DEALLOCATE_DEBUG.load(Ordering::Relaxed) != 0 {
                     // SAFETY: the C string literal is NUL-terminated.
                     unsafe { soft_debugger(c"mach_port_mod_refs".as_ptr()) };
                 }

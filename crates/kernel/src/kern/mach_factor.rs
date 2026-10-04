@@ -51,11 +51,9 @@ pub(crate) fn mach_factor() -> [c_long; 3] {
 /// `compute_mach_factor()` of `kern/mach_factor.c`.
 pub(crate) fn compute() {
     let lock = processor::all_psets_lock();
-    // SAFETY: `pset_sys_bootstrap()` initialized the lock and the list, and
+    // `pset_sys_bootstrap()` initialized the lock and the list, and
     // the lock serializes this walk with every list update.
-    unsafe {
-        (*lock).lock();
-    }
+    lock.lock();
     // SAFETY: the list head is initialized and stays at its address, and the
     // lock serializes the walk with every list update.
     let head = unsafe { processor::all_psets() };
@@ -142,8 +140,5 @@ pub(crate) fn compute() {
             (*pset).lock.unlock();
         }
     }
-    // SAFETY: the lock taken above.
-    unsafe {
-        (*lock).unlock();
-    }
+    lock.unlock();
 }

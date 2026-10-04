@@ -29,7 +29,7 @@ use crate::vm::vm_resident::VM_PAGE_QUEUE_LOCK;
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{
-    self, NonNull, addr_of, addr_of_mut, null_mut, with_exposed_provenance_mut,
+    self, NonNull, addr_of, null_mut, with_exposed_provenance_mut,
 };
 use core::sync::atomic::Ordering;
 
@@ -421,7 +421,7 @@ unsafe fn insert_contig_pages(
 ) {
     unsafe {
         (*object.as_ptr()).lock.lock();
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
 
         for i in 0..vm_page::atop(size) {
             let page = NonNull::new_unchecked(pages_ptr.add(i));
@@ -430,7 +430,7 @@ unsafe fn insert_contig_pages(
             vm_page::wire(page);
         }
 
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
         (*object.as_ptr()).lock.unlock();
 
         for i in vm_page::atop(size)..npages {
@@ -564,11 +564,11 @@ pub(crate) unsafe fn allocate_contiguous(
     // is still the caller's.
     unsafe {
         (*object_ptr).lock.lock();
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         for i in 0..vm_page::atop(size) {
             vm_page::unwire(pages_ptr.add(i));
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
         (*object_ptr).lock.unlock();
 
         // SAFETY: the first page is live and the object holds it.

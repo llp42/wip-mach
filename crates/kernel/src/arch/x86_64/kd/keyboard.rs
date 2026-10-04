@@ -26,6 +26,7 @@ use crate::arch::x86_64::pio::Port;
 use crate::arch::x86_64::spl;
 use crate::kern::console::kprint;
 use core::ffi::{c_int, c_uint};
+use core::sync::atomic::Ordering;
 
 /// The `which_button[]` table of `kd_kbd_magic()`: index to event type
 /// (`MOUSE_LEFT`, `MOUSE_MIDDLE`, `MOUSE_RIGHT` of <device/input.h>).
@@ -275,9 +276,7 @@ fn checkmagic(scancode: u8) -> bool {
 
     if st.magic_state & (KS_CTLED | KS_ALTED) == (KS_CTLED | KS_ALTED)
         && scancode == K_DELSC
-        // SAFETY: `REBOOTFLAG` is the C's `rebootflag`, set once by the
-        // halt path and only read afterwards.
-        && unsafe { crate::arch::x86_64::model_dep::REBOOTFLAG } != 0
+        && crate::arch::x86_64::model_dep::REBOOTFLAG.load(Ordering::Relaxed)
     {
         // SAFETY: the caller asked for a reboot with ctl-alt-del.
         unsafe { kdreboot() };

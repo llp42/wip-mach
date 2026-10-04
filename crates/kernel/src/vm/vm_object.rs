@@ -399,9 +399,9 @@ pub(crate) unsafe fn make_shared(object: *mut VmObject) {
 /// must not be held.
 pub(crate) unsafe fn page_free(page: *mut VmPage) {
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         vm_resident::free(NonNull::new_unchecked(page));
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 }
 
@@ -696,9 +696,9 @@ pub(crate) unsafe fn terminate(object: *mut VmObject) {
             while let Some(entry) = (*head).cursor_front().current_ptr() {
                 let page = entry.as_ptr();
                 vm_page::check(page);
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_page::queues_remove(page);
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
 
                 if (*page).is_absent() || (*page).is_private() {
                     page_free(page);
@@ -720,10 +720,10 @@ pub(crate) unsafe fn terminate(object: *mut VmObject) {
         }
 
         if !(*object).is_internal() {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_resident::VM_OBJECT_EXTERNAL_COUNT
                 .fetch_sub(1, Ordering::Relaxed);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
 
         (*object).lock.unlock();
@@ -1046,12 +1046,12 @@ unsafe fn copy_slowly_done(
         (*new_page.as_ptr()).set_dirty(true);
         (*(*result_page).object).lock.lock();
         page_wakeup_done(result_page);
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         if !(*result_page).is_active() && !(*result_page).is_inactive() {
             vm_page::activate(result_page);
         }
         vm_page::activate(new_page.as_ptr());
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
         vm_fault::cleanup((*result_page).object, NonNull::new(top_page));
     }
 }
@@ -2515,8 +2515,7 @@ pub(crate) unsafe fn page_map(
 
     for _ in 0..num_pages {
         let addr = unsafe { map_fn(map_fn_data, offset) };
-        // SAFETY: `VM_PAGE_FICTITIOUS_ADDR` is never written.
-        if addr == unsafe { VM_PAGE_FICTITIOUS_ADDR } {
+        if addr == VM_PAGE_FICTITIOUS_ADDR {
             return Err(Error::NoAccess);
         }
 
@@ -2544,13 +2543,13 @@ pub(crate) unsafe fn page_map(
             (*page).set_private(true);
             (*page).set_wire_count(1);
 
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_resident::insert(
                 NonNull::new_unchecked(page),
                 NonNull::new_unchecked(object),
                 offset,
             );
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
 
             page_wakeup_done(page);
             (*object).lock.unlock();

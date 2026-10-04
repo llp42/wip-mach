@@ -10,9 +10,9 @@
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::x86_64::per_cpu;
-use crate::arch::x86_64::pmap::KERNEL_PMAP;
 use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_END;
 use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_START;
+use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_create;
 use crate::arch::x86_64::pmap::pmap_destroy;
 use crate::arch::x86_64::pmap::pmap_enter;
@@ -450,7 +450,7 @@ unsafe fn page_steal(page: *mut VmPage) {
     // SAFETY: the page-queues lock guards the queues and the wire count, and
     // `vm_page_remove()` requires the object lock the caller holds.
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         vm_resident::remove(NonNull::new_unchecked(page));
         if (*page).wire_count() > 0 {
             (*page).set_wire_count(0);
@@ -458,7 +458,7 @@ unsafe fn page_steal(page: *mut VmPage) {
         } else {
             vm_page::queues_remove(page);
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 }
 
@@ -472,11 +472,11 @@ unsafe fn page_activate_if_idle(page: *mut VmPage) {
     // SAFETY: the page-queues lock serializes the flags, the queues and
     // `vm_page_activate()`.
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         if !(*page).is_active() && !(*page).is_inactive() {
             vm_page::activate(page);
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 }
 
@@ -741,7 +741,7 @@ impl VmMap {
 
         // TODO add to default limit the swap size
         // SAFETY: `kernel_pmap` is the boot pmap, never null.
-        if pmap == unsafe { KERNEL_PMAP } {
+        if pmap == kernel_pmap_ptr() {
             map.size_cur_limit = !0;
             map.size_max_limit = !0;
         } else {
@@ -1517,9 +1517,9 @@ impl VmMapCopy {
                 // the free list; the C `VM_PAGE_FREE` holds the page queue
                 // lock across `vm_page_free`.
                 unsafe {
-                    (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                    VM_PAGE_QUEUE_LOCK.lock();
                     vm_resident::free(NonNull::new_unchecked(page));
-                    (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                    VM_PAGE_QUEUE_LOCK.unlock();
                 }
             }
         }
@@ -2040,7 +2040,7 @@ impl VmMap {
     /// `vm_map_enforce_limit()` in C.
     fn enforce_limit(&self, size: VmSize) -> Result<(), Error> {
         // SAFETY: `kernel_pmap` is a boot global.
-        if self.pmap == unsafe { KERNEL_PMAP } {
+        if self.pmap == kernel_pmap_ptr() {
             return Ok(());
         }
 
@@ -2632,17 +2632,9 @@ impl VmMap {
 
     /// `vm_map_delete()` in C.
     pub(crate) fn delete(&mut self, start: VmOffset, end: VmOffset) {
-        // SAFETY: `kernel_pmap`, `kernel_virtual_start` and
-        // `kernel_virtual_end` are boot globals.
-        if self.pmap == unsafe { KERNEL_PMAP }
-            // SAFETY: `kernel_pmap`, `kernel_virtual_start` and
-            // `kernel_virtual_end` are boot globals; the boot global
-            // is the live kernel range.
-            && (start < unsafe { KERNEL_VIRTUAL_START }
-                // SAFETY: `kernel_pmap`, `kernel_virtual_start` and
-                // `kernel_virtual_end` are boot globals; the boot
-                // global is the live kernel range.
-                || end > unsafe { KERNEL_VIRTUAL_END })
+        if self.pmap == kernel_pmap_ptr()
+            && (start < KERNEL_VIRTUAL_START.load(Ordering::Relaxed)
+                || end > KERNEL_VIRTUAL_END.load(Ordering::Relaxed))
         {
             kpanic!(
                 "VmMap::delete",
@@ -2982,8 +2974,7 @@ impl VmMap {
         let sentinel = self.to_entry();
         let map = NonNull::from(&mut *self);
 
-        // SAFETY: `KERNEL_PMAP` is the bootstrap's global pmap pointer.
-        let is_kernel = self.pmap == unsafe { KERNEL_PMAP };
+        let is_kernel = self.pmap == kernel_pmap_ptr();
 
         if is_kernel {
             let mut entry = start_entry;
@@ -5148,11 +5139,11 @@ impl VmMap {
                     // reference on `src_object`; free it and drop both.
                     unsafe {
                         (*src_object).lock.lock();
-                        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                        VM_PAGE_QUEUE_LOCK.lock();
                         vm_resident::free(NonNull::new_unchecked(
                             fault.top_page,
                         ));
-                        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                        VM_PAGE_QUEUE_LOCK.unlock();
                         vm_object::paging_end(src_object);
                         (*src_object).lock.unlock();
                     }
@@ -5882,9 +5873,9 @@ impl VmMap {
             start.wrapping_sub(unsafe { (*last.as_ptr()).links.start }),
         );
 
-        // SAFETY: the page queue lock orders the page state, and the object
+        // The page queue lock orders the page state, and the object
         // lock is held from the extension or creation above.
-        unsafe { (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock() };
+        VM_PAGE_QUEUE_LOCK.lock();
 
         let mut dst_addr: Option<VmOffset> = None;
         let result: Result<(), Error>;
@@ -5932,7 +5923,7 @@ impl VmMap {
                     // above; the C drops all three around the continuation
                     // call.
                     unsafe {
-                        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                        VM_PAGE_QUEUE_LOCK.unlock();
                         (*object).lock.unlock();
                     }
                     Self::unlock(map);
@@ -5976,7 +5967,7 @@ impl VmMap {
                     // the live lock.
                     unsafe {
                         (*object).lock.lock();
-                        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                        VM_PAGE_QUEUE_LOCK.lock();
                     }
                 }
 
@@ -5986,7 +5977,7 @@ impl VmMap {
             // SAFETY: the page queue and object locks were taken before the
             // loop and the C releases them here.
             unsafe {
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
                 (*object).lock.unlock();
             }
 

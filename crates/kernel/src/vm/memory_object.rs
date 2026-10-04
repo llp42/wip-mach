@@ -154,9 +154,9 @@ fn die(func: &'static str, message: &'static str) -> ! {
 /// must not be held.
 unsafe fn page_free(page: *mut VmPage) {
     unsafe {
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         vm_resident::free(NonNull::new_unchecked(page));
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
     }
 }
 
@@ -249,9 +249,9 @@ unsafe fn lock_page(
             // SAFETY: the page-queues lock is the C macro's, and the page is
             // live.
             unsafe {
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                VM_PAGE_QUEUE_LOCK.lock();
                 vm_page::queues_remove(page);
-                (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                VM_PAGE_QUEUE_LOCK.unlock();
             }
 
             if !should_flush {
@@ -278,9 +278,9 @@ unsafe fn lock_page(
     {
         // SAFETY: the page-queues lock is the C's, and the page is live.
         unsafe {
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+            VM_PAGE_QUEUE_LOCK.lock();
             vm_page::deactivate(page);
-            (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+            VM_PAGE_QUEUE_LOCK.unlock();
         }
     }
 
@@ -749,14 +749,14 @@ unsafe fn supply_install(
         (*data_m).set_unlock_request(VmProt::NONE);
         (*data_m).set_precious(precious);
 
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+        VM_PAGE_QUEUE_LOCK.lock();
         vm_resident::insert(NonNull::new_unchecked(data_m), object, offset);
         if was_absent {
             vm_page::activate(data_m);
         } else {
             vm_page::deactivate(data_m);
         }
-        (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+        VM_PAGE_QUEUE_LOCK.unlock();
 
         **page_list = null_mut();
         *page_list = (*page_list).add(1);
@@ -1043,9 +1043,9 @@ pub(crate) unsafe fn data_error(
                     vm_object::absent_release(object.as_ptr());
                     vm_object::page_wakeup_done(page);
 
-                    (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                    VM_PAGE_QUEUE_LOCK.lock();
                     vm_page::activate(page);
-                    (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                    VM_PAGE_QUEUE_LOCK.unlock();
                 }
             }
         }
@@ -1125,9 +1125,9 @@ pub(crate) unsafe fn data_unavailable(
                 unsafe {
                     vm_object::page_wakeup_done(page);
 
-                    (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).lock();
+                    VM_PAGE_QUEUE_LOCK.lock();
                     vm_page::activate(page);
-                    (*addr_of_mut!(VM_PAGE_QUEUE_LOCK)).unlock();
+                    VM_PAGE_QUEUE_LOCK.unlock();
                 }
             }
         }

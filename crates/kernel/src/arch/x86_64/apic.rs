@@ -24,6 +24,7 @@ use core::arch::x86_64::__cpuid;
 use core::ffi::{c_int, c_uint, c_ulong};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
 /// `HPET_CAP_PERIOD` of `i386/i386/apic.c`: the tick-period register.
 const HPET_CAP_PERIOD: usize = 0x04;
@@ -361,14 +362,14 @@ const _: () = {
 };
 
 /// `hpet_period_nsec` of `i386/i386/apic.c`: the HPET period in nanoseconds.
-pub static mut HPET_PERIOD_NSEC: u32 = 0;
+static HPET_PERIOD_NSEC: AtomicU32 = AtomicU32::new(0);
 
 /// `dummy_lapic` of `i386/i386/apic.c`: the zero page `lapic` points at until
 /// ACPI maps the real one, so a lookup before then reports the master.
 static mut DUMMY_LAPIC: ApicLocalUnit = ApicLocalUnit::ZERO;
 
 /// `lapic` of <i386/apic.h>: the mapped local-APIC page.
-pub static mut LAPIC: *mut ApicLocalUnit = &raw mut DUMMY_LAPIC;
+static LAPIC: AtomicPtr<ApicLocalUnit> = AtomicPtr::new(&raw mut DUMMY_LAPIC);
 
 /// `cpu_id_lut` of `i386/i386/apic.c`: the APIC ID to kernel ID table.
 #[unsafe(export_name = "cpu_id_lut")]
@@ -378,8 +379,9 @@ pub static mut CPU_ID_LUT: [c_int; CPU_ID_LUT_SIZE] = [0; CPU_ID_LUT_SIZE];
 pub static mut APIC_DATA: ApicInfo = ApicInfo::ZERO;
 
 /// `apic_id_mask` of <i386/apic.h>: the APIC-ID bits the platform implements.
+/// The AP boot code reads it as a plain byte.
 #[unsafe(export_name = "apic_id_mask")]
-pub static mut APIC_ID_MASK: u8 = 0xf;
+static APIC_ID_MASK: AtomicU8 = AtomicU8::new(0xf);
 
 /// The mapped HPET register window.
 ///
@@ -394,8 +396,7 @@ struct Hpet {
 impl Hpet {
     /// The HPET ACPI found and mapped, or `None` when the machine has none.
     fn new() -> Option<Self> {
-        // SAFETY: `hpet_addr` is the C global <i386/apic.h> declares.
-        let base = unsafe { HPET_ADDR };
+        let base = HPET_ADDR.load(Ordering::Relaxed);
         let base = NonNull::new(base.cast::<u8>())?;
         Some(Self { base })
     }
@@ -484,14 +485,12 @@ pub(crate) fn ipi_pending() -> bool {
 
 /// Publish the mapped local-APIC page, the C's `apic_lapic_init()`.
 pub(crate) fn publish_lapic(unit: *mut ApicLocalUnit) {
-    // SAFETY: `lapic` is the C global, written once at boot.
-    unsafe { LAPIC = unit };
+    LAPIC.store(unit, Ordering::Relaxed);
 }
 
 /// The mapped local-APIC page.
 pub(crate) fn lapic_ptr() -> *mut ApicLocalUnit {
-    // SAFETY: `lapic` is the C global; the load only reads the pointer.
-    unsafe { LAPIC }
+    LAPIC.load(Ordering::Relaxed)
 }
 
 /// The APIC ID of the running CPU, the eight bits CPUID leaf 1 reports in
@@ -637,8 +636,7 @@ pub(crate) fn num_ioapics() -> u8 {
 
 /// The APIC-ID mask the MADT parse uses.
 pub(crate) fn id_mask() -> u8 {
-    // SAFETY: `apic_id_mask` is written once at boot, before the MADT parse.
-    unsafe { APIC_ID_MASK }
+    APIC_ID_MASK.load(Ordering::Relaxed)
 }
 
 /// `apic_refit_cpulist()` in C: shrink the CPU list to the CPUs found.
@@ -792,14 +790,12 @@ pub(crate) fn fix_id_mask() {
 
     if needs_workaround {
         kprint!("WARNING: Only 4 bit APIC ids\n");
-        // SAFETY: `apic_id_mask` is written once at boot, here.
-        unsafe { APIC_ID_MASK = 0xf };
+        APIC_ID_MASK.store(0xf, Ordering::Relaxed);
         return;
     }
 
     kprint!("8 bit APIC ids\n");
-    // SAFETY: `apic_id_mask` is written once at boot, here.
-    unsafe { APIC_ID_MASK = 0xff };
+    APIC_ID_MASK.store(0xff, Ordering::Relaxed);
 }
 
 /// `lapic_setup()` in C: put the local APIC into the flat, software-enabled
@@ -888,8 +884,7 @@ fn hpet_setup() {
 
     let period = hpet.read(HPET_CAP_PERIOD);
     let period_nsec = period / FSEC_PER_NSEC;
-    // SAFETY: `hpet_period_nsec` is written once, here, at boot.
-    unsafe { HPET_PERIOD_NSEC = period_nsec };
+    HPET_PERIOD_NSEC.store(period_nsec, Ordering::Relaxed);
     kprint!("HPET ticks every {} nanoseconds\n", period_nsec as c_int);
 
     let val = hpet.read(HPET_CFG) & !(HPET_LEGACY_ROUTE | HPET_CFG_ENABLE);
@@ -918,9 +913,7 @@ fn read_counter() -> u32 {
 
 /// The HPET tick period in nanoseconds.
 fn counter_period_nsec() -> u32 {
-    // SAFETY: `hpet_period_nsec` is written once at boot, and a 32-bit load
-    // is atomic.
-    unsafe { HPET_PERIOD_NSEC }
+    HPET_PERIOD_NSEC.load(Ordering::Relaxed)
 }
 
 /// `lapic_enable()` in C.

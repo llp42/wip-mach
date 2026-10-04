@@ -21,19 +21,29 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_long, c_uint};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
+use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
 
 /// `KMSGBUFSIZE` of `device/kmsg.c`.
 const KMSGBUFSIZE: usize = 16 * 1024;
 
-/// `kmsg_buffer` of `device/kmsg.c`: the ring of message bytes.
-static mut KMSG_BUFFER: [u8; KMSGBUFSIZE] = [0; KMSGBUFSIZE];
+/// `kmsg_buffer`, `kmsg_write_offset`, `kmsg_read_offset` and
+/// `kmsg_in_use` of `device/kmsg.c`: the ring of message bytes and whether the
+/// device is open.
+struct Ring {
+    buffer: [u8; KMSGBUFSIZE],
+    write: usize,
+    read: usize,
+    in_use: bool,
+}
 
-/// `kmsg_write_offset` of `device/kmsg.c`.
-static mut KMSG_WRITE_OFFSET: c_int = 0;
-
-/// `kmsg_read_offset` of `device/kmsg.c`.
-static mut KMSG_READ_OFFSET: c_int = 0;
+/// `kmsg_lock` of `device/kmsg.c`, holding the ring it guards.
+static KMSG: Mutex<Ring> = Mutex::new(Ring {
+    buffer: [0; KMSGBUFSIZE],
+    write: 0,
+    read: 0,
+    in_use: false,
+});
 
 /// `kmsg_read_queue` of `device/kmsg.c`: the blocked reads.
 static KMSG_READ_QUEUE: SyncCell<IoReqQueue> =
@@ -43,22 +53,12 @@ static KMSG_READ_QUEUE: SyncCell<IoReqQueue> =
 ///
 /// # Safety
 ///
-/// The caller must hold `KMSG_LOCK`, or run single-threaded before
-/// `spl_init` at boot, for as long as it uses the queue.
+/// The caller must hold `KMSG`'s lock for as long as it uses the queue.
 unsafe fn read_queue() -> Pin<&'static mut IoReqQueue> {
     // SAFETY: the static never moves, and the caller has exclusive access to
     // the queue.
     unsafe { Pin::new_unchecked(&mut *KMSG_READ_QUEUE.0.get()) }
 }
-
-/// `kmsg_in_use` of `device/kmsg.c`: exclusive access to the device.
-static mut KMSG_IN_USE: bool = false;
-
-/// `kmsg_init_done` of `device/kmsg.c`.
-static mut KMSG_INIT_DONE: bool = false;
-
-/// `kmsg_lock` of `device/kmsg.c`.
-static KMSG_LOCK: Mutex<()> = Mutex::new(());
 
 /// The `DEV_GET_SIZE` reply: the device size is unknown (zero), and the record
 /// size is one, which marks the device as sequential.
@@ -87,50 +87,37 @@ impl KmsgError {
 }
 
 /// Take the lock at `splhigh`, as the `simple_lock_irq()` macro did.
-fn lock_irq() -> (MutexGuard<'static, ()>, c_int) {
+fn lock_irq() -> (MutexGuard<'static, Ring>, c_int) {
     // SAFETY: `splhigh()` is the real asm routine <machine/spl.h> declares,
     // and its result is only handed back to `splx()`.
     let level = unsafe { spl::splhigh() };
-    (KMSG_LOCK.lock(), level)
+    (KMSG.lock(), level)
 }
 
 /// Release the lock and restore `level`, as `simple_unlock_irq()` did.
-fn unlock_irq(guard: MutexGuard<'static, ()>, level: c_int) {
+fn unlock_irq(guard: MutexGuard<'static, Ring>, level: c_int) {
     drop(guard);
     // SAFETY: `level` is the value [`lock_irq()`] returned for this lock.
     unsafe { spl::splx(level) };
 }
 
-/// `kmsginit()` of `device/kmsg.c`.
-fn init() {
-    // SAFETY: called before the device can have users, as the C did.
-    unsafe {
-        KMSG_WRITE_OFFSET = 0;
-        KMSG_READ_OFFSET = 0;
-        KMSG_IN_USE = false;
-    }
-}
-
 /// `kmsgopen()` of `device/kmsg.c`.
 pub(crate) fn open() -> Result<DeviceSuccess, DeviceError> {
-    let (guard, level) = lock_irq();
-    // SAFETY: the lock is held.
-    if unsafe { KMSG_IN_USE } {
-        unlock_irq(guard, level);
+    let (mut ring, level) = lock_irq();
+    if ring.in_use {
+        unlock_irq(ring, level);
         return Err(DeviceError::AlreadyOpen);
     }
-    // SAFETY: the lock is held.
-    unsafe { KMSG_IN_USE = true };
-    unlock_irq(guard, level);
+    ring.in_use = true;
+    unlock_irq(ring, level);
     Ok(DeviceSuccess::Success)
 }
 
 /// `kmsgclose()` of `device/kmsg.c`.
 pub(crate) fn close() {
-    let (guard, level) = lock_irq();
-    // SAFETY: the lock is held.
-    unsafe { KMSG_IN_USE = false };
-    unlock_irq(guard, level);
+    let (mut ring, level) = lock_irq();
+    ring.in_use = false;
+    unlock_irq(ring, level);
 }
 
 /// Copy the readable run of the ring into `ior`'s buffer and advance the read
@@ -138,46 +125,26 @@ pub(crate) fn close() {
 ///
 /// # Safety
 ///
-/// The lock must be held, `ior` must own a writable buffer of its count, and
-/// both offsets must be inside the ring.
-unsafe fn copy_out(ior: *mut IoReq) -> c_int {
-    let (read_offset, write_offset) =
-        unsafe { (KMSG_READ_OFFSET, KMSG_WRITE_OFFSET) };
-    let mut len = write_offset - read_offset;
-    if len < 0 {
-        len += KMSGBUFSIZE as c_int;
-    }
+/// `ior` must own a writable buffer of its count.
+unsafe fn copy_out(ring: &mut Ring, ior: *mut IoReq) -> c_int {
+    let len = (ring.write + KMSGBUFSIZE - ring.read) % KMSGBUFSIZE;
 
     // The C narrowed `io_count` to `int` before clamping it to the ring's
-    // readable run, and the ring is 16 KiB.
+    // readable run, and the ring is 16 KiB, so the run fits an `int`.
     let wanted = unsafe { (*ior).count }.max(0) as c_int;
-    let amt = wanted.min(len);
-
-    let read = usize::try_from(read_offset).unwrap_or(0);
+    let amt = wanted.min(len as c_int);
     let count = usize::try_from(amt).unwrap_or(0);
-    let data = unsafe { (*ior).data.cast::<u8>() };
-    let base = ptr::addr_of_mut!(KMSG_BUFFER).cast::<u8>();
-    if read + count <= KMSGBUFSIZE {
-        // SAFETY: the first branch's run stays inside the ring, and `data`
-        // has room for `count` bytes.
-        unsafe { ptr::copy_nonoverlapping(base.add(read), data, count) };
-    } else {
-        let first = KMSGBUFSIZE - read;
-        // SAFETY: the run wraps, so its first part ends at the ring's end and
-        // its second starts at the ring's start.
-        unsafe {
-            ptr::copy_nonoverlapping(base.add(read), data, first);
-            ptr::copy_nonoverlapping(base, data.add(first), count - first);
-        }
-    }
 
-    // SAFETY: the lock is held and `amt` is at most the ring size.
+    let data = unsafe { (*ior).data.cast::<u8>() };
+    let first = count.min(KMSGBUFSIZE - ring.read);
+    let source = ring.buffer.as_ptr();
+    // SAFETY: `data` has room for `count` bytes; the run is the readable
+    // bytes from the read offset to the ring's end, then on from its start.
     unsafe {
-        KMSG_READ_OFFSET += amt;
-        if KMSG_READ_OFFSET >= KMSGBUFSIZE as c_int {
-            KMSG_READ_OFFSET -= KMSGBUFSIZE as c_int;
-        }
+        ptr::copy_nonoverlapping(source.add(ring.read), data, first);
+        ptr::copy_nonoverlapping(source, data.add(first), count - first);
     }
+    ring.read = (ring.read + count) % KMSGBUFSIZE;
     amt
 }
 
@@ -196,29 +163,29 @@ pub(crate) unsafe fn read(
         return Err(KmsgError::Kern(kr));
     }
 
-    let (guard, level) = lock_irq();
-    // SAFETY: the lock is held.
-    if unsafe { KMSG_READ_OFFSET } == unsafe { KMSG_WRITE_OFFSET } {
-        // SAFETY: the lock is held.
+    let (mut ring, level) = lock_irq();
+    if ring.read == ring.write {
+        // SAFETY: the request is live.
         if unsafe { (*ior).mode } & D_NOWAIT != 0 {
-            unlock_irq(guard, level);
+            unlock_irq(ring, level);
             return Err(KmsgError::Device(DeviceError::WouldBlock));
         }
 
-        // SAFETY: the request is live, and the queue stays at its address.
+        // SAFETY: the request is live, the queue stays at its address, and
+        // the lock is held.
         unsafe {
             (*ior).done = Some(kmsg_read_done);
             read_queue().push_back_ptr(NonNull::new_unchecked(ior));
         }
-        unlock_irq(guard, level);
+        unlock_irq(ring, level);
         return Ok(DeviceSuccess::IoQueued);
     }
 
-    // SAFETY: the lock is held and `ior` owns its buffer.
-    let amt = unsafe { copy_out(ior) };
-    // SAFETY: the lock is held.
+    // SAFETY: `ior` owns its buffer.
+    let amt = unsafe { copy_out(&mut ring, ior) };
+    // SAFETY: the request is live.
     unsafe { (*ior).residual = (*ior).count - c_long::from(amt) };
-    unlock_irq(guard, level);
+    unlock_irq(ring, level);
     Ok(DeviceSuccess::Success)
 }
 
@@ -230,23 +197,23 @@ pub(crate) unsafe fn read(
 /// through `ior`'s `done` slot, as `iodone()` invokes it without the lock
 /// held.
 unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
-    let (guard, level) = lock_irq();
-    // SAFETY: the lock is held.
-    if unsafe { KMSG_READ_OFFSET } == unsafe { KMSG_WRITE_OFFSET } {
-        // SAFETY: the request is live and requeued at once, as the C did.
+    let (mut ring, level) = lock_irq();
+    if ring.read == ring.write {
+        // SAFETY: the request is live and requeued at once, as the C did,
+        // with the lock held.
         unsafe {
             (*ior).done = Some(kmsg_read_done);
             read_queue().push_back_ptr(NonNull::new_unchecked(ior));
         }
-        unlock_irq(guard, level);
+        unlock_irq(ring, level);
         return 0;
     }
 
-    // SAFETY: the lock is held and `ior` owns its buffer.
-    let amt = unsafe { copy_out(ior) };
-    // SAFETY: the lock is held.
+    // SAFETY: `ior` owns its buffer.
+    let amt = unsafe { copy_out(&mut ring, ior) };
+    // SAFETY: the request is live.
     unsafe { (*ior).residual = (*ior).count - c_long::from(amt) };
-    unlock_irq(guard, level);
+    unlock_irq(ring, level);
 
     unsafe { ds_routines::ds_read_done(ior) };
     c_int::from(true)
@@ -254,51 +221,33 @@ unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
 
 /// `kmsg_putchar()` of `device/kmsg.c`.
 pub(crate) fn putchar(c: c_int) {
-    // SAFETY: the flag and the ring are this module's; the first writer runs
-    // before any reader exists.
-    if !unsafe { KMSG_INIT_DONE } {
-        init();
-        // SAFETY: the flag and the ring are this module's; the first writer
-        // runs before any reader exists.
-        unsafe { KMSG_INIT_DONE = true };
+    // Before the interrupt system is up, the console's early output is
+    // single-threaded, as in C, so the level stays where it is.
+    let (mut ring, level) = if ioapic::SPL_INIT.load(Ordering::Relaxed) {
+        let (ring, level) = lock_irq();
+        (ring, Some(level))
+    } else {
+        (KMSG.lock(), None)
+    };
+
+    // The C stored the `int` into a `char` buffer, keeping its low byte.
+    let write = ring.write;
+    ring.buffer[write] = c as u8;
+    ring.write = (write + 1) % KMSGBUFSIZE;
+    if ring.write == ring.read {
+        ring.read = (ring.read + 1) % KMSGBUFSIZE;
     }
 
-    // SAFETY: `spl_init` is set once the interrupt system is up; before that
-    // the console's early output is single-threaded, as in C.
-    let locked = unsafe { ioapic::SPL_INIT } != 0;
-    let saved = if locked { Some(lock_irq()) } else { None };
-
-    // SAFETY: the offset is inside the ring, and the lock is held when one
-    // exists.
-    unsafe {
-        let offset = usize::try_from(KMSG_WRITE_OFFSET).unwrap_or(0);
-        // The C stored the `int` into a `char` buffer, keeping its low byte.
-        ptr::addr_of_mut!(KMSG_BUFFER)
-            .cast::<u8>()
-            .add(offset)
-            .write(c as u8);
-        KMSG_WRITE_OFFSET += 1;
-        if KMSG_WRITE_OFFSET == KMSGBUFSIZE as c_int {
-            KMSG_WRITE_OFFSET = 0;
-        }
-        if KMSG_WRITE_OFFSET == KMSG_READ_OFFSET {
-            KMSG_READ_OFFSET += 1;
-            if KMSG_READ_OFFSET == KMSGBUFSIZE as c_int {
-                KMSG_READ_OFFSET = 0;
-            }
-        }
-    }
-
-    // SAFETY: the queue holds live reads; nothing else dequeues without the
-    // lock, or before `spl_init` at boot.
+    // SAFETY: the queue holds live reads, and the lock is held.
     while let Some(ior) = unsafe { read_queue() }.pop_front() {
         // SAFETY: the dequeued entry is a live read request, as the C's cast
         // asserted.
         unsafe { ds_routines::iodone(ptr::from_mut(ior)) };
     }
 
-    if let Some((guard, level)) = saved {
-        unlock_irq(guard, level);
+    match level {
+        Some(level) => unlock_irq(ring, level),
+        None => drop(ring),
     }
 }
 

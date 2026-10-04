@@ -544,15 +544,11 @@ pub(crate) unsafe fn comprobe(_port: VmOffset, dev: *mut BusCtlr) -> c_int {
 /// `comcnprobe()` of `i386/i386at/com.c`.
 pub(crate) fn cnprobe(cp: &mut ConsDev) -> c_int {
     let parameter = CONSOLE_PARAMETER.to_bytes();
+    let cmdline = crate::arch::x86_64::model_dep::kernel_cmdline().as_ptr();
 
-    // SAFETY: `kernel_cmdline` is the boot loader's NUL-terminated command
-    // line, and the literal is NUL-terminated.
-    let console = unsafe {
-        strstr(
-            crate::arch::x86_64::model_dep::KERNEL_CMDLINE,
-            parameter.as_ptr().cast(),
-        )
-    };
+    // SAFETY: `cmdline` is the boot loader's NUL-terminated command line, and
+    // the literal is NUL-terminated.
+    let console = unsafe { strstr(cmdline, parameter.as_ptr().cast()) };
     if !console.is_null() {
         // SAFETY: the match is inside the command line, and the parse stops
         // at its end.
@@ -567,7 +563,7 @@ pub(crate) fn cnprobe(cp: &mut ConsDev) -> c_int {
     // SAFETY: the command line is NUL-terminated, and the literal is.
     if unsafe {
         strncmp(
-            crate::arch::x86_64::model_dep::KERNEL_CMDLINE,
+            cmdline,
             parameter.as_ptr().add(1).cast(),
             parameter.len() - 1,
         )
@@ -577,9 +573,7 @@ pub(crate) fn cnprobe(cp: &mut ConsDev) -> c_int {
         // stops at its end.
         unsafe {
             mach_atoi(
-                crate::arch::x86_64::model_dep::KERNEL_CMDLINE
-                    .cast::<u8>()
-                    .add(parameter.len() - 1),
+                cmdline.cast::<u8>().add(parameter.len() - 1),
                 &raw mut com().rcline,
             )
         };

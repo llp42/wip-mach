@@ -12,7 +12,7 @@ use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::spl;
 use crate::glue::time_value::{RpcTimeValue, TimeValue, TimeValue64};
 use crate::kern::host_time::read_time_stamp;
-use crate::kern::task::{KERNEL_TASK, Task, add_time64, resident_count};
+use crate::kern::task::{Task, add_time64, kernel_task, resident_count};
 use crate::kern::timer::read_times;
 use crate::vm::vm_kern::KERNEL_MAP;
 use crate::vm::vm_map::VmMap;
@@ -90,12 +90,9 @@ impl TaskThreadTimesInfo {
 impl From<&Task> for TaskBasicInfo {
     /// Takes the task's `lock` for the reads.
     fn from(task: &Task) -> Self {
-        // SAFETY: `KERNEL_TASK` is live from `task_init()` on, and any
-        // other live task's map is live.
-        let map = if ptr::eq(
-            ptr::from_ref(task),
-            unsafe { KERNEL_TASK }.cast_const(),
-        ) {
+        // `kernel_task()` is live from `task_init()` on, and any other live
+        // task's map is live.
+        let map = if ptr::eq(ptr::from_ref(task), kernel_task().cast_const()) {
             // SAFETY: `kernel_map` is live from the VM bootstrap on.
             unsafe { KERNEL_MAP }.cast::<VmMap>()
         } else {
