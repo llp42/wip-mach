@@ -13,7 +13,7 @@ use crate::arch::x86_64::gdt;
 use crate::arch::x86_64::locore;
 use crate::arch::x86_64::mp_desc;
 use crate::arch::x86_64::pcb;
-use crate::arch::x86_64::pcb::RealDescriptor;
+use crate::arch::x86_64::pcb::{DescriptorTable, RealDescriptor};
 use crate::arch::x86_64::pmap;
 use crate::arch::x86_64::seg;
 use crate::kern::debug::kpanic;
@@ -25,8 +25,8 @@ use core::ptr;
 const VM_MIN_USER_ADDRESS: VmOffset = 0;
 
 /// `ldt` of <i386/ldt.h>: the default table every thread starts with.
-pub(crate) static mut LDT: [RealDescriptor; seg::LDTSZ] =
-    [RealDescriptor::ZERO; seg::LDTSZ];
+pub(crate) static mut LDT: DescriptorTable<{ seg::LDTSZ }> =
+    DescriptorTable([RealDescriptor::ZERO; seg::LDTSZ]);
 
 /// `EFL_IF` and `EFL_IOPL_USER` of <mach/machine/eflags.h>, the mask
 /// programmed into `MSR_REG_FMASK`.

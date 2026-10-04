@@ -288,6 +288,17 @@ const _: () = {
     assert!(offset_of!(RealDescriptor, access_and_base_high) == 4);
 };
 
+/// A descriptor table in static storage, aligned so that no descriptor
+/// straddles a cache line.
+///
+/// The CPU sets a descriptor's accessed and busy bits with a locked write,
+/// and a host that detects split locks faults one that spans two lines;
+/// during interrupt delivery that fault stops the machine.
+#[repr(C, align(8))]
+pub(crate) struct DescriptorTable<const N: usize>(
+    pub(crate) [RealDescriptor; N],
+);
+
 /// `struct user_ldt` of <`i386/user_ldt.h>`: the descriptor for the table
 /// itself followed by the table, which is larger than one entry in practice.
 #[repr(C)]

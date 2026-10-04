@@ -10,7 +10,7 @@
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::mp_desc::{self, GDTSZ};
 use crate::arch::x86_64::pcb;
-use crate::arch::x86_64::pcb::RealDescriptor;
+use crate::arch::x86_64::pcb::{DescriptorTable, RealDescriptor};
 use crate::arch::x86_64::{per_cpu, seg};
 use crate::kern::smp::CpuId;
 use core::ffi::{c_int, c_ulong, c_ushort};
@@ -19,8 +19,8 @@ use core::ptr;
 
 /// `gdt` of <i386/gdt.h>: the boot CPU's table, which the other CPUs get
 /// copies of through `mp_gdt`.
-pub(crate) static mut GDT: [RealDescriptor; GDTSZ] =
-    [RealDescriptor::ZERO; GDTSZ];
+pub(crate) static mut GDT: DescriptorTable<GDTSZ> =
+    DescriptorTable([RealDescriptor::ZERO; GDTSZ]);
 
 /// The `limit` of the pseudo-descriptor `gdt_fill()` loads, whose type in the
 /// C `struct pseudo_descriptor` is 16 bits.
