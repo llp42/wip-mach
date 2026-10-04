@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 collections.workspace = true
-spin.workspace = true
+lock.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

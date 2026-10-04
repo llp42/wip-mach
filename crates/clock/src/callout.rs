@@ -13,7 +13,7 @@
 //! valid forever.
 
 use crate::hashed_wheel::{HashedWheel, Record, TickSource};
-use crate::platform::Critical;
+use crate::platform::Locking;
 use crate::types::Ticks;
 use core::pin::Pin;
 use core::ptr::NonNull;
@@ -35,14 +35,14 @@ pub type CalloutAction<'w, P, T> = fn(Pin<&Callout<'w, P, T>>);
 /// Dropping a callout stops it, and waits for its action if that is
 /// running on another CPU.  A drop from inside its own action, or from
 /// an interrupt taken during the `advance` running it, never returns.
-pub struct Callout<'w, P: TickSource + Critical, T> {
+pub struct Callout<'w, P: TickSource + Locking, T> {
     record: Record,
     wheel: Pin<&'w HashedWheel<P>>,
     action: CalloutAction<'w, P, T>,
     data: T,
 }
 
-impl<'w, P: TickSource + Critical, T> Callout<'w, P, T> {
+impl<'w, P: TickSource + Locking, T> Callout<'w, P, T> {
     /// A stopped callout on `wheel` that runs `action` when it expires.
     pub const fn new(
         wheel: Pin<&'w HashedWheel<P>>,
@@ -134,7 +134,7 @@ impl<'w, P: TickSource + Critical, T> Callout<'w, P, T> {
     }
 }
 
-impl<P: TickSource + Critical, T> Drop for Callout<'_, P, T> {
+impl<P: TickSource + Locking, T> Drop for Callout<'_, P, T> {
     fn drop(&mut self) {
         // A running action may hold `&Self` on another CPU until this
         // returns.  The record makes `Self` `!Unpin`, so this `&mut` is
@@ -146,29 +146,24 @@ impl<P: TickSource + Critical, T> Drop for Callout<'_, P, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::NoCritical;
+    use crate::test_support::Host;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use lock::{IrqSpinLock, Platform, ThreadRef};
 
-    /// A tick source that counts its critical sections.
+    /// A tick source the tests drive by hand.
     struct Source {
         ticks: AtomicU64,
-        enters: AtomicU64,
     }
 
     impl Source {
         const fn new() -> Self {
             Self {
                 ticks: AtomicU64::new(0),
-                enters: AtomicU64::new(0),
             }
         }
 
         fn bump(&self) {
             self.ticks.fetch_add(1, Ordering::Relaxed);
-        }
-
-        fn enters(&self) -> u64 {
-            self.enters.load(Ordering::SeqCst)
         }
     }
 
@@ -178,13 +173,8 @@ mod tests {
         }
     }
 
-    impl Critical for Source {
-        type Guard = NoCritical;
-
-        fn enter_critical(&self) -> NoCritical {
-            self.enters.fetch_add(1, Ordering::SeqCst);
-            NoCritical
-        }
+    impl Locking for Source {
+        type Lock = Host;
     }
 
     type TestHashedWheel<'s> = Pin<Box<HashedWheel<&'s Source>>>;
@@ -290,10 +280,10 @@ mod tests {
         assert_eq!(survivor.data().load(Ordering::Relaxed), 1);
     }
 
-    /// What [`hold`] needs: its source, whether it restarts its
-    /// callout, and how far it got.
+    /// What [`hold`] needs: the thread that drops its callout, whether it
+    /// restarts its callout, and how far it got.
     struct Gate<'s> {
-        source: &'s Source,
+        dropper: ThreadRef,
         restart: bool,
         started: AtomicBool,
         returned: &'s AtomicBool,
@@ -307,10 +297,11 @@ mod tests {
         if gate.restart {
             callout.start(Ticks::new(1));
         }
-        let enters = gate.source.enters();
+        let enters = Host::irq_quiet_entries(gate.dropper);
         gate.started.store(true, Ordering::SeqCst);
-        // `stop`, `is_idle`, a spin, then `stop` again.
-        while gate.source.enters() < enters + 3 {
+        // `stop`, `is_idle`, a spin, then `stop` again: each takes the
+        // wheel's lock.
+        while Host::irq_quiet_entries(gate.dropper) < enters + 3 {
             core::hint::spin_loop();
         }
         gate.returned.store(true, Ordering::SeqCst);
@@ -323,7 +314,7 @@ mod tests {
         let wheel = hashed_wheel(&source);
         let returned = AtomicBool::new(false);
         let gate = Gate {
-            source: &source,
+            dropper: Host::current(),
             restart,
             started: AtomicBool::new(false),
             returned: &returned,
@@ -340,7 +331,10 @@ mod tests {
             let waited = returned.load(Ordering::SeqCst);
             // Releases an action a drop failed to wait for, so the test
             // fails instead of hanging.
-            source.enters.fetch_add(3, Ordering::SeqCst);
+            let release = IrqSpinLock::<(), Host>::new(());
+            for _ in 0..3 {
+                drop(release.lock());
+            }
             waited
         });
         assert!(waited);

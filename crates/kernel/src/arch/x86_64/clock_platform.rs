@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The `clock` platform for `x86_64`: the HPET counter, `spl`, the RTC and
-//! the mapped time page.
+//! The `clock` platform for `x86_64`: the HPET counter, the RTC and the
+//! mapped time page, with the clock's locks on [`MachPlatform`].
 
 use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::{apic, rtc, spl};
@@ -10,7 +10,7 @@ use crate::glue::time_value::{MappedTimeValue, TimeValue64};
 use crate::kern::debug::kpanic;
 use crate::vm::vm_kern::{self, KERNEL_MAP};
 use clock::{
-    Calendar, Clock, Critical, HashedWheel, Instant, Ticks, TimeCounter,
+    Calendar, Clock, HashedWheel, Instant, Locking, Ticks, TimeCounter,
     TimePage, WallTime,
 };
 use core::ffi::c_int;
@@ -18,24 +18,8 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull, addr_of_mut};
 use core::sync::atomic::{AtomicPtr, Ordering, fence};
 
-/// The interrupt mask [`MachPlatform::enter_critical`] took.
-pub(crate) struct SplGuard(c_int);
-
-impl Drop for SplGuard {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` is the level `splhigh()` returned on this CPU.
-        unsafe { spl::splx(self.0) };
-    }
-}
-
-impl Critical for MachPlatform {
-    type Guard = SplGuard;
-
-    fn enter_critical(&self) -> SplGuard {
-        // SAFETY: `splhigh()` is the real asm routine; its value is only
-        // handed back to `splx()` in the guard's `Drop`.
-        SplGuard(unsafe { spl::splhigh() })
-    }
+impl Locking for MachPlatform {
+    type Lock = Self;
 }
 
 impl TimeCounter for MachPlatform {

@@ -14,22 +14,15 @@ pub trait TimeCounter {
     fn counter_period_nsec(&self) -> u32;
 }
 
-/// Interrupt exclusion for the clock's critical sections.
-pub trait Critical {
-    /// The token whose drop restores the interrupted state.
-    type Guard: Drop;
-
-    /// Disables the interrupts that can reach the clock and returns the
-    /// token that restores them.
-    fn enter_critical(&self) -> Self::Guard;
+/// The `lock` platform the clock's and the wheels' irq spin locks run on,
+/// so the clock interrupt never spins on a lock its own CPU holds.
+pub trait Locking {
+    /// The modular backend of `lock`.
+    type Lock: lock::Platform;
 }
 
-impl<T: Critical + ?Sized> Critical for &T {
-    type Guard = T::Guard;
-
-    fn enter_critical(&self) -> T::Guard {
-        (**self).enter_critical()
-    }
+impl<T: Locking + ?Sized> Locking for &T {
+    type Lock = T::Lock;
 }
 
 /// The real-time clock the wall clock is written back to.
@@ -45,6 +38,6 @@ pub trait TimePage {
 }
 
 /// Everything [`Clock`](crate::Clock) needs from the machine.
-pub trait Platform: TimeCounter + Critical + Calendar + TimePage {}
+pub trait Platform: TimeCounter + Locking + Calendar + TimePage {}
 
-impl<P: TimeCounter + Critical + Calendar + TimePage> Platform for P {}
+impl<P: TimeCounter + Locking + Calendar + TimePage> Platform for P {}

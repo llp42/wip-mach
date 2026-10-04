@@ -10,9 +10,8 @@
 //! before.  Records live inside [`Callout`]s, the wheel's only
 //! interface for arming: it links and unlinks them without allocating.
 //!
-//! A wheel keeps its buckets behind its own lock — the platform's
-//! [`Critical`] section, then a spin lock — so any CPU may arm or
-//! cancel on it, and the clock interrupt may [`poll`] it.
+//! A wheel keeps its buckets behind its own irq spin lock, so any CPU
+//! may arm or cancel on it, and the clock interrupt may [`poll`] it.
 //! [`advance`] runs the expiry actions with the lock released, so an
 //! action may re-arm its record.  Where wheels live — one per CPU, per
 //! subsystem, or one for the machine — is the caller's choice.
@@ -21,8 +20,7 @@
 //! [`poll`]: HashedWheel::poll
 //! [`advance`]: HashedWheel::advance
 
-use crate::critical::CriticalLock;
-use crate::platform::Critical;
+use crate::platform::Locking;
 use crate::types::Ticks;
 use collections::list::{self, List};
 use core::cell::Cell;
@@ -30,6 +28,7 @@ use core::marker::PhantomPinned;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, Ordering};
+use lock::IrqSpinLock;
 
 /// The number of bucket-index bits; the paper recommends a power of two
 /// so the index is a mask.
@@ -276,21 +275,23 @@ impl Inner {
 /// A wheel is `!Unpin`: its buckets point back into it, so it mutates
 /// through `Pin<&Self>`.  A `static` wheel is pinned with
 /// [`Pin::static_ref`].
-pub struct HashedWheel<P: TickSource + Critical> {
+pub struct HashedWheel<P: TickSource + Locking> {
     platform: P,
-    state: CriticalLock<Inner>,
+    state: IrqSpinLock<Inner, P::Lock>,
 }
 
-impl<P: TickSource + Critical> HashedWheel<P> {
-    /// A wheel whose cursor starts at tick `now`, reading time and
-    /// entering critical sections through `platform`.
+impl<P: TickSource + Locking> HashedWheel<P> {
+    /// A wheel whose cursor starts at tick `now`, reading time through
+    /// `platform`.
     ///
     /// `now` should be the source's tick when the wheel is first used;
-    /// a wheel that starts behind visits every tick it missed.
+    /// a wheel that starts behind visits every tick it missed.  Each
+    /// call site builds a lock class of its own.
+    #[track_caller]
     pub const fn new(platform: P, now: Ticks) -> Self {
         Self {
             platform,
-            state: CriticalLock::new(Inner {
+            state: IrqSpinLock::new(Inner {
                 buckets: [const { List::new() }; TABLE_SIZE],
                 due: List::new(),
                 cursor: now.get(),
@@ -303,11 +304,7 @@ impl<P: TickSource + Critical> HashedWheel<P> {
 
     /// The last tick the wheel visited.
     pub fn cursor(&self) -> Ticks {
-        let (critical, inner) = self.state.lock(&self.platform);
-        let cursor = inner.cursor;
-        drop(inner);
-        drop(critical);
-        Ticks::new(cursor)
+        Ticks::new(self.state.lock().cursor)
     }
 
     /// Whether the source has moved past the wheel's cursor.
@@ -322,7 +319,7 @@ impl<P: TickSource + Critical> HashedWheel<P> {
     /// Cheap enough for the clock interrupt: when it returns `true`, the
     /// caller runs [`advance`](Self::advance) in a deferred context.
     pub fn poll(&self) -> bool {
-        let (critical, mut inner) = self.state.lock(&self.platform);
+        let mut inner = self.state.lock();
         let now = self.platform.now().get();
         let mut work = false;
         while inner.cursor < now {
@@ -337,7 +334,6 @@ impl<P: TickSource + Critical> HashedWheel<P> {
             inner.cursor = next;
         }
         drop(inner);
-        drop(critical);
         work
     }
 
@@ -362,7 +358,7 @@ impl<P: TickSource + Critical> HashedWheel<P> {
         action: ExpiryAction,
         ctx: *mut (),
     ) {
-        let (critical, mut inner) = self.state.lock(&self.platform);
+        let mut inner = self.state.lock();
         // Read under the lock, so a caller delayed before it, by an
         // interrupt or by spinning for the lock, cannot arm from a stale
         // tick.
@@ -389,8 +385,6 @@ impl<P: TickSource + Critical> HashedWheel<P> {
         unsafe { bucket.push_front_ptr(r) };
         #[cfg(debug_assertions)]
         inner.stats.armed(ticks);
-        drop(inner);
-        drop(critical);
     }
 
     /// Disarms `r`, returning whether that prevented a pending expiry.
@@ -403,11 +397,7 @@ impl<P: TickSource + Critical> HashedWheel<P> {
     /// `r` must point at a live [`Record`] that is idle or on this wheel.
     #[must_use]
     pub(crate) unsafe fn stop(self: Pin<&Self>, r: NonNull<Record>) -> bool {
-        let (critical, mut inner) = self.state.lock(&self.platform);
-        let prevented = unsafe { inner.unlink(r) };
-        drop(inner);
-        drop(critical);
-        prevented
+        unsafe { self.state.lock().unlink(r) }
     }
 
     /// Whether `r` is idle: on no list, and no action of it running.
@@ -416,11 +406,8 @@ impl<P: TickSource + Critical> HashedWheel<P> {
     ///
     /// `r` must point at a live [`Record`] that is idle or on this wheel.
     pub(crate) unsafe fn is_idle(&self, r: NonNull<Record>) -> bool {
-        let (critical, inner) = self.state.lock(&self.platform);
-        let idle = unsafe { r.as_ref() }.state.get() == State::Idle;
-        drop(inner);
-        drop(critical);
-        idle
+        let _inner = self.state.lock();
+        unsafe { r.as_ref() }.state.get() == State::Idle
     }
 
     /// Visits the next tick's bucket and runs the actions of the records
@@ -432,7 +419,7 @@ impl<P: TickSource + Critical> HashedWheel<P> {
     /// in the order their records were armed.
     #[must_use]
     pub fn advance(self: Pin<&Self>) -> bool {
-        let (mut critical, mut inner) = self.state.lock(&self.platform);
+        let mut inner = self.state.lock();
         let now = self.platform.now().get();
         if inner.advancing || inner.cursor >= now {
             return false;
@@ -456,14 +443,11 @@ impl<P: TickSource + Critical> HashedWheel<P> {
             let record = unsafe { r.as_ref() };
             let (action, ctx) =
                 (record.action.get(), record.ctx.load(Ordering::Relaxed));
-            drop(inner);
-            drop(critical);
 
             // SAFETY: `start`'s caller registered a pair that keeps the
             // action's contract.
-            unsafe { action(ctx) };
+            inner.unlocked(|| unsafe { action(ctx) });
 
-            (critical, inner) = self.state.lock(&self.platform);
             // Only the action's record may have run it, and `stop` and
             // `start` keep a running record running.
             record
@@ -479,18 +463,14 @@ impl<P: TickSource + Critical> HashedWheel<P> {
     /// The wheel's debug counters.
     #[cfg(debug_assertions)]
     pub fn stats(&self) -> Stats {
-        let (critical, inner) = self.state.lock(&self.platform);
-        let stats = inner.stats;
-        drop(inner);
-        drop(critical);
-        stats
+        self.state.lock().stats
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::NoCritical;
+    use crate::test_support::Host;
     use core::sync::atomic::AtomicU64;
 
     /// A tick source the tests drive by hand.
@@ -512,12 +492,8 @@ mod tests {
         }
     }
 
-    impl Critical for Source {
-        type Guard = NoCritical;
-
-        fn enter_critical(&self) -> NoCritical {
-            NoCritical
-        }
+    impl Locking for Source {
+        type Lock = Host;
     }
 
     type TestHashedWheel<'s> = Pin<Box<HashedWheel<&'s Source>>>;

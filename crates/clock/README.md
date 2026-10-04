@@ -28,7 +28,7 @@ are ADRs 0037 to 0042 in the repository's
 | `Ticks`, `Instant`, `WallTime` | tick counts, uptime, epoch time |
 | `HZ`, `TICK`, `TICK_NANOS` | the 100 Hz tick: rate and periods |
 | `Timer`, `TimerSave`, `TIMER_RATE` | per-thread user/system accounting |
-| `Platform` traits | counter, critical section, RTC, time page |
+| `Platform` traits | counter, lock platform, RTC, time page |
 
 ## Implementing a platform
 
@@ -37,34 +37,21 @@ The clock needs four machine capabilities:
 | Trait | Method | x86 meaning |
 |---|---|---|
 | `TimeCounter` | `counter`, `counter_period_nsec` | HPET counter and period |
-| `Critical` | `enter_critical` | save the IPL and mask the clock (spl), or enter a deferring critical section |
+| `Locking` | `type Lock` | the `lock::Platform` whose irq spin locks guard the clock and wheel state |
 | `Calendar` | `set_rtc` | program the RTC with epoch seconds |
 | `TimePage` | `publish` | write the mapped time page |
 
 ```rust,ignore
 use clock::{
-    Calendar, Clock, Critical, Instant, TimeCounter, TimePage, WallTime,
+    Calendar, Clock, Instant, Locking, TimeCounter, TimePage, WallTime,
 };
-use core::ffi::c_int;
 
 struct Platform;
 
-struct Guard(c_int);
-
-impl Drop for Guard {
-    fn drop(&mut self) {
-        // SAFETY: the level came from `splhigh()` on this CPU.
-        unsafe { splx(self.0) };
-    }
-}
-
-impl Critical for Platform {
-    type Guard = Guard;
-
-    fn enter_critical(&self) -> Guard {
-        // SAFETY: masking the clock interrupt is the precondition.
-        Guard(unsafe { splhigh() })
-    }
+// `Platform` also implements `lock::Platform`; its irq-quiet section
+// masks the clock interrupt.
+impl Locking for Platform {
+    type Lock = Self;
 }
 
 impl TimeCounter for Platform {
@@ -110,18 +97,19 @@ let ticks: Ticks = CLOCK.elapsed_ticks();
 tick, and publishes the time page.  `set_wall` replaces the wall clock,
 programs the RTC and publishes the time page; `set_adjustment` is the
 gradual `adjtime` correction, applied by `tick`.  `Clock<P>` is a
-`TickSource` and a `Critical`, so wheels can borrow it directly.
+`TickSource` and names its platform's `Locking`, so wheels can borrow it
+directly.
 
 ## The wheels
 
 The type is `HashedWheel` — Scheme 6 of Varghese and Lauck: 256
 buckets of unsorted `collections::list::List`s, indexed by the low 8
 bits of a record's expiry tick.  A wheel keeps its buckets behind its
-own `CriticalLock`,
-so any CPU may arm or cancel on it.  It reads time and enters critical
-sections through one platform value, `P: TickSource + Critical`; a
-`&Clock` is one.  Where wheels live — one per CPU, per subsystem, or
-one for the machine — is the caller's choice.
+own `lock::IrqSpinLock`, so any CPU may arm or cancel on it, and each
+call site of `new` builds a lock class of its own.  It reads time
+through one platform value, `P: TickSource + Locking`, which also names
+its lock platform; a `&Clock` is one.  Where wheels live — one per
+CPU, per subsystem, or one for the machine — is the caller's choice.
 
 A wheel is `!Unpin` (its buckets point back into it).  Arming and
 driving take `Pin<&Self>` (`start`, `stop`, `advance`); reads take

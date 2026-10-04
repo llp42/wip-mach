@@ -17,18 +17,96 @@
 //!   later (a reply within 500 ms) and re-armed at once.
 
 use clock::{
-    Calendar, Callout, Clock, Critical, HashedWheel, Instant, TickSource,
+    Calendar, Callout, Clock, HashedWheel, Instant, Locking, TickSource,
     Ticks, TimeCounter, TimePage, Timer, TimerSave, WallTime,
 };
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
-use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use core::ptr::NonNull;
+use core::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering,
+};
 use core::time::Duration;
 use criterion::{
     BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
+#[cfg(debug_assertions)]
+use lock::HeldLocks;
+use lock::{Bucket, Platform, ThreadRef, WaitTable};
 use std::hint::black_box;
+use std::thread::{self, Thread};
 use std::time::Instant as HostInstant;
+
+/// The `lock` platform the benchmarks run on, over std threads; nothing
+/// interrupts them, so an irq-quiet section does nothing.
+struct BenchLocks;
+
+/// The record a [`ThreadRef`] of [`BenchLocks`] points at; leaked, so a
+/// late unpark of a finished thread stays sound.
+#[repr(align(8))]
+struct BenchThread {
+    thread: Thread,
+    parked: AtomicBool,
+}
+
+std::thread_local! {
+    static ME: &'static BenchThread = Box::leak(Box::new(BenchThread {
+        thread: thread::current(),
+        parked: AtomicBool::new(false),
+    }));
+}
+
+#[cfg(debug_assertions)]
+std::thread_local! {
+    static HELD: &'static HeldLocks = Box::leak(Box::new(HeldLocks::new()));
+}
+
+/// One bucket, which every lock of the benchmarks shares.
+static BUCKETS: [Bucket; 1] = [const { Bucket::new() }; 1];
+
+static TABLE: WaitTable = WaitTable::new(&BUCKETS);
+
+/// Returns the record `thread` names.
+const fn record(thread: ThreadRef) -> &'static BenchThread {
+    // SAFETY: every `ThreadRef` of `BenchLocks` names a leaked
+    // `BenchThread`.
+    unsafe { thread.as_ptr().cast::<BenchThread>().as_ref() }
+}
+
+// SAFETY: a thread's record is its own and leaked, `park` and `unpark`
+// are std's, which keep a token, and every lock shares one wait table.
+unsafe impl Platform for BenchLocks {
+    fn current() -> ThreadRef {
+        ME.with(|me| ThreadRef::new(NonNull::from(*me).cast()))
+    }
+
+    fn is_running(thread: ThreadRef) -> bool {
+        !record(thread).parked.load(Ordering::SeqCst)
+    }
+
+    fn irq_quiet_enter() {}
+
+    unsafe fn irq_quiet_exit() {}
+
+    fn park() {
+        ME.with(|me| me.parked.store(true, Ordering::SeqCst));
+        thread::park();
+        ME.with(|me| me.parked.store(false, Ordering::SeqCst));
+    }
+
+    fn unpark(thread: ThreadRef) {
+        record(thread).thread.unpark();
+    }
+
+    fn wait_table() -> &'static WaitTable {
+        &TABLE
+    }
+
+    #[cfg(debug_assertions)]
+    fn held_locks() -> &'static HeldLocks {
+        HELD.with(|held| *held)
+    }
+}
 
 /// The clock platform the clock benchmarks drive: atomics only.
 struct BenchPlatform {
@@ -51,13 +129,6 @@ impl BenchPlatform {
     }
 }
 
-/// The no-op critical guard.
-struct NoCritical;
-
-impl Drop for NoCritical {
-    fn drop(&mut self) {}
-}
-
 impl TimeCounter for BenchPlatform {
     fn counter(&self) -> u32 {
         self.counter.load(Ordering::Relaxed)
@@ -68,12 +139,8 @@ impl TimeCounter for BenchPlatform {
     }
 }
 
-impl Critical for BenchPlatform {
-    type Guard = NoCritical;
-
-    fn enter_critical(&self) -> NoCritical {
-        NoCritical
-    }
+impl Locking for BenchPlatform {
+    type Lock = BenchLocks;
 }
 
 impl Calendar for BenchPlatform {
@@ -111,12 +178,8 @@ impl TickSource for Source {
     }
 }
 
-impl Critical for Source {
-    type Guard = NoCritical;
-
-    fn enter_critical(&self) -> NoCritical {
-        NoCritical
-    }
+impl Locking for Source {
+    type Lock = BenchLocks;
 }
 
 /// The wheel under test.
