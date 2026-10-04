@@ -5,14 +5,16 @@
 //!
 //! The reference is `src/old`, a frozen copy of the C the kernel's tree
 //! was translated from, compiled by `build.rs` (ADR 0052).  The
-//! contender is [`kmem::RadixTree`], the MIT rewrite over `A: Alloc`.
-//! Both store the same `NonNull<c_void>` values under the same 32-bit
-//! keys, the reference because the kernel builds it with 32-bit keys and
-//! the contender because [`kmem::RadixKey`] is one word, so a run
-//! compares two trees and not two key widths.
+//! contender is [`kmem::RadixTree`], a port over `A: Alloc` of the same
+//! author's later MIT release of that tree.  Both store the same
+//! `NonNull<c_void>` values under the same 32-bit names.  The reference
+//! is built with 32-bit keys, as the kernel built it; the contender takes
+//! `u64` keys, but a tree is only as tall as its largest key needs, so
+//! under 32-bit names both build the same levels and a run compares two
+//! trees, not two key widths.
 //!
 //! Ids read `<tree>/<workload>/<entries>`, with `c` the reference and
-//! `new` the rewrite.  Every workload is an action the kernel performs on
+//! `new` the port.  Every workload is an action the kernel performs on
 //! the name table of an IPC space, or on the reverse map beside it:
 //!
 //! | workload | the kernel's action | where |
@@ -40,11 +42,8 @@
 //!   `rdxtree_remove_all` and [`NewTree`] through `RadixTree::drop`.
 //! - **The assertions.**  The reference is built with `NDEBUG` because
 //!   the contender's `debug_assert!`s are compiled out in this profile.
-//!
-//! One difference is not equalised, because it is the trees': replacing a
-//! key that is *absent* inserts it in the contender and hands back null
-//! in the reference.  No workload reaches that path — every key the
-//! `replace` workload rewrites is present — so it shows up as nothing.
+//!   The contender's alignment check on each stored pointer is part of
+//!   its contract in every profile, so it stays inside the window.
 
 use core::ffi::{c_int, c_void};
 use core::mem::{MaybeUninit, offset_of, size_of};
@@ -378,9 +377,9 @@ unsafe impl kmem::Alloc for HostAlloc {
     }
 }
 
-/// `kmem::RadixTree`, the MIT rewrite.
+/// `kmem::RadixTree`, the contender.
 pub struct NewTree {
-    tree: kmem::RadixTree<NonNull<c_void>, HostAlloc>,
+    tree: kmem::RadixTree<c_void, HostAlloc>,
 }
 
 impl NewTree {
@@ -388,7 +387,7 @@ impl NewTree {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            tree: kmem::RadixTree::new(HostAlloc::new()),
+            tree: kmem::RadixTree::new(HostAlloc::new(), true),
         }
     }
 }
@@ -405,36 +404,35 @@ impl Tree for NewTree {
     }
 
     fn insert_alloc(&mut self, ptr: NonNull<c_void>) -> u32 {
-        self.tree
+        let key = self
+            .tree
             .insert_alloc(ptr)
-            .map(|(key, _)| key.into_raw())
-            .expect("the host cache does not run dry")
+            .expect("the host cache does not run dry");
+        u32::try_from(key).expect("a workload stays under 2^32 entries")
     }
 
     fn insert_named(&mut self, name: u32, ptr: NonNull<c_void>) -> bool {
-        self.tree
-            .insert(kmem::RadixKey::from_raw(name), ptr)
-            .is_ok()
+        self.tree.insert(u64::from(name), ptr).is_ok()
     }
 
     fn lookup(&self, name: u32) -> u64 {
-        match self.tree.get(kmem::RadixKey::from_raw(name)) {
+        match self.tree.get(u64::from(name)) {
             Some(ptr) => ptr.as_ptr() as u64,
             None => 0,
         }
     }
 
     fn remove(&mut self, name: u32) -> u64 {
-        match self.tree.remove(kmem::RadixKey::from_raw(name)) {
+        match self.tree.remove(u64::from(name)) {
             Some(ptr) => ptr.as_ptr() as u64,
             None => 0,
         }
     }
 
     fn replace(&mut self, name: u32, ptr: NonNull<c_void>) -> u64 {
-        match self.tree.replace(kmem::RadixKey::from_raw(name), ptr) {
-            Ok(Some(old)) => old.as_ptr() as u64,
-            Ok(None) | Err(_) => 0,
+        match self.tree.get_slot(u64::from(name)) {
+            Some(mut slot) => slot.replace(ptr).as_ptr() as u64,
+            None => 0,
         }
     }
 

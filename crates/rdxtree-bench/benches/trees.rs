@@ -7,7 +7,7 @@
 //! built before timing starts; the whole workload runs inside one timed
 //! call and returns a checksum so the optimizer cannot drop the work.
 //! Ids read `<tree>/<workload>/<entries>`, with `c` the frozen C
-//! reference and `new` the MIT rewrite.  What each workload models in
+//! reference and `new` the port in `kmem`.  What each workload models in
 //! the kernel is in the crate's own docs.
 //!
 //! A routine takes its tree by value, so the tree's destructor is inside

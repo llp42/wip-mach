@@ -82,6 +82,9 @@ number is never reused, so the list has gaps.
 - [0010 — SPDX headers and provenance](docs/adr/0010-spdx-headers-and-provenance.md)
   — SPDX per file; the licence follows the crate's content; derived
   files pin their upstream source.
+- [0053 — An MIT crate may carry code derived from MIT upstream](docs/adr/0053-an-mit-crate-may-carry-code-derived-from-mit-upstream.md)
+  — the crate stays MIT and the file keeps its upstream holders; other
+  derived code stays in GPL crates.
 - [0011 — AI-assisted contributions](docs/adr/0011-ai-assisted-contributions.md)
   — allowed under accountability, licensing, and disclosure
   conditions.

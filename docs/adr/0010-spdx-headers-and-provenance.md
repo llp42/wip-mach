@@ -11,11 +11,12 @@ Every source file starts with an SPDX license line and one
 
 A crate's license follows its content:
 
-- a crate designed from the literature, carrying no derived code, is
-  `MIT` — `lock`, `clock`, `collections`, `kmem` — and never takes
-  derived code;
-- a crate that carries derived code is `GPL-2.0-or-later` for its
-  original files — `kernel`, `wip-mach`, `mach-mig-sys`.
+- a crate designed from the literature is `MIT` — `lock`, `clock`,
+  `collections`, `kmem` — and takes derived code only from an
+  MIT-licensed upstream (ADR 0053);
+- a crate that carries derived code under any other licence is
+  `GPL-2.0-or-later` for its original files — `kernel`, `wip-mach`,
+  `mach-mig-sys`.
 
 `collections` goes further: its shapes are the classic kernel queue
 shapes and its operation names come from `std::collections::LinkedList`,
@@ -64,5 +65,5 @@ and carry no SPDX header.
   provenance pins the exact upstream commit.
 - A PR that relocates upstream-derived code must keep the provenance
   block and must not start naming upstream files in prose.
-- Derived code never moves into an MIT crate; code that needs it
-  stays in a GPL crate.
+- Derived code moves into an MIT crate only from an MIT-licensed
+  upstream (ADR 0053); any other derived code stays in a GPL crate.

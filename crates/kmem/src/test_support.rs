@@ -18,7 +18,7 @@ use std::vec::Vec;
 pub(crate) struct Heap {
     live: Mutex<Vec<(usize, Layout)>>,
     calls: AtomicUsize,
-    fail_from: usize,
+    fail_from: AtomicUsize,
 }
 
 impl Heap {
@@ -31,8 +31,18 @@ impl Heap {
         Self {
             live: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
-            fail_from: n,
+            fail_from: AtomicUsize::new(n),
         }
+    }
+
+    /// Fails the `n`th call from now (from zero) and every one after it.
+    pub(crate) fn fail_from_now(&self, n: usize) {
+        self.fail_from.store(self.calls() + n, Ordering::Relaxed);
+    }
+
+    /// Lets every later call succeed.
+    pub(crate) fn stop_failing(&self) {
+        self.fail_from.store(usize::MAX, Ordering::Relaxed);
     }
 
     pub(crate) fn live(&self) -> usize {
@@ -64,7 +74,7 @@ unsafe impl Alloc for Heap {
     fn alloc(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
         assert_ne!(layout.size(), 0, "a zero size reached the allocator");
         let call = self.calls.fetch_add(1, Ordering::Relaxed);
-        if call >= self.fail_from {
+        if call >= self.fail_from.load(Ordering::Relaxed) {
             return Err(AllocError);
         }
         // SAFETY: the size is not zero.

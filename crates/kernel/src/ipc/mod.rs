@@ -11,7 +11,7 @@ use crate::kern::lock::{LockData, SimpleLock};
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
-use kmem::{RadixKey, RadixTree};
+use kmem::RadixTree;
 
 pub mod copy_user;
 pub mod ipc_entry;
@@ -468,8 +468,8 @@ const _: () = {
     assert!(offset_of!(HashInfoBucket, hib_count) == 0);
 };
 
-/// The name table: a radix tree of entries under 32-bit keys.
-pub(crate) type NameMap = RadixTree<NonNull<IpcEntry>, Kalloc>;
+/// The name table: a radix tree of entry pointers, keyed by name.
+pub(crate) type NameMap = RadixTree<IpcEntry, Kalloc>;
 
 /// `struct ipc_space` of <`ipc/ipc_space.h>`: the capability namespace.
 #[allow(missing_docs)]
@@ -1291,8 +1291,7 @@ impl IpcSpace {
         name: c_uint,
     ) -> Option<*mut IpcEntry> {
         let record = self.record();
-        let entry =
-            unsafe { (*record).map.get(RadixKey::from_raw(name)) }?.as_ptr();
+        let entry = unsafe { (*record).map.get(u64::from(name)) }?.as_ptr();
 
         // SAFETY: a found address is a live entry stored in the map.
         let bits = unsafe { (*entry).bits };

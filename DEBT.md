@@ -43,9 +43,10 @@ deletes its entry; a change that opens one adds it.
   crate or has been found to fail the split test.
 - **Recorded outcomes**: `elf_load` passes the split test and lives in
   `crates/elf-load` as original MIT code with one `x86_64` reader;
-  `ELFCLASS32` is rejected (ADR 0003).  The radix tree is rewritten as
-  `kmem::RadixTree` (MIT, `A: Alloc`, typed leaves) and the IPC name
-  tables use it; `kern/rdxtree.rs` is gone.
+  `ELFCLASS32` is rejected (ADR 0003).  The radix tree is
+  `kmem::RadixTree`, MIT code derived from an MIT upstream (ADR 0053),
+  with non-owning pointer leaves over `A: Alloc`; the IPC name tables use
+  it and `kern/rdxtree.rs` is gone.
 
 ## Host tests compile kernel sources through a shim
 
@@ -144,34 +145,12 @@ deletes its entry; a change that opens one adds it.
   lint tables.
 - **Done when**: every crate has the baseline lint table.
 
-## Release Clippy rejects a radix-tree helper
-
-- **ADR**: ADR 0024; ADR 0026.
-- **Where**: `kmem/src/radix_tree.rs`'s `value_above_bottom` triggers
-  `clippy::missing_const_for_fn` with debug assertions off.
-- **Done when**: `mise run clippy::host` and `mise run clippy::kernel`
-  pass in both profiles.
-
 ## Documentation does not pass with warnings denied
 
 - **ADR**: ADR 0024.
 - **Where**: `host-tests` has an unresolved link to `tests`; kernel
   documentation emits rustdoc warnings.
 - **Done when**: `mise run doc::host` and `mise run doc::kernel` pass.
-
-## `cov::kmem` counts misses no view of `radix_tree.rs` shows
-
-- **ADR**: ADR 0024.
-- **Where**: `cargo llvm-cov`'s summary counts 15 lines and 29 regions
-  missed in `crates/kmem/src/radix_tree.rs`, while its own
-  `llvm-cov export -format=lcov` has no zero-count record for the file,
-  the HTML report marks no row uncovered, and `llvm-cov show` prints no
-  zero-count line in any instantiation.  The committed tree measured
-  100%; the in-progress rewrite is what started it, and per-instantiation
-  gaps, unexecuted instantiations, inlining and `value_above_bottom` were
-  each ruled out by experiment.
-- **Done when**: `cov::kmem` passes again, or the counts are shown to be
-  an artifact of the summary and the gate is trusted for this file.
 
 ## `RB_DEBUGGER` panics
 

@@ -92,11 +92,8 @@ impl IpcSpace {
         self,
         object: *mut c_void,
     ) -> Option<*mut IpcEntry> {
-        let found = unsafe {
-            (*self.record())
-                .reverse_map
-                .get(kmem::RadixKey::from_raw(reverse_key(object)))
-        }?;
+        let found =
+            unsafe { (*self.record()).reverse_map.get(reverse_key(object)) }?;
         Some(found.as_ptr())
     }
 
@@ -117,12 +114,10 @@ impl IpcSpace {
         unsafe {
             (*self.record())
                 .reverse_map
-                .insert(kmem::RadixKey::from_raw(reverse_key(object)), entry)
+                .insert(reverse_key(object), entry)
                 .map_err(|error| match error {
-                    kmem::RadixTreeError::Exists => Error::InvalidArgument,
-                    kmem::RadixTreeError::ResourceShortage => {
-                        Error::ResourceShortage
-                    }
+                    kmem::RadixTreeError::Busy => Error::InvalidArgument,
+                    kmem::RadixTreeError::NoMemory => Error::ResourceShortage,
                 })
         }
     }
@@ -137,21 +132,15 @@ impl IpcSpace {
         self,
         object: *mut c_void,
     ) -> Option<*mut IpcEntry> {
-        unsafe {
-            (*self.record())
-                .reverse_map
-                .remove(kmem::RadixKey::from_raw(reverse_key(object)))
-        }
-        .map(NonNull::as_ptr)
+        unsafe { (*self.record()).reverse_map.remove(reverse_key(object)) }
+            .map(NonNull::as_ptr)
     }
 }
 
 /// The C `KEY()` macro of <`ipc/ipc_space.h>`: the reverse map's key for an
 /// object.
-fn reverse_key(object: *mut c_void) -> u32 {
-    // The C shifts the kernel address down and hands the 64-bit result to the
-    // 32-bit `rdxtree_key_t` parameter, so the high bits truncate.
-    (object.addr().wrapping_sub(VM_MIN_KERNEL_ADDRESS) >> 3) as u32
+fn reverse_key(object: *mut c_void) -> u64 {
+    (object.addr().wrapping_sub(VM_MIN_KERNEL_ADDRESS) >> 3) as u64
 }
 
 /// `is_alloc()` of <`ipc/ipc_space.h`>.
@@ -230,14 +219,17 @@ pub(crate) fn create() -> Result<IpcSpace, KernError> {
         (*record).active = 1;
 
         let map = ptr::addr_of_mut!((*record).map);
-        map.write(crate::ipc::NameMap::new(crate::kern::kheap::Kalloc));
+        map.write(crate::ipc::NameMap::new(crate::kern::kheap::Kalloc, true));
         let reverse = ptr::addr_of_mut!((*record).reverse_map);
-        reverse.write(crate::ipc::NameMap::new(crate::kern::kheap::Kalloc));
+        reverse.write(crate::ipc::NameMap::new(
+            crate::kern::kheap::Kalloc,
+            false,
+        ));
 
         // The C ignored the insert result too; the zeroth entry is reserved.
         let zero =
             NonNull::new_unchecked(ptr::addr_of_mut!(ZERO_ENTRY)).cast();
-        let _ = (*map).insert(kmem::RadixKey::from_raw(0), zero);
+        let _ = (*map).insert(0, zero);
 
         (*record).size = 1;
         (*record).free_list = ptr::null_mut();

@@ -1,7 +1,7 @@
 # `rdxtree-bench` — the C tree against `kmem::RadixTree`
 
 The kernel's IPC name table is a radix tree, and `kmem::RadixTree` is the
-MIT rewrite that replaced the C one. This crate is how the rewrite is
+Rust port that replaced the C one. This crate is how the port is
 argued for: it times both, on the workloads the kernel puts them
 through, and prints the numbers side by side.
 
@@ -16,17 +16,19 @@ so `--save-baseline` and `--baseline` compare two runs as usual.
 
 ## What it compares
 
-`crates/kmem` is designed from the literature and carries no derived
-code, so the tree it holds is not the C tree reshaped — it is a second
-answer to the same problem. That only means something if the first
-answer is measured, not remembered, which is what the frozen C copy is
-for (ADR 0052).
+`kmem::RadixTree` is a port of the same author's later, MIT-licensed
+release of the tree the kernel's C came from (ADR 0053), so the two
+should differ by the port and the language, not by design. That is a
+claim to measure, not remember, which is what the frozen C copy is for
+(ADR 0052).
 
-The two store the same values under the same 32-bit keys. The kernel
+The two store the same values under the same 32-bit names. The kernel
 builds the reference with 32-bit keys, and the crate's build script
 refuses to compile it without them, because the keys are what a radix
 tree's shape is made of and comparing across key widths compares
-nothing.
+nothing. The contender takes `u64` keys, but a tree is only as tall as
+its largest key needs, so under 32-bit names it builds the same levels
+as the reference.
 
 ## The reference
 
@@ -72,7 +74,7 @@ cargo bench -p rdxtree-bench --target x86_64-unknown-linux-gnu -- lookup/1024
 ## Keeping the comparison honest
 
 A difference the harness introduced is not a result, so three things are
-held equal and the fourth is named:
+held equal:
 
 - **One allocator lifetime.** Both draw nodes from a process-global free
   list that survives between iterations, as the kernel's node cache
@@ -85,11 +87,8 @@ held equal and the fourth is named:
   both free every node, inside the measurement.
 - **The same assertions.** The reference is compiled with `NDEBUG`
   because the contender's `debug_assert!`s are compiled out in this
-  profile.
-- **One difference is the trees'**: replacing an *absent* key inserts it
-  in `new` and answers null in `c`. No workload rewrites a key that is
-  not there, so this shows up as nothing — but a new workload that does
-  would be measuring the difference, not the cost.
+  profile. The contender's alignment check on each stored pointer is
+  part of its contract in every profile, so it stays inside the window.
 
 Only relative numbers mean anything. This is a host process, not the
 kernel, and the reference is built by whatever `cc` the host has, at the

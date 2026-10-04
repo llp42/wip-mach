@@ -1,1045 +1,740 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2011-2018 Richard Braun
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
+//
+// Derived from librbraun (commit cc2f34dc189074e8a93c03ebc5c0790661353b86)
+// original files: src/rdxtree.c, src/rdxtree.h and src/rdxtree_i.h
 
-//! A radix tree of `T` over 32-bit keys.
+//! A radix tree of non-owning pointers under 64-bit keys.
 //!
-//! Keys are dense integers: one level of the tree selects 6 key bits, so
-//! a tree over the full [`RadixKey`] domain is at most 6 levels deep and
-//! a lookup is at most 6 node chases.  Nodes are allocated through the
-//! owner's [`Alloc`] and are freed on removal and on drop.  The tree
-//! never waits; a short heap is [`Error::ResourceShortage`].
+//! One level of the tree selects six key bits, and the tree is only as tall
+//! as its largest key needs: at most 11 levels.  Leaves are `NonNull<T>` the
+//! tree never dereferences or frees.  They must be four-byte aligned,
+//! because the low bit of an entry tells a child node from a leaf.  Nodes
+//! come from the owner's [`Alloc`] and are freed on removal, shrinking,
+//! [`clear`](RadixTree::clear) and drop.  An insertion that cannot get a
+//! node is [`Error::NoMemory`]; nothing waits.
 //!
-//! The performance comparison against the tree this replaced lives in
-//! the `rdxtree-bench` crate, which builds a frozen copy of the reference
-//! C and times both on the workloads the kernel puts them through.  Unit
-//! tests of this tree are in `tests` below.
+//! With key allocation on, each node keeps a bitmap of the slots with room
+//! below them, and [`insert_alloc`](RadixTree::insert_alloc) follows the
+//! lowest set bit down.  A node clears its bit in the parent once every one
+//! of its slots is occupied, even while a child below it still has room, so
+//! allocation can pass over a free key until a removal under that node sets
+//! the bit again.
+//!
+//! The performance comparison against the tree the kernel's name tables
+//! started from lives in the `rdxtree-bench` crate.
 //!
 //! | operation | cost |
 //! |---|---|
 //! | [`get`](RadixTree::get), [`insert`](RadixTree::insert), [`remove`](RadixTree::remove) | O(height) |
-//! | [`insert_alloc`](RadixTree::insert_alloc) | O(height), lowest free key |
+//! | [`insert_alloc`](RadixTree::insert_alloc) | O(height) |
 //! | [`iter`](RadixTree::iter) | O(1) amortised per item |
-//! | [`clear`](RadixTree::clear) | O(nodes) |
+//! | [`clear`](RadixTree::clear) | O(nodes × height) |
 //!
-//! A tree is not internally locked; the caller serialises it.
+//! Mutation takes the tree exclusively; a [`Slot`] borrows it exclusively
+//! and an [`Iter`] shares it.  A tree is not internally locked; the caller
+//! serialises it.
 
-// The iterator stack indexes a fixed `MAX_HEIGHT` array under an
-// invariant the walk itself maintains: `depth` is never more than the
-// key's bit depth.  Slot indices come from a 6-bit mask.
 #![expect(
     clippy::indexing_slicing,
-    reason = "depth and slot indices are bounded by the descent invariant"
-)]
-#![expect(
-    clippy::cast_possible_truncation,
-    reason = "slot indices fit the 6-bit fanout mask"
+    reason = "entry indices come from a six-bit mask, a bitmap bit, or a scan that stops at an occupied entry"
 )]
 
-use crate::alloc::{Alloc, AllocError, allocate, release};
+use crate::alloc::{Alloc, AllocError};
 use core::alloc::Layout;
 use core::fmt;
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
-use core::mem::MaybeUninit;
 use core::ptr::{self, NonNull};
 
-/// The key bits one level of the tree selects.
-const RADIX_BITS: u32 = 6;
+const RADIX: u16 = 6;
+const SIZE: usize = 64;
 
-/// The entries one node holds.
-const RADIX_SIZE: usize = 1 << RADIX_BITS;
-
-/// The key bits one level of the tree selects, as a mask.
-const RADIX_MASK: u32 = (RADIX_SIZE - 1) as u32;
-
-/// Levels a [`RadixKey`] can need: `ceil(32 / 6)`.
-const MAX_HEIGHT: u32 = u32::BITS.div_ceil(RADIX_BITS);
-
-/// The height limit covers the whole key space, so no descent can need
-/// a shift of 32 bits or more.
-const _: () = assert!(RADIX_BITS * MAX_HEIGHT >= u32::BITS);
-
-/// Every slot of a fresh node has free capacity under it.
-const FREE_BM_FULL: u64 = u64::MAX;
-
-/// The layout of one node.
-const fn node_layout<T>() -> Layout {
-    Layout::new::<Node<T>>()
-}
-
-/// A tree key: a 32-bit integer address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct RadixKey(u32);
-
-impl RadixKey {
-    /// The first key, which a tree of height zero holds.
-    const ZERO: Self = Self(0);
-
-    /// The key an integer stands for.
-    #[must_use]
-    pub const fn from_raw(bits: u32) -> Self {
-        Self(bits)
-    }
-
-    /// The integer this key stands for.
-    #[must_use]
-    pub const fn into_raw(self) -> u32 {
-        self.0
-    }
-
-    /// The largest key a tree of `height` levels holds.
-    const fn max_for_height(height: u32) -> Self {
-        let shift = RADIX_BITS * height;
-        if shift < u32::BITS {
-            Self((1 << shift) - 1)
-        } else {
-            Self(u32::MAX)
-        }
-    }
-
-    /// The entry this key selects at `shift`, `(key >> shift) & mask`.
-    const fn index_at(self, shift: u32) -> usize {
-        ((self.0 >> shift) & RADIX_MASK) as usize
-    }
-
-    /// `key | (index << shift)`, the key an allocation walk assembles.
-    const fn with_index(self, index: usize, shift: u32) -> Self {
-        Self(self.0 | ((index as u32) << shift))
-    }
-}
-
-/// A value appeared where only a child node belongs.
-fn value_above_bottom<T>() -> Option<T> {
-    #[cfg(debug_assertions)]
-    #[expect(clippy::panic, reason = "a value sits only at the bottom level")]
-    {
-        panic!("radix tree: a value sits above the bottom level");
-    }
-    #[cfg(not(debug_assertions))]
-    None
-}
-
-/// What a node slot holds, by value.
-enum Entry<T> {
-    /// A value at the bottom of the tree.
-    Value(T),
-    /// A child node.
-    Node(NonNull<Node<T>>),
-}
-
-/// Slot storage: a value or a child pointer, discriminated by the
-/// node's bitmaps.  `ManuallyDrop` because the node drops values
-/// itself when it destroys a slot.
-union SlotBits<T> {
-    value: ManuallyDrop<T>,
-    node: NonNull<Node<T>>,
-}
-
-/// One level of the tree.
-///
-/// # Invariants
-///
-/// Bit `i` of `free_bm` is set when slot `i` is empty, or holds a node
-/// whose subtree still has a free key.  Bit `i` of `used_bm` is set
-/// when slot `i` holds something.  Bit `i` of `tag_bm` is set when that
-/// something is a child node.
-struct Node<T> {
-    free_bm: u64,
-    used_bm: u64,
-    tag_bm: u64,
-    slots: [MaybeUninit<SlotBits<T>>; RADIX_SIZE],
-}
-
-impl<T> Node<T> {
-    /// The first slot with free capacity under it.
-    const fn first_free(&self) -> Option<usize> {
-        if self.free_bm == 0 {
-            None
-        } else {
-            Some(self.free_bm.trailing_zeros() as usize)
-        }
-    }
-
-    /// Clears bit `index`: the slot or its subtree is now full.
-    const fn clear_free(&mut self, index: usize) {
-        self.free_bm &= !(1_u64 << index);
-    }
-
-    /// Sets bit `index`: the slot or its subtree has free capacity.
-    const fn set_free(&mut self, index: usize) {
-        self.free_bm |= 1_u64 << index;
-    }
-
-    /// Whether the node holds no entries.
-    const fn is_empty(&self) -> bool {
-        self.used_bm == 0
-    }
-
-    /// Whether the node's subtree still has a free key.
-    const fn has_free(&self) -> bool {
-        self.free_bm != 0
-    }
-
-    /// Takes the entry in `index`, leaving the slot free.
-    ///
-    /// # Safety
-    ///
-    /// `index` is below `RADIX_SIZE` and its slot holds an entry.
-    unsafe fn take(&mut self, index: usize) -> Entry<T> {
-        debug_assert!(
-            self.used_bm & (1_u64 << index) != 0,
-            "radix tree: take of an empty slot"
-        );
-        self.used_bm &= !(1_u64 << index);
-        self.set_free(index);
-        // SAFETY: the slot holds an entry, so it is initialised.
-        let bits =
-            unsafe { self.slots.get_unchecked(index).assume_init_read() };
-        if self.tag_bm & (1_u64 << index) != 0 {
-            self.tag_bm &= !(1_u64 << index);
-            // SAFETY: `tag_bm` said this slot held a child node.
-            Entry::Node(unsafe { bits.node })
-        } else {
-            // SAFETY: `tag_bm` said this slot held a value.
-            Entry::Value(unsafe { ManuallyDrop::into_inner(bits.value) })
-        }
-    }
-
-    /// Takes the value in `index` when the slot holds one, and nothing
-    /// otherwise: an empty slot and a child node both leave the tree as
-    /// it is.
-    ///
-    /// # Safety
-    ///
-    /// `index` is below `RADIX_SIZE`.
-    unsafe fn take_value(&mut self, index: usize) -> Option<T> {
-        let bit = 1_u64 << index;
-        if self.used_bm & bit == 0 || self.tag_bm & bit != 0 {
-            return None;
-        }
-        // SAFETY: the slot is occupied and `tag_bm` says it holds a
-        // value, so it is initialised.
-        let bits =
-            unsafe { self.slots.get_unchecked(index).assume_init_read() };
-        self.used_bm &= !bit;
-        self.set_free(index);
-        // SAFETY: `tag_bm` said the slot held a value.
-        Some(unsafe { ManuallyDrop::into_inner(bits.value) })
-    }
-
-    /// The child node in `index`.
-    ///
-    /// # Safety
-    ///
-    /// `index` is below `RADIX_SIZE` and its slot holds a child node.
-    unsafe fn child_at(&self, index: usize) -> NonNull<Self> {
-        debug_assert!(
-            self.tag_bm & (1_u64 << index) != 0,
-            "radix tree: slot does not hold a child node"
-        );
-        // SAFETY: `index` is a slot index and the slot is occupied.
-        let bits =
-            unsafe { self.slots.get_unchecked(index).assume_init_ref() };
-        // SAFETY: `tag_bm` says this slot holds a child node.
-        unsafe { bits.node }
-    }
-
-    /// Puts `value` into `index`, which must be free.  A value fills the
-    /// slot.
-    ///
-    /// # Safety
-    ///
-    /// `index` is below `RADIX_SIZE` and the slot is empty.
-    unsafe fn put_value(&mut self, index: usize, value: T) {
-        debug_assert_eq!(
-            self.used_bm & (1_u64 << index),
-            0,
-            "radix tree: slot already used"
-        );
-        debug_assert_eq!(
-            self.tag_bm & (1_u64 << index),
-            0,
-            "radix tree: an empty slot carries no node tag"
-        );
-        // SAFETY: `index` is a slot index of this node.
-        unsafe {
-            let _ = self.slots.get_unchecked_mut(index).write(SlotBits {
-                value: ManuallyDrop::new(value),
-            });
-        }
-        self.used_bm |= 1_u64 << index;
-        self.clear_free(index);
-    }
-
-    /// Puts `child` into `index`, which must be free.  The free bit
-    /// stays set when the child's own subtree still has room.
-    ///
-    /// # Safety
-    ///
-    /// `index` is below `RADIX_SIZE` and the slot is empty.
-    unsafe fn put_node(&mut self, index: usize, child: NonNull<Self>) {
-        debug_assert_eq!(
-            self.used_bm & (1_u64 << index),
-            0,
-            "radix tree: slot already used"
-        );
-        // SAFETY: a stored node is live.
-        let still_free = unsafe { child.as_ref().has_free() };
-        // SAFETY: `index` is a slot index of this node.
-        unsafe {
-            let _ = self
-                .slots
-                .get_unchecked_mut(index)
-                .write(SlotBits { node: child });
-        }
-        self.used_bm |= 1_u64 << index;
-        self.tag_bm |= 1_u64 << index;
-        if still_free {
-            self.set_free(index);
-        } else {
-            self.clear_free(index);
-        }
-    }
-
-    /// The address of the value in `index`.
-    ///
-    /// # Safety
-    ///
-    /// `index` is below `RADIX_SIZE` and the slot holds a value.
-    unsafe fn value_ptr(&mut self, index: usize) -> *mut T {
-        // SAFETY: `index` is a slot index and the slot holds a value.
-        let bits =
-            unsafe { self.slots.get_unchecked_mut(index).assume_init_mut() };
-        // SAFETY: `tag_bm` says the slot holds a value.
-        ptr::addr_of_mut!(bits.value).cast::<T>()
-    }
-}
-
-/// The result of a tree operation that can fail.
+/// An insertion cannot overwrite an occupied key or recover from exhaustion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The key already holds a value.
-    Exists,
-    /// Memory is short.
-    ResourceShortage,
+    /// The key is already occupied.
+    Busy,
+    /// The allocator could not supply a node.
+    NoMemory,
 }
 
-impl From<AllocError> for Error {
-    fn from(_: AllocError) -> Self {
-        Self::ResourceShortage
-    }
+#[repr(C)]
+struct Node {
+    parent: *mut Self,
+    index: u16,
+    height: u16,
+    count: u16,
+    bitmap: u64,
+    entries: [*mut (); SIZE],
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Exists => f.write_str("key already holds a value"),
-            Self::ResourceShortage => f.write_str("memory allocation failed"),
-        }
-    }
+fn address(entry: *mut ()) -> *mut () {
+    entry.map_addr(|addr| addr & !3)
 }
 
-/// The result of a [`RadixTree::remove_in`] frame, for its parent.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Up {
-    /// The node holds no entries; the parent must unlink it.
-    Empty,
-    /// The node still holds entries and its subtree gained a free key;
-    /// the parent sets its free bit and keeps walking only if that bit
-    /// was clear.
-    Gained,
-    /// The free bookkeeping above this node is already correct.
-    Settled,
+fn is_node(entry: *mut ()) -> bool {
+    entry.addr() & 1 != 0
 }
 
-/// The top of a tree.
-///
-/// The height travels with what hangs from it, so a value cannot sit
-/// above the bottom level and a node cannot sit at height zero.
-enum Root<T> {
-    /// The root node and the levels below it.
-    Node(NonNull<Node<T>>, u32),
-    /// The single value of a height-zero tree.
-    Value(T),
-    /// No values; the height only says how many levels a first value
-    /// would descend.
-    Empty(u32),
+fn node_entry(node: *mut Node) -> *mut () {
+    node.cast::<()>().map_addr(|addr| addr | 1)
 }
 
-impl<T> Root<T> {
-    /// The levels to traverse; a value sits at the bottom.
-    const fn height(&self) -> u32 {
-        match self {
-            Self::Value(_) => 0,
-            Self::Empty(height) | Self::Node(_, height) => *height,
-        }
+const fn max_key(height: u16) -> u64 {
+    let shift = height * RADIX;
+    if shift < 64 {
+        (1_u64 << shift) - 1
+    } else {
+        u64::MAX
     }
 }
 
-/// A radix tree of `T` over [`RadixKey`].
-pub struct RadixTree<T, A: Alloc> {
-    root: Root<T>,
-    alloc: A,
+/// # Safety
+/// `shift` is below 64; reachable tree heights select at most bit 60.
+unsafe fn index_at(key: u64, shift: u16) -> u16 {
+    u16::from(unsafe { key.unchecked_shr(u32::from(shift)) }.to_le_bytes()[0])
+        & 63
 }
 
-// SAFETY: a tree owns its nodes and values, and moves its allocator with it.
-#[expect(
-    clippy::non_send_fields_in_send_ty,
-    reason = "NonNull nodes are only reached through the owning tree"
-)]
-unsafe impl<T: Send, A: Alloc + Send> Send for RadixTree<T, A> {}
-// SAFETY: shared access is shared access to the values only.
-unsafe impl<T: Sync, A: Alloc + Sync> Sync for RadixTree<T, A> {}
-
-impl<T, A: Alloc> RadixTree<T, A> {
-    /// An empty tree that allocates through `alloc`.
-    #[must_use]
-    pub const fn new(alloc: A) -> Self {
-        Self {
-            root: Root::Empty(0),
-            alloc,
-        }
-    }
-
-    /// Whether the tree holds no values.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        matches!(self.root, Root::Empty(_))
-    }
-
-    /// The value at `key`, if any.
-    #[must_use]
-    pub fn get(&self, key: RadixKey) -> Option<&T> {
-        let (root, mut height) = match &self.root {
-            Root::Node(node, height) => (*node, *height),
-            Root::Value(value) => {
-                return (key == RadixKey::ZERO).then_some(value);
-            }
-            Root::Empty(_) => return None,
-        };
-        if key > RadixKey::max_for_height(height) {
-            return None;
-        }
-        // SAFETY: a stored node is live for the life of `self`.
-        let mut node = unsafe { root.as_ref() };
-        let mut shift = (height - 1) * RADIX_BITS;
-        loop {
-            let index = key.index_at(shift);
-            let bit = 1_u64 << index;
-            if node.used_bm & bit == 0 {
-                return None;
-            }
-            height -= 1;
-            let is_node = node.tag_bm & bit != 0;
-            if height == 0 {
-                if is_node {
-                    return None;
-                }
-                // SAFETY: the slot holds a value and `index` is a slot
-                // index; `ManuallyDrop` is transparent over `T`.
-                return Some(unsafe {
-                    &*ptr::from_ref(
-                        &node
-                            .slots
-                            .get_unchecked(index)
-                            .assume_init_ref()
-                            .value,
-                    )
-                    .cast::<T>()
-                });
-            }
-            if !is_node {
-                return value_above_bottom();
-            }
-            // SAFETY: `tag_bm` says the slot holds a child node, which is
-            // live for the life of `self`.
-            let child = unsafe { node.child_at(index) };
-            // SAFETY: a stored node is live for the life of `self`.
-            node = unsafe { child.as_ref() };
-            shift -= RADIX_BITS;
-        }
-    }
-
-    /// A unique reference to the value at `key`, if any.
-    #[must_use]
-    pub fn get_mut(&mut self, key: RadixKey) -> Option<&mut T> {
-        self.find_mut(key)
-    }
-
-    /// Stores `value` at `key`, which must be free.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Exists`] when `key` already holds a value, and
-    /// [`Error::ResourceShortage`] when a node cannot be allocated.  A
-    /// failure leaves the tree unchanged.
-    pub fn insert(&mut self, key: RadixKey, value: T) -> Result<(), Error> {
-        if key > RadixKey::max_for_height(self.root.height()) {
-            self.grow(key)?;
-        }
-        match self.root {
-            Root::Empty(0) => {
-                self.root = Root::Value(value);
-                Ok(())
-            }
-            // A lone value at the bottom takes the first key, and
-            // `place` rejects the key that reaches it.
-            _ => self.place::<false>(key, value).map(|_| ()),
-        }
-    }
-
-    /// Stores `value` at the lowest free key and hands back that key and
-    /// a reference to the stored value.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::ResourceShortage`] when a node cannot be allocated.  A
-    /// failure leaves the tree unchanged.
-    pub fn insert_alloc(
-        &mut self,
-        value: T,
-    ) -> Result<(RadixKey, &mut T), Error> {
-        if let Root::Empty(_) = self.root {
-            // A tree with no node holds its first value at the first
-            // key, with no allocation.
-            self.root = Root::Value(value);
-            // The write above is the only one, so the lookup hits.
-            return self
-                .find_mut(RadixKey::ZERO)
-                .map(|stored| (RadixKey::ZERO, stored))
-                .ok_or(Error::ResourceShortage);
-        }
-        if let Root::Value(_) = self.root {
-            // Key one needs a single level, so the lone value moves into
-            // a node.
-            self.grow(RadixKey::from_raw(1))?;
-        }
-        self.place::<true>(RadixKey::ZERO, value)
-    }
-
-    /// Replaces the value at `key`, handing the old one back.
-    ///
-    /// A free key is filled; the tree grows when `key` is past its
-    /// current height.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::ResourceShortage`] when a node cannot be allocated.  On
-    /// failure `value` is dropped and the tree is unchanged.
-    pub fn replace(
-        &mut self,
-        key: RadixKey,
-        value: T,
-    ) -> Result<Option<T>, Error> {
-        if let Some(old) = self.find_mut(key) {
-            return Ok(Some(core::mem::replace(old, value)));
-        }
-        self.insert(key, value)?;
-        Ok(None)
-    }
-
-    /// Removes the value at `key`, if any.
-    pub fn remove(&mut self, key: RadixKey) -> Option<T> {
-        if self.root.height() == 0 {
-            // A height-zero tree holds one value, at the first key.
-            if key != RadixKey::ZERO {
-                return None;
-            }
-            return match core::mem::replace(&mut self.root, Root::Empty(0)) {
-                Root::Value(value) => Some(value),
-                // A tree with no root holds nothing; the empty root goes
-                // straight back.
-                other => {
-                    self.root = other;
-                    None
-                }
-            };
-        }
-
-        let (root, height) = match self.root {
-            Root::Node(node, height) => (node, height),
-            // A tall tree with no root holds nothing.
-            Root::Empty(_) | Root::Value(_) => return None,
-        };
-        let shift = (height - 1) * RADIX_BITS;
-        let (value, up) = self.remove_in(root, height, shift, key)?;
-        if up == Up::Empty {
-            // SAFETY: the root holds no entries and is uniquely reached.
-            unsafe { self.destroy_node(root) };
-            self.root = Root::Empty(0);
-        } else {
-            self.shrink();
-        }
-        Some(value)
-    }
-
-    /// Drops every value and frees every node.
-    pub fn clear(&mut self) {
-        match core::mem::replace(&mut self.root, Root::Empty(0)) {
-            Root::Value(value) => drop(value),
-            // SAFETY: the root is a live node this tree owns.
-            Root::Node(node, _) => unsafe { self.destroy_node(node) },
-            Root::Empty(_) => {}
-        }
-    }
-
-    /// Walks the tree in key order.
-    pub fn iter(&self) -> Iter<'_, T> {
-        Iter::new(self)
-    }
+fn check_pointer<T>(pointer: NonNull<T>) {
+    assert_eq!(pointer.as_ptr().addr() & 3, 0, "unaligned leaf pointer");
 }
 
-impl<'a, T, A: Alloc> IntoIterator for &'a RadixTree<T, A> {
-    type Item = (RadixKey, &'a T);
-    type IntoIter = Iter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-impl<T, A: Alloc> RadixTree<T, A> {
-    /// The value at `key`, uniquely, if the descent finds one.
-    fn find_mut(&mut self, key: RadixKey) -> Option<&mut T> {
-        let (root, mut height) = match &mut self.root {
-            Root::Node(node, height) => (*node, *height),
-            Root::Value(value) => {
-                return (key == RadixKey::ZERO).then_some(value);
-            }
-            Root::Empty(_) => return None,
-        };
-        if key > RadixKey::max_for_height(height) {
-            return None;
-        }
-        let mut current = root;
-        let mut shift = (height - 1) * RADIX_BITS;
-        loop {
-            let index = key.index_at(shift);
-            let bit = 1_u64 << index;
-            // SAFETY: `current` is a live node of this tree.
-            let node = unsafe { current.as_mut() };
-            if node.used_bm & bit == 0 {
-                return None;
-            }
-            height -= 1;
-            let is_node = node.tag_bm & bit != 0;
-            if height == 0 {
-                if is_node {
-                    return None;
-                }
-                // SAFETY: the slot holds a value and `&mut self` keeps
-                // that access unique.
-                return Some(unsafe { &mut *node.value_ptr(index) });
-            }
-            if !is_node {
-                return value_above_bottom();
-            }
-            // SAFETY: `tag_bm` says the slot holds a child node.
-            current = unsafe { node.child_at(index) };
-            shift -= RADIX_BITS;
-        }
-    }
-
-    /// Descends to a leaf and stores `value`.
-    ///
-    /// When `LOWEST_FREE` is set the walk takes the lowest free slot at
-    /// each level and assembles that key; otherwise it follows `key`.
-    /// On failure the nodes this call created are freed and the tree is
-    /// left as it was.
-    fn place<const LOWEST_FREE: bool>(
-        &mut self,
-        key: RadixKey,
-        value: T,
-    ) -> Result<(RadixKey, &mut T), Error> {
-        let key = if LOWEST_FREE { RadixKey::ZERO } else { key };
-
-        let (node, height) = match self.root {
-            Root::Node(node, height) => {
-                if LOWEST_FREE {
-                    // SAFETY: the root is a live node of this tree.
-                    if !unsafe { node.as_ref() }.has_free() {
-                        // Every key under this height is taken; the next
-                        // one lives a level higher.
-                        debug_assert!(
-                            height < MAX_HEIGHT,
-                            "radix tree: the key space is exhausted"
-                        );
-                        let next =
-                            RadixKey::max_for_height(height).with_index(1, 0);
-                        self.grow(next)?;
-                        return self.place::<true>(next, value);
-                    }
-                }
-                (node, height)
-            }
-            Root::Empty(height) => match self.create_node() {
-                Ok(node) => {
-                    self.root = Root::Node(node, height);
-                    (node, height)
-                }
-                Err(error) => {
-                    drop(value);
-                    return Err(error);
-                }
-            },
-            // A value root holds the first key, and the caller grew the
-            // tree for any key past it.
-            Root::Value(_) => return Err(Error::Exists),
-        };
-        let shift = (height - 1) * RADIX_BITS;
-        match self.place_in::<LOWEST_FREE>(node, height, shift, key, value) {
-            Ok((key, stored, _)) => {
-                // SAFETY: `stored` addresses the value just written, and
-                // `&mut self` keeps that access unique.
-                Ok((key, unsafe { &mut *stored }))
-            }
-            Err(error) => {
-                if unsafe { node.as_ref() }.is_empty() {
-                    // SAFETY: the root holds no entries and is uniquely
-                    // reached; the descent left it empty.
-                    unsafe { self.destroy_node(node) };
-                    self.root = Root::Empty(height);
-                }
-                Err(error)
-            }
-        }
-    }
-
-    /// One level of a [`place`](Self::place) descent.
-    ///
-    /// Returns the assembled key, a pointer to the stored value, and
-    /// whether the subtree rooted at `node` is now full so the caller can
-    /// clear its free bit.  A node this call created is unlinked and
-    /// freed before the error returns.
-    fn place_in<const LOWEST_FREE: bool>(
-        &mut self,
-        mut node: NonNull<Node<T>>,
-        height: u32,
-        shift: u32,
-        key: RadixKey,
-        value: T,
-    ) -> Result<(RadixKey, *mut T, bool), Error> {
-        let (index, key, bit) = {
-            // SAFETY: `node` is a live node of this tree.
-            let slot = unsafe { node.as_ref() };
-            let (index, key) = if LOWEST_FREE {
-                let Some(index) = slot.first_free() else {
-                    drop(value);
-                    // The caller grows the tree before a full root is
-                    // placed into, so a full node here is not a state a
-                    // free key walk can reach.
-                    #[cfg(debug_assertions)]
-                    #[expect(
-                        clippy::panic,
-                        reason = "a free-key walk never reaches a full node"
-                    )]
-                    {
-                        panic!(
-                            "radix tree: a free-key walk reached a full node"
-                        );
-                    }
-                    #[cfg(not(debug_assertions))]
-                    return Err(Error::ResourceShortage);
-                };
-                (index, key.with_index(index, shift))
-            } else {
-                (key.index_at(shift), key)
-            };
-            (index, key, 1_u64 << index)
-        };
-
-        if height == 1 {
-            // SAFETY: `node` is a live node of this tree.
-            let slot = unsafe { node.as_mut() };
-            if LOWEST_FREE {
-                // A free bit at the bottom names an empty slot: a value
-                // occupies its slot and clears the bit.
-                debug_assert_eq!(
-                    slot.used_bm & bit,
-                    0,
-                    "radix tree: a free-key walk reached a full slot"
-                );
-            } else if slot.used_bm & bit != 0 {
-                drop(value);
-                return Err(Error::Exists);
-            }
-            // SAFETY: `index` is in range and the slot is empty.
-            unsafe {
-                slot.put_value(index, value);
-            }
-            // SAFETY: `index` addresses the value just stored, and
-            // `&mut self` keeps that access unique.
-            let stored = unsafe { slot.value_ptr(index) };
-            return Ok((key, stored, !slot.has_free()));
-        }
-
-        let (child, created) = {
-            // SAFETY: `node` is a live node of this tree.
-            let slot = unsafe { node.as_mut() };
-            if slot.used_bm & bit == 0 {
-                let child = match self.create_node() {
-                    Ok(child) => child,
-                    Err(error) => {
-                        drop(value);
-                        return Err(error);
-                    }
-                };
-                // SAFETY: the slot is empty and `index` is in range.
-                unsafe {
-                    slot.put_node(index, child);
-                }
-                (child, true)
-            } else if slot.tag_bm & bit != 0 {
-                // SAFETY: `index` names an occupied node slot.
-                (unsafe { slot.child_at(index) }, false)
-            } else {
-                drop(value);
-                return Err(Error::Exists);
-            }
-        };
-
-        let child_shift = shift.saturating_sub(RADIX_BITS);
-        match self.place_in::<LOWEST_FREE>(
-            child,
-            height - 1,
-            child_shift,
-            key,
-            value,
-        ) {
-            Ok((key, stored, full)) => {
-                // SAFETY: `node` is a live node of this tree.
-                let slot = unsafe { node.as_mut() };
-                if full {
-                    slot.clear_free(index);
-                }
-                Ok((key, stored, !slot.has_free()))
-            }
-            Err(error) => {
-                if created {
-                    // SAFETY: `node` is a live node of this tree.
-                    let slot = unsafe { node.as_mut() };
-                    // SAFETY: the slot holds the node this call created
-                    // and a node entry is only a pointer, so the unlink
-                    // can be dropped.  The child's own descent already
-                    // freed what it created.
-                    drop(unsafe { slot.take(index) });
-                    // SAFETY: the child is empty and uniquely reached.
-                    unsafe { self.destroy_node(child) };
-                }
-                Err(error)
-            }
-        }
-    }
-
-    /// One level of a [`remove`](Self::remove) descent.  Returns the
-    /// value and how the parent must treat this node.
-    fn remove_in(
-        &mut self,
-        mut node: NonNull<Node<T>>,
-        height: u32,
-        shift: u32,
-        key: RadixKey,
-    ) -> Option<(T, Up)> {
-        let index = key.index_at(shift);
-        let bit = 1_u64 << index;
-
-        if height == 1 {
-            // SAFETY: `node` is a live node of this tree.
-            let slot = unsafe { node.as_mut() };
-            // SAFETY: `index` is a slot index of `slot`.
-            let value = unsafe { slot.take_value(index) }?;
-            return Some((
-                value,
-                if slot.is_empty() {
-                    Up::Empty
-                } else {
-                    Up::Gained
-                },
-            ));
-        }
-
-        let child = {
-            // SAFETY: `node` is a live node of this tree.
-            let slot = unsafe { node.as_ref() };
-            if slot.used_bm & bit == 0 || slot.tag_bm & bit == 0 {
-                return None;
-            }
-            // SAFETY: `index` names an occupied node slot.
-            unsafe { slot.child_at(index) }
-        };
-        let (value, up) = self.remove_in(
-            child,
-            height - 1,
-            shift.saturating_sub(RADIX_BITS),
-            key,
-        )?;
-        // SAFETY: `node` is a live node of this tree.
-        let slot = unsafe { node.as_mut() };
-        match up {
-            Up::Empty => {
-                // SAFETY: the slot holds the empty child and a node entry
-                // is only a pointer, so the unlink can be dropped.  The
-                // child is freed below.
-                drop(unsafe { slot.take(index) });
-                // SAFETY: the empty child is uniquely reached.
-                unsafe { self.destroy_node(child) };
-                Some((
-                    value,
-                    if slot.is_empty() {
-                        Up::Empty
-                    } else {
-                        Up::Gained
-                    },
-                ))
-            }
-            Up::Gained => {
-                let already = slot.free_bm & bit != 0;
-                slot.set_free(index);
-                Some((value, if already { Up::Settled } else { Up::Gained }))
-            }
-            Up::Settled => Some((value, Up::Settled)),
-        }
-    }
-
-    /// A fresh node from the owner's allocator.
-    ///
-    /// The fields are written in place: a whole-node temporary would
-    /// spend a node's worth of room in this call chain.
-    fn create_node(&self) -> Result<NonNull<Node<T>>, Error> {
-        let block = allocate(&self.alloc, node_layout::<T>(), false)?;
-        // SAFETY: the block is `Node<T>`-sized and -aligned.
-        let node = block.cast::<Node<T>>();
-        // SAFETY: the block is uninitialised room for one node; slot
-        // storage starts uninitialised and only `used_bm` makes a slot
-        // readable.
+impl Node {
+    #[cold]
+    #[inline]
+    fn create<A: Alloc>(
+        alloc: &A,
+        height: u16,
+    ) -> Result<NonNull<Self>, AllocError> {
+        let block = alloc.alloc(Layout::new::<Self>())?;
+        let node = block.cast::<Self>();
+        // SAFETY: `Alloc` supplies unique, aligned storage for a complete node.
+        // Each field is initialized before the node escapes. Zero bytes form
+        // valid integers and null thin pointers in the header and entry array.
         unsafe {
-            let dst = node.as_ptr();
-            (*dst).free_bm = FREE_BM_FULL;
-            (*dst).used_bm = 0;
-            (*dst).tag_bm = 0;
+            let raw = node.as_ptr();
+            raw.cast::<u8>()
+                .write_bytes(0, core::mem::offset_of!(Self, bitmap));
+            (&raw mut (*raw).height).write(height);
+            (&raw mut (*raw).bitmap).write(u64::MAX);
+            (&raw mut (*raw).entries).write_bytes(0, 1);
         }
         Ok(node)
     }
 
-    /// Drops a node's entries and returns its block.
-    ///
     /// # Safety
-    ///
-    /// `node` is a live node this tree owns and nothing else reaches.
-    unsafe fn destroy_node(&mut self, mut node: NonNull<Node<T>>) {
-        {
-            // SAFETY: `node` is live and uniquely reached here.
-            let slots = unsafe { node.as_mut() };
-            let mut children = slots.used_bm & slots.tag_bm;
-            while children != 0 {
-                let index = children.trailing_zeros() as usize;
-                children &= children - 1;
-                // SAFETY: `index` names a set `tag_bm` bit.
-                let bits = unsafe {
-                    slots.slots.get_unchecked(index).assume_init_read()
-                };
-                // SAFETY: `tag_bm` said the slot held a child node.
-                unsafe { self.destroy_node(bits.node) };
-            }
-            // Values without a destructor need not be read.
-            if core::mem::needs_drop::<T>() {
-                let mut values = slots.used_bm & !slots.tag_bm;
-                while values != 0 {
-                    let index = values.trailing_zeros() as usize;
-                    values &= values - 1;
-                    // SAFETY: `index` names a set `used_bm` value bit.
-                    let bits = unsafe {
-                        slots.slots.get_unchecked(index).assume_init_read()
-                    };
-                    // SAFETY: `tag_bm` said the slot held a value.
-                    drop(unsafe { ManuallyDrop::into_inner(bits.value) });
-                }
-            }
-        }
-        // SAFETY: the block came from `create_node` with this layout.
+    /// `node` is a live node from `alloc`, detached from the tree, with no
+    /// outstanding references. Its children have been detached or freed.
+    unsafe fn free<A: Alloc>(alloc: &A, node: *mut Self) {
         unsafe {
-            release(&self.alloc, node.cast(), node_layout::<T>());
+            alloc.free(
+                NonNull::new_unchecked(node.cast()),
+                Layout::new::<Self>(),
+            );
+        };
+    }
+
+    /// # Safety
+    /// `node` is exclusively accessible and live; `index` is below 64 and empty.
+    unsafe fn insert(node: *mut Self, index: u16, entry: *mut ()) {
+        unsafe {
+            debug_assert!((*node).entries[usize::from(index)].is_null());
+            (*node).count += 1;
+            (*node).entries[usize::from(index)] = entry;
         }
     }
 
-    /// Grows the tree until `key` fits.
-    fn grow(&mut self, key: RadixKey) -> Result<(), Error> {
-        let mut new_height = self.root.height().saturating_add(1);
-        while key > RadixKey::max_for_height(new_height) {
-            new_height += 1;
+    /// # Safety
+    /// `node` is exclusively accessible and live; `index` is below 64 and occupied.
+    unsafe fn remove(node: *mut Self, index: u16) {
+        unsafe {
+            debug_assert!(!(*node).entries[usize::from(index)].is_null());
+            (*node).count -= 1;
+            (*node).entries[usize::from(index)] = ptr::null_mut();
         }
+    }
 
-        // The root comes apart so the new levels can be built on top of
-        // it; a failure puts it back.
-        let mut root = match core::mem::replace(&mut self.root, Root::Empty(0))
-        {
-            Root::Empty(_) => {
-                self.root = Root::Empty(new_height);
+    /// # Safety
+    /// `node` and its ancestors are live and exclusively accessible.
+    /// `index` is below 64 and names a newly occupied leaf or full child.
+    unsafe fn clear_bit(mut node: *mut Self, mut index: u16) {
+        unsafe {
+            loop {
+                (*node).bitmap &= !(1_u64 << index);
+                if usize::from((*node).count) != SIZE
+                    || (*node).parent.is_null()
+                {
+                    break;
+                }
+                index = (*node).index;
+                node = (*node).parent;
+            }
+        }
+    }
+
+    /// # Safety
+    /// `node` and its ancestors are live and exclusively accessible.
+    /// `index` is below 64 and names capacity made available by removal.
+    unsafe fn set_bit(mut node: *mut Self, mut index: u16) {
+        unsafe {
+            loop {
+                (*node).bitmap |= 1_u64 << index;
+                if (*node).parent.is_null() {
+                    break;
+                }
+                index = (*node).index;
+                node = (*node).parent;
+                if (*node).bitmap & (1_u64 << index) != 0 {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Owns internal nodes, while leaves remain the caller's responsibility.
+///
+/// Node addresses stay stable until removal, shrinking, clearing or drop.
+pub struct RadixTree<T, A: Alloc> {
+    height: u16,
+    key_alloc: bool,
+    root: *mut (),
+    alloc: A,
+    marker: PhantomData<NonNull<T>>,
+}
+
+impl<T, A: Alloc> RadixTree<T, A> {
+    /// `key_alloc` enables bitmap maintenance and automatic key allocation.
+    #[must_use]
+    pub const fn new(alloc: A, key_alloc: bool) -> Self {
+        Self {
+            height: 0,
+            key_alloc,
+            root: ptr::null_mut(),
+            alloc,
+            marker: PhantomData,
+        }
+    }
+
+    /// Leaves remain owned by the caller, on success and on failure.
+    ///
+    /// # Panics
+    /// The pointer is not four-byte aligned.
+    ///
+    /// # Errors
+    /// [`Error::Busy`] for an occupied key, or [`Error::NoMemory`].
+    pub fn insert(
+        &mut self,
+        key: u64,
+        pointer: NonNull<T>,
+    ) -> Result<(), Error> {
+        self.insert_impl(key, pointer, None)
+    }
+
+    /// The returned slot prevents structural mutation until its borrow ends.
+    ///
+    /// # Panics
+    /// The pointer is not four-byte aligned.
+    ///
+    /// # Errors
+    /// [`Error::Busy`] for an occupied key, or [`Error::NoMemory`].
+    #[inline]
+    pub fn insert_slot(
+        &mut self,
+        key: u64,
+        pointer: NonNull<T>,
+    ) -> Result<Slot<'_, T>, Error> {
+        let mut entry = ptr::null_mut();
+        self.insert_impl(key, pointer, Some(&mut entry))?;
+        // SAFETY: insertion returns an occupied entry in this exclusively
+        // borrowed tree; the borrow keeps its node or root location live.
+        Ok(Slot {
+            entry: unsafe { &mut *entry },
+            marker: PhantomData,
+        })
+    }
+
+    #[inline(never)]
+    fn insert_impl(
+        &mut self,
+        key: u64,
+        pointer: NonNull<T>,
+        slot: Option<&mut *mut *mut ()>,
+    ) -> Result<(), Error> {
+        check_pointer(pointer);
+        // SAFETY: an exclusive tree borrow owns every reachable node; heights
+        // and masked indices select initialized entries. Leaves are never read.
+        unsafe {
+            if key > max_key(self.height) {
+                self.grow(key)?;
+            }
+            if self.height == 0 {
+                if !self.root.is_null() {
+                    return Err(Error::Busy);
+                }
+                self.root = pointer.as_ptr().cast();
+                if let Some(slot) = slot {
+                    *slot = &raw mut self.root;
+                }
                 return Ok(());
             }
-            Root::Value(value) => {
-                let mut node = match self.create_node() {
-                    Ok(node) => node,
-                    Err(error) => {
-                        self.root = Root::Value(value);
-                        return Err(error);
+            let mut node = address(self.root).cast::<Node>();
+            if self.height == 1 && !node.is_null() {
+                let index = usize::from(index_at(key, 0));
+                if !(*node).entries[index].is_null() {
+                    return Err(Error::Busy);
+                }
+                (*node).count += 1;
+                (*node).entries[index] = pointer.as_ptr().cast();
+                if self.key_alloc {
+                    (*node).bitmap &= !(1_u64 << index);
+                }
+                if let Some(slot) = slot {
+                    *slot = &raw mut (*node).entries[index];
+                }
+                return Ok(());
+            }
+            let mut prev = ptr::null_mut::<Node>();
+            let mut index = 0;
+            let mut height = self.height;
+            let mut shift = (height - 1) * RADIX;
+            loop {
+                if node.is_null() {
+                    node = if let Ok(node) =
+                        Node::create(&self.alloc, height - 1)
+                    {
+                        node.as_ptr()
+                    } else {
+                        if prev.is_null() {
+                            self.height = 0;
+                        } else {
+                            self.cleanup(prev);
+                        }
+                        return Err(Error::NoMemory);
+                    };
+                    if prev.is_null() {
+                        self.root = node_entry(node);
+                    } else {
+                        (*node).parent = prev;
+                        (*node).index = index;
+                        Node::insert(prev, index, node_entry(node));
                     }
-                };
-                // SAFETY: the node is fresh and the slot is free.
-                unsafe { node.as_mut().put_value(0, value) };
-                self.root = Root::Node(node, 1);
-                node
+                }
+                prev = node;
+                index = index_at(key, shift);
+                node = address((*prev).entries[usize::from(index)]).cast();
+                shift = shift.wrapping_sub(RADIX);
+                height -= 1;
+                if height == 0 {
+                    break;
+                }
             }
-            Root::Node(node, height) => {
-                self.root = Root::Node(node, height);
-                node
+            if !node.is_null() {
+                return Err(Error::Busy);
             }
-        };
+            Node::insert(prev, index, pointer.as_ptr().cast());
+            if self.key_alloc {
+                Node::clear_bit(prev, index);
+            }
+            if let Some(slot) = slot {
+                *slot = &raw mut (*prev).entries[usize::from(index)];
+            }
+            Ok(())
+        }
+    }
 
-        while new_height > self.root.height() {
-            let mut node = self.create_node()?;
-            // SAFETY: both nodes are live; `root` becomes the child.
-            unsafe {
-                node.as_mut().put_node(0, root);
+    /// Bitmap traversal chooses a free key; propagation quirks can skip holes.
+    ///
+    /// # Panics
+    /// Key allocation is disabled, or the pointer is not four-byte aligned.
+    ///
+    /// # Errors
+    /// [`Error::NoMemory`], or [`Error::Busy`] when allocation wraps to an
+    /// occupied key at the limit of the key space.
+    pub fn insert_alloc(&mut self, pointer: NonNull<T>) -> Result<u64, Error> {
+        self.insert_alloc_impl(pointer, None)
+    }
+
+    /// The slot remains valid for the duration of the exclusive tree borrow.
+    ///
+    /// # Panics
+    /// Key allocation is disabled, or the pointer is not four-byte aligned.
+    ///
+    /// # Errors
+    /// [`Error::NoMemory`] or [`Error::Busy`] at key-space exhaustion.
+    pub fn insert_alloc_slot(
+        &mut self,
+        pointer: NonNull<T>,
+    ) -> Result<(u64, Slot<'_, T>), Error> {
+        let mut entry = ptr::null_mut();
+        let key = self.insert_alloc_impl(pointer, Some(&mut entry))?;
+        // SAFETY: successful slot insertion returns an occupied entry owned
+        // by this exclusively borrowed tree; the borrow keeps it live.
+        Ok((
+            key,
+            Slot {
+                entry: unsafe { &mut *entry },
+                marker: PhantomData,
+            },
+        ))
+    }
+
+    #[expect(
+        clippy::inline_always,
+        reason = "Inlining removes the key Result temporary and unused slot output; measured faster on the host."
+    )]
+    #[inline(always)]
+    fn insert_alloc_impl(
+        &mut self,
+        pointer: NonNull<T>,
+        slot: Option<&mut *mut *mut ()>,
+    ) -> Result<u64, Error> {
+        assert!(self.key_alloc, "key allocation disabled");
+        check_pointer(pointer);
+        // SAFETY: the exclusive borrow owns all nodes and the bitmap selects
+        // an empty leaf or child. New children are attached before descent.
+        unsafe {
+            let mut height = self.height;
+            if height == 0 {
+                if self.root.is_null() {
+                    self.root = pointer.as_ptr().cast();
+                    if let Some(slot) = slot {
+                        *slot = &raw mut self.root;
+                    }
+                    return Ok(0);
+                }
+                self.grow(1)?;
+                return self.insert_slot(1, pointer).map(|entry| {
+                    if let Some(slot) = slot {
+                        *slot = ptr::from_mut(entry.entry);
+                    }
+                    1
+                });
             }
-            self.root = Root::Node(node, self.root.height() + 1);
-            root = node;
+            let mut node = address(self.root).cast::<Node>();
+            if height == 1 && (*node).bitmap != 0 {
+                let index = (*node).bitmap.trailing_zeros().to_le_bytes()[0];
+                (*node).count += 1;
+                (*node).entries[usize::from(index)] = pointer.as_ptr().cast();
+                (*node).bitmap &= !(1_u64 << index);
+                if let Some(slot) = slot {
+                    *slot = &raw mut (*node).entries[usize::from(index)];
+                }
+                return Ok(u64::from(index));
+            }
+            let mut prev = ptr::null_mut::<Node>();
+            let mut index = 0;
+            let mut key = 0;
+            let mut shift = (height - 1) * RADIX;
+            loop {
+                if node.is_null() {
+                    node = if let Ok(node) =
+                        Node::create(&self.alloc, height - 1)
+                    {
+                        node.as_ptr()
+                    } else {
+                        self.cleanup(prev);
+                        return Err(Error::NoMemory);
+                    };
+                    (*node).parent = prev;
+                    (*node).index = index;
+                    Node::insert(prev, index, node_entry(node));
+                }
+                prev = node;
+                if (*node).bitmap == 0 {
+                    key = max_key(height).wrapping_add(1);
+                    if key > max_key(self.height) {
+                        self.grow(key)?;
+                    }
+                    return self.insert_slot(key, pointer).map(|entry| {
+                        if let Some(slot) = slot {
+                            *slot = ptr::from_mut(entry.entry);
+                        }
+                        key
+                    });
+                }
+                index = u16::from(
+                    (*node).bitmap.trailing_zeros().to_le_bytes()[0],
+                );
+                height -= 1;
+                if height == 0 {
+                    key |= u64::from(index);
+                    break;
+                }
+                key |= u64::from(index) << shift;
+                node = address((*node).entries[usize::from(index)]).cast();
+                shift -= RADIX;
+            }
+            Node::insert(prev, index, pointer.as_ptr().cast());
+            Node::clear_bit(prev, index);
+            if let Some(slot) = slot {
+                *slot = &raw mut (*prev).entries[usize::from(index)];
+            }
+            Ok(key)
+        }
+    }
+
+    /// Returns a non-owning pointer, without accessing its pointee.
+    #[must_use]
+    pub fn get(&self, key: u64) -> Option<NonNull<T>> {
+        NonNull::new(self.lookup(key, false)?.cast())
+    }
+
+    /// An exclusive borrow keeps the slot live until the returned value expires.
+    #[must_use]
+    pub fn get_slot(&mut self, key: u64) -> Option<Slot<'_, T>> {
+        let entry = self.lookup(key, true)?.cast::<*mut ()>();
+        if self.height == 0 {
+            return Some(Slot {
+                entry: &mut self.root,
+                marker: PhantomData,
+            });
+        }
+        // SAFETY: lookup selects an occupied leaf; the exclusive tree borrow
+        // prevents every other access to it for the returned slot's lifetime.
+        Some(Slot {
+            entry: unsafe { &mut *entry },
+            marker: PhantomData,
+        })
+    }
+
+    fn lookup(&self, key: u64, slot: bool) -> Option<*mut ()> {
+        // SAFETY: reachable nodes are live during the tree borrow; each node
+        // has an immutable height and each index selects an initialized entry.
+        unsafe {
+            // The shared borrow prevents resizing throughout this lookup.
+            let mut height = self.height;
+            if height == 0 {
+                return (key == 0 && !self.root.is_null()).then_some(
+                    if slot {
+                        ptr::from_ref(&self.root).cast_mut().cast()
+                    } else {
+                        self.root
+                    },
+                );
+            }
+            if key > max_key(height) {
+                return None;
+            }
+            let mut node = address(self.root).cast::<Node>();
+            let mut shift = (height - 1) * RADIX;
+            loop {
+                if node.is_null() {
+                    return None;
+                }
+                let index = index_at(key, shift);
+                let location =
+                    ptr::addr_of_mut!((*node).entries[usize::from(index)]);
+                let entry = *location;
+                height -= 1;
+                if height == 0 {
+                    return (!entry.is_null()).then_some(if slot {
+                        location.cast()
+                    } else {
+                        entry
+                    });
+                }
+                node = address(entry).cast();
+                shift -= RADIX;
+            }
+        }
+    }
+
+    /// Frees empty internal nodes and shrinks through a sole child at index zero.
+    /// Leaves remain the caller's responsibility.
+    #[expect(
+        clippy::inline_always,
+        reason = "Inlining retains tree state across repeated removal; measured faster on the host."
+    )]
+    #[inline(always)]
+    pub fn remove(&mut self, key: u64) -> Option<NonNull<T>> {
+        if key > max_key(self.height) {
+            return None;
+        }
+        if self.height == 0 {
+            return NonNull::new(
+                core::mem::replace(&mut self.root, ptr::null_mut()).cast(),
+            );
+        }
+        // SAFETY: the exclusive tree borrow owns all nodes on the descent and
+        // cleanup paths. The leaf is copied before its node can be freed.
+        unsafe {
+            let mut node = address(self.root).cast::<Node>();
+            let mut height = self.height;
+            let mut shift = (height - 1) * RADIX;
+            loop {
+                if node.is_null() {
+                    return None;
+                }
+                let index = index_at(key, shift);
+                let entry = address((*node).entries[usize::from(index)]);
+                height -= 1;
+                if height == 0 {
+                    let pointer = NonNull::new(entry.cast())?;
+                    if self.key_alloc {
+                        Node::set_bit(node, index);
+                    }
+                    Node::remove(node, index);
+                    self.cleanup(node);
+                    return Some(pointer);
+                }
+                node = entry.cast();
+                shift -= RADIX;
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self, key: u64) -> Result<(), Error> {
+        // SAFETY: exclusive access owns the live root and every newly allocated
+        // node. Each new root adopts the previous root before becoming visible.
+        unsafe {
+            let mut new_height = self.height + 1;
+            while key > max_key(new_height) {
+                new_height += 1;
+            }
+            if self.root.is_null() {
+                self.height = new_height;
+            } else {
+                while self.height < new_height {
+                    let node = if let Ok(node) =
+                        Node::create(&self.alloc, self.height)
+                    {
+                        node.as_ptr()
+                    } else {
+                        self.shrink();
+                        return Err(Error::NoMemory);
+                    };
+                    if self.height == 0 {
+                        if self.key_alloc {
+                            (*node).bitmap &= !1;
+                        }
+                    } else {
+                        let root = address(self.root).cast::<Node>();
+                        (*root).parent = node;
+                        (*root).index = 0;
+                        if self.key_alloc && (*root).bitmap == 0 {
+                            (*node).bitmap &= !1;
+                        }
+                    }
+                    Node::insert(node, 0, self.root);
+                    self.height += 1;
+                    self.root = node_entry(node);
+                }
+            }
         }
         Ok(())
     }
 
-    /// Collapses a root that holds only one entry.
+    #[expect(
+        clippy::inline_always,
+        reason = "Inlining lets cleanup retain node and height state in registers."
+    )]
+    #[inline(always)]
     fn shrink(&mut self) {
-        loop {
-            let Root::Node(node, height) = self.root else {
-                return;
-            };
-            // SAFETY: the root is a live node.
-            let root = unsafe { node.as_ref() };
-            // Exactly one occupied slot names the entry to collapse.
-            if root.used_bm == 0 || root.used_bm & (root.used_bm - 1) != 0 {
-                return;
+        // SAFETY: an exclusive tree borrow owns the root. A sole child at
+        // index zero can replace it; no slots or iterators are outstanding.
+        unsafe {
+            while self.height > 0 {
+                let node = address(self.root).cast::<Node>();
+                if (*node).count != 1 {
+                    break;
+                }
+                let entry = (*node).entries[0];
+                if entry.is_null() {
+                    break;
+                }
+                self.height -= 1;
+                if self.height > 0 {
+                    (*address(entry).cast::<Node>()).parent = ptr::null_mut();
+                }
+                self.root = entry;
+                Node::free(&self.alloc, node);
             }
-            let index = root.used_bm.trailing_zeros() as usize;
-            if index != 0 {
-                // A level above a nonzero slot carries key bits: dropping
-                // it would move the entry's key.
-                return;
+        }
+    }
+
+    /// # Safety
+    /// `node` belongs to this exclusively borrowed tree and is live. Its
+    /// ancestors are live and linked; no external references to nodes exist.
+    #[expect(
+        clippy::inline_always,
+        reason = "Inlining removes a call from each removal and exposes the unchanged key-allocation flag."
+    )]
+    #[inline(always)]
+    unsafe fn cleanup(&mut self, mut node: *mut Node) {
+        unsafe {
+            loop {
+                if (*node).count != 0 {
+                    if (*node).parent.is_null() {
+                        self.shrink();
+                    }
+                    break;
+                }
+                if (*node).parent.is_null() {
+                    self.height = 0;
+                    self.root = ptr::null_mut();
+                    Node::free(&self.alloc, node);
+                    break;
+                }
+                let prev = node;
+                node = (*node).parent;
+                (*prev).parent = ptr::null_mut();
+                Node::remove(node, (*prev).index);
+                Node::free(&self.alloc, prev);
             }
-            let mut node = node;
-            // SAFETY: the single occupied slot holds the entry.
-            let entry = unsafe { node.as_mut().take(index) };
-            // SAFETY: the node is now empty and uniquely reached.
-            unsafe { self.destroy_node(node) };
-            // A child node takes the root's place one level down; a
-            // value sits only in the bottom level and ends the collapse.
-            // A node in the bottom level is a broken tree: it keeps its
-            // level, so the descent stays in range.
-            self.root = match entry {
-                Entry::Value(value) => Root::Value(value),
-                Entry::Node(child) => Root::Node(child, height.max(2) - 1),
-            };
+        }
+    }
+
+    /// Visits pointers in increasing key order without accessing pointees.
+    #[must_use]
+    pub const fn iter(&self) -> Iter<'_, T, A> {
+        Iter {
+            tree: self,
+            node: ptr::null_mut(),
+            key: u64::MAX,
+        }
+    }
+
+    /// Frees nodes without touching or freeing any leaf, and keeps the
+    /// key-allocation setting for reuse.
+    pub fn clear(&mut self) {
+        if self.height == 0 {
+            self.root = ptr::null_mut();
+            return;
+        }
+        while self.height != 0 {
+            // SAFETY: every reachable node is live and nonempty. Descent
+            // selects the first occupied child until reaching a bottom node.
+            // Exclusive access permits detaching it; cleanup frees only ancestors.
+            unsafe {
+                let mut node = address(self.root).cast::<Node>();
+                let mut height = self.height;
+                while height > 1 {
+                    let mut index = 0;
+                    while (*node).entries[index].is_null() {
+                        index += 1;
+                    }
+                    node = address((*node).entries[index]).cast();
+                    height -= 1;
+                }
+                let parent = (*node).parent;
+                if parent.is_null() {
+                    self.height = 0;
+                    self.root = ptr::null_mut();
+                } else {
+                    if self.key_alloc {
+                        Node::set_bit(parent, (*node).index);
+                    }
+                    Node::remove(parent, (*node).index);
+                    self.cleanup(parent);
+                    (*node).parent = ptr::null_mut();
+                }
+                Node::free(&self.alloc, node);
+            }
         }
     }
 }
@@ -1050,138 +745,164 @@ impl<T, A: Alloc> Drop for RadixTree<T, A> {
     }
 }
 
-impl<T: fmt::Debug, A: Alloc> fmt::Debug for RadixTree<T, A> {
+impl<T, A: Alloc> fmt::Debug for RadixTree<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
-/// A forward walk of a [`RadixTree`] in key order.
-pub struct Iter<'a, T> {
-    stack: [IterFrame<T>; MAX_HEIGHT as usize],
-    depth: usize,
-    pending: Option<(RadixKey, &'a T)>,
-    _marker: PhantomData<&'a T>,
+/// A replacement location tied to an exclusive tree borrow.
+pub struct Slot<'a, T> {
+    entry: &'a mut *mut (),
+    marker: PhantomData<NonNull<T>>,
 }
 
-struct IterFrame<T> {
-    node: NonNull<Node<T>>,
-    /// The key of slot zero at this level.
-    base: RadixKey,
-    /// Key distance between adjacent slots at this level.
-    step: u32,
-    /// The occupied slots the walk has not reached yet.
-    left: u64,
-}
-
-impl<'a, T> Iter<'a, T> {
-    fn new<A: Alloc>(tree: &'a RadixTree<T, A>) -> Self {
-        let mut iter = Self {
-            stack: core::array::from_fn(|_| IterFrame {
-                node: NonNull::dangling(),
-                base: RadixKey::ZERO,
-                step: 0,
-                left: 0,
-            }),
-            depth: 0,
-            pending: None,
-            _marker: PhantomData,
-        };
-        match &tree.root {
-            Root::Empty(_) => {}
-            Root::Value(value) => {
-                iter.pending = Some((RadixKey::ZERO, value));
-            }
-            Root::Node(node, height) => {
-                let shift = (height - 1) * RADIX_BITS;
-                // SAFETY: the root is a live node for the life of the
-                // iterator.
-                let left = unsafe { node.as_ref() }.used_bm;
-                iter.push(*node, RadixKey::ZERO, 1_u32 << shift, left);
-            }
-        }
-        iter
+impl<T> Slot<'_, T> {
+    /// Returns the occupied pointer without accessing its pointee.
+    #[must_use]
+    pub const fn load(&self) -> NonNull<T> {
+        // SAFETY: only occupied slots can be constructed and replacements
+        // cannot store a null pointer.
+        unsafe { NonNull::new_unchecked((*self.entry).cast()) }
     }
 
-    /// Records `node` as the level to scan next: `base` is slot 0's key
-    /// and `left` the slots still to visit.
-    const fn push(
-        &mut self,
-        node: NonNull<Node<T>>,
-        base: RadixKey,
-        step: u32,
-        left: u64,
-    ) {
-        self.stack[self.depth] = IterFrame {
-            node,
-            base,
-            step,
-            left,
-        };
-        self.depth += 1;
+    /// Returns the old pointer; ownership of both pointees stays with the caller.
+    ///
+    /// # Panics
+    /// The replacement pointer is not four-byte aligned.
+    pub fn replace(&mut self, pointer: NonNull<T>) -> NonNull<T> {
+        check_pointer(pointer);
+        let old = self.load();
+        *self.entry = pointer.as_ptr().cast();
+        old
     }
 }
 
-impl<'a, T> Iterator for Iter<'a, T> {
-    type Item = (RadixKey, &'a T);
+impl<T> fmt::Debug for Slot<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Slot").field(&self.load()).finish()
+    }
+}
 
+/// Holds a shared tree borrow, preventing mutation during traversal.
+pub struct Iter<'a, T, A: Alloc> {
+    tree: &'a RadixTree<T, A>,
+    node: *mut Node,
+    key: u64,
+}
+
+impl<T, A: Alloc> Iterator for Iter<'_, T, A> {
+    type Item = (u64, NonNull<T>);
+
+    #[expect(
+        clippy::inline_always,
+        reason = "Inlining eliminates iterator state loads in the per-entry loop; measured faster on the host."
+    )]
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(item) = self.pending.take() {
-            return Some(item);
-        }
-        loop {
-            if self.depth == 0 {
+        // SAFETY: the shared tree borrow keeps all traversed nodes live and
+        // immutable. The saved node is a bottom node. Leaves are never read.
+        unsafe {
+            if !self.node.is_null() {
+                let mut index = index_at(self.key.wrapping_add(1), 0);
+                if index != 0 {
+                    let orig = index;
+                    let mut pointer = ptr::null_mut();
+                    while usize::from(index) < SIZE {
+                        pointer =
+                            address((*self.node).entries[usize::from(index)]);
+                        if !pointer.is_null() {
+                            break;
+                        }
+                        index += 1;
+                    }
+                    if let Some(pointer) = NonNull::new(pointer.cast()) {
+                        self.key += u64::from(index - orig) + 1;
+                        return Some((self.key, pointer));
+                    }
+                }
+            }
+            let entry = self.tree.root;
+            if entry.is_null() {
                 return None;
             }
-            let at = self.depth - 1;
-            let frame = &mut self.stack[at];
-            let left = frame.left;
-            if left == 0 {
-                self.depth -= 1;
-                continue;
+            if !is_node(entry) {
+                if self.key != u64::MAX {
+                    return None;
+                }
+                self.key = 0;
+                return NonNull::new(address(entry).cast())
+                    .map(|pointer| (0, pointer));
             }
-            frame.left &= left - 1;
-            let index = left.trailing_zeros() as usize;
-            let step = frame.step;
-            let base = frame.base.into_raw();
-            let node = frame.node;
-            // Slot `index` sits `step` keys past slot zero; a leaf has
-            // one key per slot.
-            let key = RadixKey::from_raw(base.wrapping_add(if step == 1 {
-                index as u32
-            } else {
-                step.wrapping_mul(index as u32)
-            }));
-            // SAFETY: the frame names a live node the tree still owns.
-            let node_ref = unsafe { node.as_ref() };
-            // SAFETY: `index` names a set `used_bm` bit.
-            let bits = unsafe {
-                node_ref.slots.get_unchecked(index).assume_init_ref()
-            };
-            if node_ref.tag_bm & (1_u64 << index) != 0 {
-                // SAFETY: `tag_bm` says the slot holds a child node,
-                // which is live while the tree is.
-                let child = unsafe { bits.node };
-                self.push(
-                    child,
-                    key,
-                    step >> RADIX_BITS,
-                    unsafe { child.as_ref() }.used_bm,
-                );
-                continue;
+            let mut key = self.key.wrapping_add(1);
+            if key == 0 && !self.node.is_null() {
+                return None;
             }
-            // SAFETY: the slot holds a value; the tree outlives the
-            // iterator, and `ManuallyDrop` is transparent over `T`.
-            let value = unsafe { &*ptr::from_ref(&bits.value).cast::<T>() };
-            return Some((key, value));
+            let root = address(entry).cast::<Node>();
+            'restart: loop {
+                let mut node = root;
+                let mut height = (*root).height + 1;
+                if key > max_key(height) {
+                    return None;
+                }
+                let mut shift = (height - 1) * RADIX;
+                loop {
+                    let prev = node;
+                    let mut index = index_at(key, shift);
+                    let orig = index;
+                    let mut pointer = ptr::null_mut();
+                    while usize::from(index) < SIZE {
+                        pointer = address((*node).entries[usize::from(index)]);
+                        if !pointer.is_null() {
+                            break;
+                        }
+                        index += 1;
+                    }
+                    if pointer.is_null() {
+                        shift += RADIX;
+                        // The subtree ends at the top of the key space,
+                        // so no key remains to seek.
+                        if shift >= 64 {
+                            return None;
+                        }
+                        key = ((key >> shift) + 1) << shift;
+                        if key == 0 {
+                            return None;
+                        }
+                        continue 'restart;
+                    }
+                    if orig != index {
+                        key = ((key >> shift) + u64::from(index - orig))
+                            << shift;
+                    }
+                    height -= 1;
+                    if height == 0 {
+                        self.node = prev;
+                        self.key = key;
+                        return NonNull::new(pointer.cast())
+                            .map(|pointer| (key, pointer));
+                    }
+                    node = pointer.cast();
+                    shift -= RADIX;
+                }
+            }
         }
     }
 }
 
-impl<T> fmt::Debug for Iter<'_, T> {
+impl<'a, T, A: Alloc> IntoIterator for &'a RadixTree<T, A> {
+    type Item = (u64, NonNull<T>);
+    type IntoIter = Iter<'a, T, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T, A: Alloc> fmt::Debug for Iter<'_, T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Iter")
-            .field("depth", &self.depth)
+            .field("key", &self.key)
             .finish_non_exhaustive()
     }
 }
@@ -1189,748 +910,401 @@ impl<T> fmt::Debug for Iter<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{Heap, Tracked};
-    use core::cell::Cell;
+    use crate::test_support::Heap;
+    use std::collections::BTreeMap;
     use std::vec::Vec;
 
-    fn key(bits: u32) -> RadixKey {
-        RadixKey::from_raw(bits)
+    fn leaf(value: usize) -> NonNull<u32> {
+        NonNull::without_provenance(
+            core::num::NonZeroUsize::new(value * 4).unwrap(),
+        )
     }
 
     #[test]
-    fn empty_tree_holds_nothing() {
+    fn empty_and_direct_root_slots() {
         let heap = Heap::new();
-        let mut tree: RadixTree<u32, &Heap> = RadixTree::new(&heap);
-        assert!(tree.is_empty());
-        assert!(tree.get(key(0)).is_none());
-        assert!(tree.remove(key(0)).is_none());
-        assert_eq!(tree.iter().count(), 0);
+        let mut tree = RadixTree::new(&heap, true);
+        assert!(tree.get(0).is_none());
+        assert!(tree.get_slot(0).is_none());
+        assert!(tree.remove(0).is_none());
+        assert!(tree.iter().next().is_none());
+        tree.clear();
+        let mut slot = tree.insert_slot(0, leaf(1)).unwrap();
+        assert_eq!(slot.load(), leaf(1));
+        assert_eq!(slot.replace(leaf(2)), leaf(1));
+        assert_eq!(tree.insert(0, leaf(3)), Err(Error::Busy));
+        assert_eq!(tree.insert_slot(0, leaf(3)).err(), Some(Error::Busy));
+        assert_eq!(tree.get(0), Some(leaf(2)));
+        assert_eq!(tree.get_slot(0).unwrap().load(), leaf(2));
+        assert!(tree.get(1).is_none());
+        assert!(tree.remove(1).is_none());
+        let mut iter = tree.iter();
+        assert_eq!(iter.next(), Some((0, leaf(2))));
+        assert_eq!(iter.next(), None);
+        assert_eq!(tree.remove(0), Some(leaf(2)));
+        assert_eq!(heap.calls(), 0);
+        let (key, mut slot) = tree.insert_alloc_slot(leaf(3)).unwrap();
+        assert_eq!(key, 0);
+        assert_eq!(slot.replace(leaf(4)), leaf(3));
+        tree.clear();
+        assert_eq!(tree.insert_alloc(leaf(5)), Ok(0));
+    }
+
+    #[test]
+    fn sparse_keys_slots_and_shrinking() {
+        let heap = Heap::new();
+        let mut tree = RadixTree::new(&heap, true);
+        let keys = [0, 1, 63, 64, 65, 4095, 4096, 1 << 30, 1 << 60, u64::MAX];
+        for (i, key) in keys.into_iter().enumerate() {
+            tree.insert(key, leaf(i + 1)).unwrap();
+            assert_eq!(tree.insert(key, leaf(100)), Err(Error::Busy));
+        }
+        assert_eq!(tree.height, 11);
+        assert_eq!(
+            (&tree).into_iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            keys
+        );
+        for (i, key) in keys.into_iter().enumerate() {
+            assert_eq!(tree.get(key), Some(leaf(i + 1)));
+            let mut slot = tree.get_slot(key).unwrap();
+            assert_eq!(slot.load(), leaf(i + 1));
+            assert_eq!(slot.replace(leaf(i + 100)), leaf(i + 1));
+        }
+        for key in [2, 66, 128, 1 << 24, 1 << 61] {
+            assert!(tree.get(key).is_none());
+            assert!(tree.get_slot(key).is_none());
+            assert!(tree.remove(key).is_none());
+        }
+        for (i, key) in keys.into_iter().enumerate().rev() {
+            assert_eq!(tree.remove(key), Some(leaf(i + 100)));
+        }
+        assert_eq!(tree.height, 0);
         assert_eq!(heap.live(), 0);
     }
 
     #[test]
-    fn height_zero_holds_one_value() {
+    fn sequential_allocation_reuses_holes_and_grows() {
         let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 42).unwrap();
-        assert!(!tree.is_empty());
-        assert_eq!(tree.get(key(0)), Some(&42));
-        assert!(tree.get(key(1)).is_none());
-        assert_eq!(tree.iter().collect::<Vec<_>>(), vec![(key(0), &42)]);
-        assert_eq!(tree.remove(key(0)), Some(42));
-        assert!(tree.is_empty());
+        let mut tree = RadixTree::new(&heap, true);
+        for key in 0..=64 {
+            assert_eq!(tree.insert_alloc(leaf(1)), Ok(key));
+        }
+        tree.clear();
+        for key in 0..5000 {
+            let allocated = if key <= 65 || key % 2 == 0 {
+                let (allocated, mut slot) =
+                    tree.insert_alloc_slot(leaf(1)).unwrap();
+                assert_eq!(slot.load(), leaf(1));
+                assert_eq!(slot.replace(leaf(2)), leaf(1));
+                assert_eq!(slot.replace(leaf(1)), leaf(2));
+                allocated
+            } else {
+                tree.insert_alloc(leaf(1)).unwrap()
+            };
+            assert_eq!(allocated, key);
+        }
+        for key in [0, 63, 64, 4095, 4096, 4999] {
+            assert_eq!(tree.remove(key), Some(leaf(1)));
+        }
+        for key in [0, 63, 4096, 4999, 5000, 5001] {
+            assert_eq!(tree.insert_alloc(leaf(2)), Ok(key));
+        }
+        assert!(tree.get(64).is_none());
+        assert!(tree.get(4095).is_none());
+        assert_eq!(tree.insert_alloc(leaf(3)), Ok(5002));
+        tree.clear();
         assert_eq!(heap.live(), 0);
+        assert_eq!(tree.insert_alloc(leaf(1)), Ok(0));
     }
 
     #[test]
-    fn insert_duplicate_leaves_the_old_value() {
+    fn preserves_bitmap_propagation_that_skips_free_keys() {
         let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 1).unwrap();
-        assert_eq!(tree.insert(key(0), 2), Err(Error::Exists));
-        assert_eq!(tree.get(key(0)), Some(&1));
-        assert_eq!(heap.live(), 0);
-    }
-
-    #[test]
-    fn insert_alloc_fills_from_zero() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..100_u32 {
-            let (k, v) = tree.insert_alloc(i).unwrap();
-            assert_eq!(k, key(i));
-            assert_eq!(*v, i);
+        let mut tree = RadixTree::new(&heap, true);
+        for key in (0..=4096).step_by(64) {
+            tree.insert(key, leaf(1)).unwrap();
         }
-        assert_eq!(tree.iter().count(), 100);
-    }
-
-    #[test]
-    fn insert_alloc_reuses_a_freed_key() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..5_u32 {
-            let _ = tree.insert_alloc(i).unwrap();
+        for key in 1..64 {
+            tree.insert(key, leaf(1)).unwrap();
         }
-        assert_eq!(tree.remove(key(1)), Some(1));
-        assert_eq!(tree.remove(key(3)), Some(3));
-        assert_eq!(tree.insert_alloc(50).unwrap().0, key(1));
-        assert_eq!(tree.insert_alloc(51).unwrap().0, key(3));
-        assert_eq!(tree.insert_alloc(52).unwrap().0, key(5));
+        assert!(tree.get(65).is_none());
+        assert_eq!(tree.insert_alloc(leaf(2)), Ok(4097));
+        assert_eq!(tree.remove(1), Some(leaf(1)));
+        assert_eq!(tree.insert_alloc(leaf(3)), Ok(1));
     }
 
     #[test]
-    fn get_on_a_tall_tree_without_a_root_is_a_miss() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.root = Root::Empty(2);
-        assert!(tree.get(key(0)).is_none());
-        assert!(tree.get_mut(key(0)).is_none());
-        assert!(tree.remove(key(0)).is_none());
-    }
-
-    #[test]
-    fn get_mut_and_replace() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(7), 1).unwrap();
-        assert!(tree.get_mut(key(8)).is_none());
-        *tree.get_mut(key(7)).unwrap() += 1;
-        assert_eq!(tree.replace(key(7), 9), Ok(Some(2)));
-        assert_eq!(tree.get(key(7)), Some(&9));
-        assert_eq!(tree.replace(key(8), 3), Ok(None));
-        assert_eq!(tree.get(key(8)), Some(&3));
-    }
-
-    #[test]
-    fn replace_fills_a_free_key() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        assert_eq!(tree.replace(key(0), 1), Ok(None));
-        assert_eq!(tree.replace(key(0), 2), Ok(Some(1)));
-        assert_eq!(tree.get(key(0)), Some(&2));
-    }
-
-    #[test]
-    fn iter_walks_in_key_order() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..300_u32 {
-            tree.insert(key(i * 3), i).unwrap();
-        }
-        let keys: Vec<u32> = tree.iter().map(|(k, _)| k.into_raw()).collect();
-        assert_eq!(keys, (0..300_u32).map(|i| i * 3).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn iter_skips_a_trailing_gap_in_a_node() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..64_u32 {
-            tree.insert(key(i), i).unwrap();
-        }
-        assert_eq!(tree.remove(key(63)), Some(63));
-        let keys: Vec<u32> = tree.iter().map(|(k, _)| k.into_raw()).collect();
-        assert_eq!(keys, (0..63).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn iter_walks_a_sparse_key_order() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for bits in [10_u32, 0, 3, 100_000, 64, 63, 65] {
-            tree.insert(key(bits), bits).unwrap();
-        }
-        let keys: Vec<u32> = tree.iter().map(|(k, _)| k.into_raw()).collect();
-        assert_eq!(keys, vec![0, 3, 10, 63, 64, 65, 100_000]);
-    }
-
-    #[test]
-    fn remove_frees_empty_nodes() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..200_u32 {
-            let _ = tree.insert_alloc(i).unwrap();
-        }
-        assert!(heap.live() > 0);
-        while let Some((k, _)) = tree.iter().next() {
-            let _ = tree.remove(k).unwrap();
-        }
-        assert!(tree.is_empty());
-        assert_eq!(heap.live(), 0);
-    }
-
-    #[test]
-    fn clear_and_drop_free_everything() {
-        let heap = Heap::new();
-        let drops = Cell::new(0);
-        {
-            let mut tree = RadixTree::<Tracked<'_>, &Heap>::new(&heap);
-            for i in 0..50_u32 {
-                tree.insert(key(i * 3), Tracked::new(&drops)).unwrap();
+    fn failure_at_every_node_creation_preserves_existing_entries() {
+        for existing in [None, Some(0), Some(64), Some(4096)] {
+            for fail in 1..=24 {
+                let heap = Heap::new();
+                let mut tree = RadixTree::new(&heap, true);
+                if let Some(key) = existing {
+                    tree.insert(key, leaf(1)).unwrap();
+                }
+                heap.fail_from_now(fail - 1);
+                let result = tree.insert(u64::MAX, leaf(2));
+                if result.is_err() {
+                    assert_eq!(result, Err(Error::NoMemory));
+                }
+                if let Some(key) = existing {
+                    assert_eq!(tree.get(key), Some(leaf(1)));
+                }
+                assert_eq!(tree.get(u64::MAX), result.ok().map(|()| leaf(2)));
+                heap.stop_failing();
+                assert_eq!(
+                    tree.insert(u64::MAX, leaf(2)),
+                    if result.is_ok() {
+                        Err(Error::Busy)
+                    } else {
+                        Ok(())
+                    }
+                );
+                tree.clear();
+                assert_eq!(heap.live(), 0);
             }
-            assert!(heap.live() > 0);
+        }
+    }
+
+    #[test]
+    fn allocation_failure_cleans_partial_descent() {
+        for fail in 1..=3 {
+            let heap = Heap::new();
+            let mut tree = RadixTree::new(&heap, true);
+            tree.insert(1 << 24, leaf(1)).unwrap();
+            heap.fail_from_now(fail - 1);
+            let result = if fail == 1 {
+                tree.insert_alloc_slot(leaf(2)).map(|(key, _)| key)
+            } else {
+                tree.insert_alloc(leaf(2))
+            };
+            assert_eq!(result, Err(Error::NoMemory));
+            assert_eq!(tree.get(1 << 24), Some(leaf(1)));
+            assert_eq!(tree.iter().count(), 1);
+            heap.stop_failing();
+            assert_eq!(tree.insert_alloc(leaf(2)), Ok(0));
             tree.clear();
-            assert!(tree.is_empty());
             assert_eq!(heap.live(), 0);
-            assert_eq!(drops.get(), 50);
-            for i in 0..10_u32 {
-                tree.insert(key(i), Tracked::new(&drops)).unwrap();
+        }
+    }
+
+    #[test]
+    fn automatic_growth_failure_preserves_a_full_root() {
+        for occupied in [1, 64] {
+            for with_slot in [false, true] {
+                let heap = Heap::new();
+                let mut tree = RadixTree::new(&heap, true);
+                for key in 0..occupied {
+                    assert_eq!(tree.insert_alloc(leaf(1)), Ok(key));
+                }
+                let live = heap.live();
+                heap.fail_from_now(0);
+                let result = if with_slot {
+                    tree.insert_alloc_slot(leaf(2)).map(|(key, _)| key)
+                } else {
+                    tree.insert_alloc(leaf(2))
+                };
+                assert_eq!(result, Err(Error::NoMemory));
+                assert_eq!(heap.live(), live);
+                assert_eq!(
+                    tree.iter().count(),
+                    usize::try_from(occupied).unwrap()
+                );
+                for key in 0..occupied {
+                    assert_eq!(tree.get(key), Some(leaf(1)));
+                }
+                heap.stop_failing();
+                assert_eq!(tree.insert_alloc(leaf(2)), Ok(occupied));
+                tree.clear();
+                assert_eq!(heap.live(), 0);
             }
         }
-        assert_eq!(heap.live(), 0);
-        assert_eq!(drops.get(), 60);
     }
 
     #[test]
-    fn grow_and_shrink_across_heights() {
+    fn exhausted_key_allocation_wraps_to_an_occupied_key() {
         let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        tree.insert(key(63), 63).unwrap();
-        tree.insert(key(64), 64).unwrap();
-        tree.insert(key(1 << 12), 1).unwrap();
-        assert_eq!(tree.iter().count(), 4);
-        assert_eq!(tree.remove(key(1 << 12)), Some(1));
-        assert_eq!(tree.remove(key(64)), Some(64));
-        assert_eq!(tree.remove(key(63)), Some(63));
-        assert_eq!(tree.get(key(0)), Some(&0));
-        assert_eq!(heap.live(), 0);
-    }
-
-    /// The last entry of a tall tree keeps its key: a level above a
-    /// nonzero slot is part of the key, so it stays.
-    #[test]
-    fn removing_a_neighbour_keeps_the_other_key() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        tree.insert(key(1 << 12), 1).unwrap();
-        assert_eq!(tree.remove(key(0)), Some(0));
-        assert!(tree.get(key(0)).is_none());
-        assert_eq!(tree.get(key(1 << 12)), Some(&1));
-        assert_eq!(tree.iter().collect::<Vec<_>>(), vec![(key(1 << 12), &1)]);
+        let mut tree = RadixTree::new(&heap, true);
+        tree.insert(0, leaf(1)).unwrap();
+        tree.insert(u64::MAX, leaf(2)).unwrap();
+        // Represent exhaustion without allocating the entire 64-bit key space.
+        // SAFETY: the exclusive tree borrow owns this live internal root.
+        unsafe { (*address(tree.root).cast::<Node>()).bitmap = 0 };
+        assert_eq!(tree.insert_alloc(leaf(3)), Err(Error::Busy));
+        assert_eq!(tree.insert_alloc_slot(leaf(3)).err(), Some(Error::Busy));
+        assert_eq!(tree.get(0), Some(leaf(1)));
+        assert_eq!(tree.get(u64::MAX), Some(leaf(2)));
         tree.clear();
         assert_eq!(heap.live(), 0);
     }
 
     #[test]
-    fn insert_past_the_end_of_a_height() {
+    fn clear_and_drop_with_bitmap_maintenance_disabled() {
         let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        tree.insert(key(1 << 6), 1).unwrap();
-        tree.insert(key(u32::MAX), 2).unwrap();
-        assert_eq!(tree.get(key(1 << 6)), Some(&1));
-        assert_eq!(tree.get(key(u32::MAX)), Some(&2));
-    }
-
-    #[test]
-    fn a_failed_insert_leaves_the_tree_unchanged() {
-        let heap = Heap::failing_from(1);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        // Key 64 needs a second level; the heap fails the second node.
-        assert_eq!(tree.insert(key(64), 1), Err(Error::ResourceShortage));
-        assert_eq!(tree.get(key(0)), Some(&0));
-        assert!(tree.get(key(64)).is_none());
-        assert_eq!(tree.iter().count(), 1);
-    }
-
-    #[test]
-    fn a_failed_insert_alloc_leaves_the_tree_unchanged() {
-        let heap = Heap::failing_from(1);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        // The first 64 keys share one node (heap call 0).
-        for i in 0..64_u32 {
-            let _ = tree.insert_alloc(i).unwrap();
+        {
+            let mut tree = RadixTree::new(&heap, false);
+            for key in [0, 64, 4096, u64::MAX] {
+                tree.insert(key, leaf(1)).unwrap();
+            }
+            assert_eq!(tree.remove(64), Some(leaf(1)));
+            assert_eq!(tree.remove(u64::MAX), Some(leaf(1)));
+            tree.clear();
+            assert_eq!(heap.live(), 0);
+            tree.insert(1, leaf(2)).unwrap();
+            tree.insert(2, leaf(2)).unwrap();
+            tree.insert(65, leaf(2)).unwrap();
         }
-        assert_eq!(tree.insert_alloc(64).err(), Some(Error::ResourceShortage));
-        assert_eq!(tree.iter().count(), 64);
+        assert_eq!(heap.live(), 0);
     }
 
     #[test]
-    fn a_failed_grow_drops_the_value() {
-        let heap = Heap::failing_from(0);
-        let drops = Cell::new(0);
-        let mut tree = RadixTree::<Tracked<'_>, &Heap>::new(&heap);
-        let err = tree.insert(key(1 << 6), Tracked::new(&drops));
-        assert_eq!(err, Err(Error::ResourceShortage));
-        assert_eq!(drops.get(), 1);
-        assert!(tree.is_empty());
-    }
-
-    #[test]
-    fn insert_alloc_spills_to_the_next_node() {
+    fn top_level_iteration_exhaustion_has_no_out_of_width_shift() {
         let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        // 64 keys fill the first leaf; the 65th needs a second node.
-        for i in 0..70_u32 {
-            let (k, _) = tree.insert_alloc(i).unwrap();
-            assert_eq!(k, key(i));
+        let mut tree = RadixTree::new(&heap, true);
+        tree.insert(1 << 60, leaf(1)).unwrap();
+        assert_eq!(tree.iter().collect::<Vec<_>>(), [(1 << 60, leaf(1))]);
+        tree.clear();
+        tree.insert(u64::MAX, leaf(2)).unwrap();
+        let mut iter = tree.iter();
+        assert_eq!(iter.next(), Some((u64::MAX, leaf(2))));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+        tree.clear();
+        tree.insert(u64::MAX - 1, leaf(3)).unwrap();
+        assert_eq!(tree.iter().collect::<Vec<_>>(), [(u64::MAX - 1, leaf(3))]);
+    }
+
+    #[test]
+    fn clears_a_bottom_root_with_several_entries() {
+        let heap = Heap::new();
+        let mut tree = RadixTree::new(&heap, true);
+        tree.insert(1, leaf(1)).unwrap();
+        tree.insert(2, leaf(2)).unwrap();
+        tree.clear();
+        assert_eq!(tree.height, 0);
+        assert_eq!(heap.live(), 0);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "assertion failed")]
+    fn node_insert_checks_an_empty_slot() {
+        let mut node = Node {
+            parent: ptr::null_mut(),
+            index: 0,
+            height: 0,
+            count: 1,
+            bitmap: u64::MAX,
+            entries: [leaf(1).as_ptr().cast(); SIZE],
+        };
+        // SAFETY: the live local node has exclusive access and a valid index.
+        // The deliberately occupied slot exercises the invariant assertion.
+        unsafe {
+            Node::insert(&raw mut node, 0, leaf(2).as_ptr().cast());
         }
-        assert_eq!(tree.iter().count(), 70);
-        assert_eq!(tree.get(key(64)), Some(&64));
     }
 
     #[test]
-    fn debug_prints_the_map() {
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "assertion failed")]
+    fn node_remove_checks_an_occupied_slot() {
+        let mut node = Node {
+            parent: ptr::null_mut(),
+            index: 0,
+            height: 0,
+            count: 0,
+            bitmap: u64::MAX,
+            entries: [ptr::null_mut(); SIZE],
+        };
+        // SAFETY: the live local node has exclusive access and a valid index.
+        // The deliberately empty slot exercises the invariant assertion.
+        unsafe {
+            Node::remove(&raw mut node, 0);
+        }
+    }
+
+    #[test]
+    fn seeded_operations_match_an_ordered_map() {
         let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(2), 20).unwrap();
-        let printed = format!("{tree:?}");
-        assert!(printed.contains('2'));
-        assert!(printed.contains("20"));
-        assert!(format!("{:?}", tree.iter()).contains("Iter"));
+        let mut tree = RadixTree::new(&heap, true);
+        let mut map = BTreeMap::new();
+        let mut random = 123_456_789_u64;
+        for step in 1..=12000 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let key = (random >> 8) & 0xffff;
+            match random & 3 {
+                0 => {
+                    let expected = match map.entry(key) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            let _ = entry.insert(leaf(step));
+                            Ok(())
+                        }
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            Err(Error::Busy)
+                        }
+                    };
+                    assert_eq!(tree.insert(key, leaf(step)), expected);
+                }
+                1 => {
+                    assert_eq!(tree.remove(key), map.remove(&key));
+                }
+                2 => {
+                    assert_eq!(tree.get(key), map.get(&key).copied());
+                }
+                _ => {
+                    if let Some(mut slot) = tree.get_slot(key) {
+                        let old = map.insert(key, leaf(step));
+                        assert_eq!(Some(slot.replace(leaf(step))), old);
+                    }
+                }
+            }
+            if step % 257 == 0 {
+                assert_eq!(
+                    tree.iter().collect::<Vec<_>>(),
+                    map.iter()
+                        .map(|(&key, &ptr)| (key, ptr))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 
     #[test]
-    fn display_names_the_error() {
-        assert_eq!(Error::Exists.to_string(), "key already holds a value");
+    #[should_panic(expected = "unaligned leaf pointer")]
+    fn rejects_unaligned_insert() {
+        let mut tree = RadixTree::new(Heap::new(), true);
+        tree.insert(0, NonNull::<u8>::dangling()).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "unaligned leaf pointer")]
+    fn rejects_unaligned_replacement() {
+        let mut tree = RadixTree::<u8, _>::new(Heap::new(), true);
+        tree.insert(0, leaf(1).cast()).unwrap();
+        let _ = tree.get_slot(0).unwrap().replace(NonNull::dangling());
+    }
+
+    #[test]
+    #[should_panic(expected = "key allocation disabled")]
+    fn rejects_disabled_key_allocation() {
+        let mut tree = RadixTree::new(Heap::new(), false);
+        let _ = tree.insert_alloc(leaf(1)).unwrap();
+    }
+
+    #[test]
+    fn debug_shows_keys_and_pointers_only() {
+        let heap = Heap::new();
+        let mut tree = RadixTree::new(&heap, true);
+        tree.insert(5, leaf(1)).unwrap();
+        assert_eq!(format!("{tree:?}"), format!("{{5: {:?}}}", leaf(1)));
+        let iter = tree.iter();
         assert_eq!(
-            Error::ResourceShortage.to_string(),
-            "memory allocation failed"
+            format!("{iter:?}"),
+            format!("Iter {{ key: {}, .. }}", u64::MAX)
         );
-    }
-
-    #[test]
-    fn into_iterator_walks() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(1), 10).unwrap();
-        tree.insert(key(0), 20).unwrap();
-        let keys: Vec<u32> =
-            (&tree).into_iter().map(|(k, _)| k.into_raw()).collect();
-        assert_eq!(keys, vec![0, 1]);
-    }
-
-    #[test]
-    fn remove_misses_at_every_level() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(1 << 6), 1).unwrap();
-        assert!(tree.remove(key((1 << 6) + 1)).is_none());
-        assert!(tree.remove(key(2 << 6)).is_none());
-        assert!(tree.remove(key(u32::MAX)).is_none());
-        assert_eq!(tree.iter().count(), 1);
-    }
-
-    #[test]
-    fn get_rejects_a_key_past_the_height() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        assert!(tree.get(key(64)).is_none());
-        assert!(tree.get_mut(key(64)).is_none());
-        // A node root has a level to spare, and the key is still past it.
-        tree.insert(key(1), 1).unwrap();
-        assert!(tree.get(key(64)).is_none());
-        assert!(tree.get_mut(key(64)).is_none());
-    }
-
-    #[test]
-    fn replace_into_a_deep_key() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        assert_eq!(tree.replace(key(1 << 12), 1), Ok(None));
-        assert_eq!(tree.replace(key(1 << 12), 2), Ok(Some(1)));
-        assert_eq!(tree.get(key(1 << 12)), Some(&2));
-    }
-
-    #[test]
-    fn insert_over_a_height_zero_root_grows() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        tree.insert(key(1), 1).unwrap();
-        tree.insert(key(64), 2).unwrap();
-        assert_eq!(tree.iter().count(), 3);
-        assert_eq!(tree.get(key(64)), Some(&2));
-    }
-
-    #[test]
-    fn failed_create_on_an_empty_tree() {
-        let heap = Heap::failing_from(0);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        // Height 0 with a value; the grow's first node fails.
-        assert_eq!(tree.insert(key(1), 1), Err(Error::ResourceShortage));
-        assert_eq!(tree.iter().count(), 1);
-    }
-
-    #[test]
-    fn failed_node_under_a_live_root() {
-        let heap = Heap::failing_from(1);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..64_u32 {
-            tree.insert(key(i), i).unwrap();
-        }
-        // The next key needs a sibling leaf; heap call 1 fails.
-        assert_eq!(tree.insert(key(64), 64), Err(Error::ResourceShortage));
-        assert_eq!(tree.iter().count(), 64);
-        assert!(tree.get(key(64)).is_none());
-    }
-
-    #[test]
-    fn remove_from_a_height_zero_tree() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 7).unwrap();
-        assert!(tree.remove(key(1)).is_none());
-        assert_eq!(tree.remove(key(0)), Some(7));
-        assert!(tree.is_empty());
-        assert_eq!(heap.live(), 0);
-    }
-
-    #[test]
-    fn clear_an_empty_tree_is_a_noop() {
-        let heap = Heap::new();
-        let mut tree: RadixTree<u32, &Heap> = RadixTree::new(&heap);
-        tree.clear();
-        assert!(tree.is_empty());
-    }
-
-    #[test]
-    fn shrink_collapses_a_chain() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(1 << 18), 1).unwrap();
-        assert!(heap.live() > 0);
-        assert_eq!(tree.remove(key(1 << 18)), Some(1));
-        assert!(tree.is_empty());
-        assert_eq!(heap.live(), 0);
-    }
-
-    #[test]
-    fn iter_on_an_empty_tree() {
-        let heap = Heap::new();
-        let tree: RadixTree<u32, &Heap> = RadixTree::new(&heap);
-        assert_eq!(tree.iter().next(), None);
-    }
-
-    #[test]
-    fn insert_alloc_on_a_fresh_tree() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        assert_eq!(tree.insert_alloc(5).unwrap().0, key(0));
-    }
-
-    #[test]
-    fn from_alloc_error_maps_to_resource_shortage() {
-        let err: Error = AllocError.into();
-        assert_eq!(err, Error::ResourceShortage);
-    }
-
-    /// A node in a leaf slot is not a value: lookups miss and the heap
-    /// still balances after a clear.
-    #[test]
-    fn a_node_in_a_leaf_slot_is_not_a_value() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        let mut root = tree.create_node().unwrap();
-        tree.root = Root::Node(root, 1);
-        tree.insert(key(1), 1).unwrap();
-        tree.insert(key(2), 2).unwrap();
-        // SAFETY: the root is live; slot 1 held a value we replace.
-        let spare = tree.create_node().unwrap();
-        unsafe {
-            let _old = root.as_mut().take(1);
-            root.as_mut().put_node(1, spare);
-        }
-        assert!(tree.get(key(1)).is_none());
-        assert!(tree.get_mut(key(1)).is_none());
-        assert!(tree.remove(key(1)).is_none());
-        assert_eq!(tree.iter().count(), 1);
-        tree.clear();
-        assert_eq!(heap.live(), 0);
-    }
-
-    #[test]
-    fn insert_into_a_slot_that_holds_a_node() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        let mut root = tree.create_node().unwrap();
-        tree.root = Root::Node(root, 1);
-        tree.insert(key(1), 1).unwrap();
-        tree.insert(key(2), 2).unwrap();
-        // SAFETY: the root is live; slot 1 held a value we replace.
-        let spare = tree.create_node().unwrap();
-        unsafe {
-            let _old = root.as_mut().take(1);
-            root.as_mut().put_node(1, spare);
-        }
-        assert_eq!(tree.insert(key(1), 9), Err(Error::Exists));
-        tree.clear();
-    }
-
-    #[test]
-    fn insert_alloc_into_a_tree_whose_root_is_a_value() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        let (k, v) = tree.insert_alloc(1).unwrap();
-        assert_eq!(k, key(1));
-        assert_eq!(*v, 1);
-    }
-
-    #[test]
-    fn duplicate_insert_above_the_bottom() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(64), 1).unwrap();
-        assert_eq!(tree.insert(key(64), 2), Err(Error::Exists));
-        assert_eq!(tree.get(key(64)), Some(&1));
-    }
-
-    #[test]
-    fn place_finds_a_value_where_a_node_belongs() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        let mut root = tree.create_node().unwrap();
-        tree.root = Root::Node(root, 1);
-        tree.insert(key(0), 0).unwrap();
-        tree.insert(key(1), 1).unwrap();
-        // SAFETY: the root is live; slot 1 becomes a value in a non-leaf.
-        unsafe {
-            let _old = root.as_mut().take(1);
-            root.as_mut().put_value(1, 9);
-        }
-        tree.root = Root::Node(root, 2);
-        assert_eq!(tree.insert(key(64), 1), Err(Error::Exists));
-    }
-
-    #[test]
-    fn failed_second_node_during_insert() {
-        let heap = Heap::failing_from(1);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        // One node comes from heap call 0; the sibling leaf fails at call 1.
-        tree.insert(key(0), 0).unwrap();
-        assert_eq!(tree.insert(key(64), 1), Err(Error::ResourceShortage));
-        assert_eq!(tree.iter().count(), 1);
-    }
-
-    #[test]
-    fn mark_free_stops_when_the_bit_was_already_set() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..3_u32 {
-            let _ = tree.insert_alloc(i).unwrap();
-        }
-        assert_eq!(tree.remove(key(1)), Some(1));
-        assert_eq!(tree.remove(key(2)), Some(2));
-    }
-
-    /// A removal leaves a three-level tree's bottom leaf non-empty while
-    /// the level above it already had its free bit set, so the walk
-    /// settles there instead of telling the root.
-    #[test]
-    fn remove_settles_where_the_free_bit_was_already_set() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(0), 0).unwrap();
-        tree.insert(key(1), 1).unwrap();
-        tree.insert(key(1 << 12), 2).unwrap();
-        assert_eq!(tree.remove(key(0)), Some(0));
-        assert_eq!(tree.get(key(1)), Some(&1));
-        assert_eq!(tree.get(key(1 << 12)), Some(&2));
-        assert_eq!(tree.iter().count(), 2);
-    }
-
-    /// A node root at height zero holds no value: the remove misses and
-    /// the block is still the tree's to free.
-    #[test]
-    fn rollback_frees_a_partial_path() {
-        let heap = Heap::failing_from(2);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        assert_eq!(tree.insert(key(1 << 12), 1), Err(Error::ResourceShortage));
-        assert!(tree.is_empty());
-        assert_eq!(heap.live(), 0);
-    }
-
-    /// A failed descent frees the nodes it made and leaves a root it did
-    /// not make alone.
-    #[test]
-    fn rollback_keeps_a_root_it_did_not_create() {
-        let heap = Heap::failing_from(4);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        // Three nodes carry the first key: a root, a child and a leaf.
-        tree.insert(key(1 << 12), 1).unwrap();
-        // The next key needs two fresh nodes, and the second one fails.
-        assert_eq!(tree.insert(key(1 << 13), 2), Err(Error::ResourceShortage));
-        assert_eq!(tree.get(key(1 << 12)), Some(&1));
-        assert!(tree.get(key(1 << 13)).is_none());
-        assert_eq!(tree.iter().count(), 1);
-        assert_eq!(heap.live(), 3);
-    }
-
-    #[test]
-    fn grow_past_the_height_limit() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.root = Root::Empty(MAX_HEIGHT);
-        assert_eq!(tree.insert(key(u32::MAX), 1), Ok(()));
-        assert_eq!(tree.root.height(), MAX_HEIGHT);
-    }
-
-    #[test]
-    fn filling_a_leaf_leaves_a_sibling_slot_free() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..=127_u32 {
-            tree.insert(key(i), i).unwrap();
-        }
-        for i in 0..=127_u32 {
-            assert_eq!(tree.get(key(i)), Some(&i));
-        }
-        // The root kept its free bit for the slots it never descended
-        // through, so the walk stopped at the full leaf's parent.
-        assert_eq!(tree.insert(key(128), 128), Ok(()));
-        assert_eq!(tree.get(key(128)), Some(&128));
-        assert_eq!(heap.live(), 4);
-    }
-
-    #[test]
-    fn a_full_parent_stops_the_free_bit_walk() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        for i in 0..=4095_u32 {
-            tree.insert(key(i), i).unwrap();
-        }
-        // The height-two tree holds every key it can address; the walk
-        // ran out of free bits on the parent and the next value grows
-        // the tree.
-        let (k, v) = tree.insert_alloc(4096).unwrap();
-        assert_eq!(k, key(4096));
-        assert_eq!(*v, 4096);
-    }
-
-    #[test]
-    fn a_missing_key_on_a_tall_tree_is_a_miss() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        tree.insert(key(64), 1).unwrap();
-        assert!(tree.get(key(65)).is_none());
-        assert!(tree.get_mut(key(65)).is_none());
-        assert!(tree.remove(key(65)).is_none());
-        assert_eq!(tree.iter().count(), 1);
-    }
-
-    #[test]
-    fn a_failed_grow_in_insert_alloc_leaves_the_tree_unchanged() {
-        let heap = Heap::failing_from(0);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        // A height-zero root stores the value with no allocation.
-        let (k, v) = tree.insert_alloc(0).unwrap();
-        assert_eq!(k, key(0));
-        assert_eq!(*v, 0);
-        // The next value needs a node to grow into; the heap is dry.
-        assert_eq!(tree.insert_alloc(1).err(), Some(Error::ResourceShortage));
-        assert_eq!(tree.get(key(0)), Some(&0));
-        assert_eq!(heap.live(), 0);
-    }
-
-    #[test]
-    fn a_failed_replace_leaves_the_tree_unchanged() {
-        let heap = Heap::failing_from(0);
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        assert_eq!(
-            tree.replace(key(1 << 6), 1).err(),
-            Some(Error::ResourceShortage)
-        );
-        assert!(tree.is_empty());
-        assert_eq!(heap.live(), 0);
-    }
-
-    #[test]
-    fn tracked_values_take_the_lowest_free_key() {
-        let drops = Cell::new(0);
-        let heap = Heap::new();
-        let mut tree = RadixTree::<Tracked<'_>, &Heap>::new(&heap);
-        let (k, _v) = tree.insert_alloc(Tracked::new(&drops)).unwrap();
-        assert_eq!(k, key(0));
-        let (k, _v) = tree.insert_alloc(Tracked::new(&drops)).unwrap();
-        assert_eq!(k, key(1));
-        tree.clear();
-        assert_eq!(drops.get(), 2);
-    }
-
-    #[test]
-    fn a_failed_insert_with_a_tracked_value_rolls_back() {
-        let drops = Cell::new(0);
-        let heap = Heap::failing_from(2);
-        let mut tree = RadixTree::<Tracked<'_>, &Heap>::new(&heap);
-        assert_eq!(
-            tree.insert(key(1 << 12), Tracked::new(&drops)).err(),
-            Some(Error::ResourceShortage)
-        );
-        assert!(tree.is_empty());
-        assert_eq!(heap.live(), 0);
-        assert_eq!(drops.get(), 1);
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic = "radix tree: a value sits above the bottom level"]
-    fn get_of_a_value_in_a_non_leaf_slot_panics() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        let mut root = tree.create_node().unwrap();
-        tree.root = Root::Node(root, 1);
-        tree.insert(key(0), 0).unwrap();
-        // SAFETY: the root is live; slot 0 becomes a value at height 2.
-        unsafe {
-            let _old = root.as_mut().take(0);
-            root.as_mut().put_value(0, 9);
-        }
-        tree.root = Root::Node(root, 2);
-        let _found = tree.get(key(0));
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic = "radix tree: a value sits above the bottom level"]
-    fn get_mut_of_a_value_in_a_non_leaf_slot_panics() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        let mut root = tree.create_node().unwrap();
-        tree.root = Root::Node(root, 1);
-        tree.insert(key(0), 0).unwrap();
-        // SAFETY: the root is live; slot 0 becomes a value at height 2.
-        unsafe {
-            let _old = root.as_mut().take(0);
-            root.as_mut().put_value(0, 9);
-        }
-        tree.root = Root::Node(root, 2);
-        let _found = tree.get_mut(key(0));
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic = "slot already used"]
-    fn put_into_an_occupied_slot_panics() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        let mut handle = tree.create_node().unwrap();
-        tree.root = Root::Node(handle, 1);
-        // SAFETY: the node is live and slot 0 is free, then taken.
-        unsafe {
-            handle.as_mut().put_value(0, 1);
-            handle.as_mut().put_value(0, 2);
-        }
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic = "radix tree: the key space is exhausted"]
-    fn insert_alloc_into_a_full_tree_at_the_height_limit_panics() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        let mut root = tree.create_node().unwrap();
-        // SAFETY: the node is fresh and owned by the test.
-        unsafe {
-            root.as_mut().free_bm = 0;
-        }
-        tree.root = Root::Node(root, MAX_HEIGHT);
-        let _placed = tree.insert_alloc(1);
-    }
-
-    /// A subtree the parent's free bit calls free but that is full is not
-    /// a state a free-key walk can descend into: the walk panics instead
-    /// of reading a slot that holds nothing.
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic = "radix tree: a free-key walk reached a full node"]
-    fn a_free_key_walk_into_a_full_node_panics() {
-        let heap = Heap::new();
-        let mut tree = RadixTree::<u32, &Heap>::new(&heap);
-        let mut root = tree.create_node().unwrap();
-        tree.root = Root::Node(root, 2);
-        let mut leaf = tree.create_node().unwrap();
-        // SAFETY: the root is live and slot 0 is free, and the leaf is
-        // live; the leaf then claims a free key the root believes in.
-        unsafe {
-            root.as_mut().put_node(0, leaf);
-            leaf.as_mut().free_bm = 0;
-        }
-        let _placed = tree.insert_alloc(1);
+        let slot = tree.get_slot(5).unwrap();
+        assert_eq!(format!("{slot:?}"), format!("Slot({:?})", leaf(1)));
     }
 }

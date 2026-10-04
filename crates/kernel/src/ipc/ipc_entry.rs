@@ -101,8 +101,8 @@ impl IpcEntry {
 /// The [`KernError`] a radix-tree error stands for.
 const fn map_error(error: kmem::RadixTreeError) -> KernError {
     match error {
-        kmem::RadixTreeError::Exists => KernError::InvalidArgument,
-        kmem::RadixTreeError::ResourceShortage => KernError::ResourceShortage,
+        kmem::RadixTreeError::Busy => KernError::InvalidArgument,
+        kmem::RadixTreeError::NoMemory => KernError::ResourceShortage,
     }
 }
 
@@ -180,7 +180,7 @@ pub(crate) unsafe fn dealloc(
             (*entry).set_next_free((*record).free_list);
             (*record).free_list = entry;
         } else {
-            (*record).map.remove(kmem::RadixKey::from_raw(name));
+            (*record).map.remove(u64::from(name));
             free(entry);
         }
 
@@ -240,9 +240,18 @@ pub(crate) unsafe fn alloc(
             .insert_alloc(NonNull::new_unchecked(entry.cast()))
     };
 
-    match inserted {
-        Ok((key, _slot)) => {
-            let name = key.into_raw();
+    let name = match inserted {
+        Ok(key) => c_uint::try_from(key).map_err(|_| {
+            // Names are 32 bits wide, so a key above them is never handed out.
+            // SAFETY: the key was just allocated for this entry.
+            unsafe { (*space.record()).map.remove(key) };
+            KernError::NoSpace
+        }),
+        Err(error) => Err(map_error(error)),
+    };
+
+    match name {
+        Ok(name) => {
             unsafe {
                 (*entry).set_bits(0);
                 (*entry).set_object(IO_NULL);
@@ -257,7 +266,7 @@ pub(crate) unsafe fn alloc(
         Err(error) => {
             // SAFETY: the failed insert left the fresh entry unreferenced.
             unsafe { free(entry) };
-            Err(map_error(error))
+            Err(error)
         }
     }
 }
@@ -275,9 +284,8 @@ pub(crate) unsafe fn alloc_name(
         return Err(KernError::InvalidTask);
     }
 
-    let existing =
-        unsafe { (*space.record()).map.get(kmem::RadixKey::from_raw(name)) }
-            .map(|entry| entry.as_ptr());
+    let existing = unsafe { (*space.record()).map.get(u64::from(name)) }
+        .map(NonNull::as_ptr);
 
     let Some(entry) = existing else {
         let Some(fresh) = ie_alloc() else {
@@ -293,10 +301,9 @@ pub(crate) unsafe fn alloc_name(
         }
 
         let inserted = unsafe {
-            (*space.record()).map.insert(
-                kmem::RadixKey::from_raw(name),
-                NonNull::new_unchecked(fresh.cast()),
-            )
+            (*space.record())
+                .map
+                .insert(u64::from(name), NonNull::new_unchecked(fresh.cast()))
         };
         if let Err(error) = inserted {
             // SAFETY: the failed insert left the entry unreferenced.
