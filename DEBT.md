@@ -8,20 +8,9 @@ deletes its entry; a change that opens one adds it.
 
 - **ADR**: ADRs 0029 and 0035; ADR 0027.
 - **Where**: `kern/lock.rs`, `kern/kmutex.rs` and `arch/x86_64/spl.rs`
-  in `crates/kernel/src`, with spl calls in 37 kernel files; `kernel`
-  does not depend on `lock`.
-- **Done when**: `kernel` depends on `lock`, those three files are
-  gone, and no `spl` identifier remains in `crates/`.
-
-## `clock` keeps its own irq-quiet lock
-
-- **ADR**: ADRs 0029 and 0041.
-- **Where**: `clock`'s `Critical` platform trait and `CriticalLock`
-  (`src/critical.rs`, used across `src/` and `benches/timers.rs`, and
-  described in its README), built on `spin::Mutex`.
-- **Done when**: `clock`'s wheels and clock state take `lock`'s
-  `IrqSpinLock`, and no `Critical` identifier remains in
-  `crates/clock`.
+  in `crates/kernel/src`, with spl calls in 35 kernel files.
+- **Done when**: those three files are gone, and no `spl` identifier
+  remains in `crates/`.
 
 ## A waker cancels the sleeper's timeout
 
@@ -152,13 +141,6 @@ deletes its entry; a change that opens one adds it.
   entry, which panics because there is no debugger.
 - **Done when**: `host_reboot` with `RB_DEBUGGER` parks every CPU,
   prints `debugger requested` and waits for GDB.
-
-## Third-party runtime crates
-
-- **ADR**: ADR 0023.
-- **Where**: `spin` (the kernel, in 9 files, and `clock`'s
-  `CriticalLock`).
-- **Done when**: no `Cargo.toml` in the workspace names `spin`.
 
 ## `cargo deny` does not run
 
