@@ -50,6 +50,7 @@ use core::pin::Pin;
 use core::ptr::{
     self, NonNull, addr_of, addr_of_mut, null_mut, with_exposed_provenance_mut,
 };
+use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 /// `TASK_PORT_REGISTER_MAX` of <`mach/mach_param.h>`: the registered send
 /// rights a task holds.
@@ -275,13 +276,16 @@ static mut TASK_CACHE: KmemCache = KmemCache::zeroed();
 /// go to, or null.
 pub static mut NEW_TASK_NOTIFICATION: *mut c_void = null_mut();
 
-/// `task_collect_allowed` of kern/task.c: whether the collector may run.
-static mut TASK_COLLECT_ALLOWED: c_int = 1;
+/// `task_collect_allowed` of kern/task.c: whether the collector may run, a
+/// switch a debugger sets.
+static TASK_COLLECT_ALLOWED: AtomicI32 = AtomicI32::new(1);
 
 /// `task_collect_last_tick` and `task_collect_max_rate` of kern/task.c: the
-/// last tick the collector ran and the minimum interval, in ticks.
-static mut TASK_COLLECT_LAST_TICK: c_uint = 0;
-static mut TASK_COLLECT_MAX_RATE: c_uint = 0;
+/// last tick the collector ran and the minimum interval, in ticks.  Only the
+/// pageout daemon writes them, so a load and a later store need no
+/// read-modify-write between them.
+static TASK_COLLECT_LAST_TICK: AtomicU32 = AtomicU32::new(0);
+static TASK_COLLECT_MAX_RATE: AtomicU32 = AtomicU32::new(0);
 
 /// `current_task()` of <kern/thread.h>: the running thread's task.
 ///
@@ -1519,22 +1523,19 @@ pub(crate) unsafe fn consider_collect() {
     // signed tick rate as unsigned; `hz` is positive and set before the
     // pageout daemon can run.
     let hz_rate = machine::CLOCK_HZ as c_uint;
-    // SAFETY: this is the collector's own state, and it runs on one thread.
-    let mut max_rate = unsafe { TASK_COLLECT_MAX_RATE };
+    let mut max_rate = TASK_COLLECT_MAX_RATE.load(Ordering::Relaxed);
     if max_rate == 0 {
         max_rate = hz_rate;
-        // SAFETY: this is the collector's own state, and it runs on one
-        // thread.
-        unsafe { TASK_COLLECT_MAX_RATE = max_rate };
+        TASK_COLLECT_MAX_RATE.store(max_rate, Ordering::Relaxed);
     }
 
-    let last_tick = unsafe { TASK_COLLECT_LAST_TICK };
+    let last_tick = TASK_COLLECT_LAST_TICK.load(Ordering::Relaxed);
     let deadline = last_tick.wrapping_add(max_rate / hz_rate);
-    if unsafe { TASK_COLLECT_ALLOWED } != 0 && sched_tick() > deadline {
-        unsafe {
-            TASK_COLLECT_LAST_TICK = sched_tick();
-            collect_scan();
-        }
+    if TASK_COLLECT_ALLOWED.load(Ordering::Relaxed) != 0
+        && sched_tick() > deadline
+    {
+        TASK_COLLECT_LAST_TICK.store(sched_tick(), Ordering::Relaxed);
+        unsafe { collect_scan() };
     }
 }
 
