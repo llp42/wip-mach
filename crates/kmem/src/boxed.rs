@@ -66,6 +66,20 @@ impl<T, A: Alloc> KBox<T, A> {
         })
     }
 
+    /// Moves the value out and frees the block.
+    pub fn into_inner(this: Self) -> T {
+        let this = ManuallyDrop::new(this);
+        // SAFETY: the block holds a valid `T` and came from `alloc` with
+        // `T`'s layout, and `this` is not dropped, so the value and `alloc`
+        // move out once.
+        unsafe {
+            let value = this.ptr.read();
+            let alloc = ptr::read(&raw const this.alloc);
+            release(&alloc, this.ptr.cast(), Layout::new::<T>());
+            value
+        }
+    }
+
     /// Gives up ownership and returns the address of the value.
     ///
     /// The allocator is not dropped, so nothing it holds is released;
@@ -262,6 +276,18 @@ mod tests {
         assert_eq!(*b, 5);
         drop(b);
         assert_eq!(heap.live(), 0);
+    }
+
+    #[test]
+    fn into_inner_frees_the_block_and_keeps_the_value() {
+        let heap = Heap::new();
+        let drops = Cell::new(0);
+        let b = KBox::try_new(Tracked::new(&drops), &heap).unwrap();
+        let value = KBox::into_inner(b);
+        assert_eq!(heap.live(), 0);
+        assert_eq!(drops.get(), 0);
+        drop(value);
+        assert_eq!(drops.get(), 1);
     }
 
     #[test]

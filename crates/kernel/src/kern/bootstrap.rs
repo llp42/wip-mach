@@ -29,6 +29,7 @@ use crate::kern::boot_script::{self, Command, Host, Script};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
 use crate::kern::host;
+use crate::kern::kheap::Kalloc;
 use crate::kern::lock::SimpleLock;
 use crate::kern::printf;
 use crate::kern::sched_prim::{self, THREAD_AWAKENED};
@@ -37,10 +38,6 @@ use crate::kern::thread::Thread;
 use crate::vm::types::{VmInherit, VmProt};
 use crate::vm::vm_map::{VmMap, round_page, trunc_page};
 use crate::vm::vm_user;
-use alloc::boxed::Box;
-use alloc::ffi::CString;
-use alloc::format;
-use alloc::vec::Vec;
 use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{
@@ -48,6 +45,7 @@ use core::ptr::{
 };
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use elf_load;
+use kmem::{KBox, KCString, KCStringError, KVec};
 
 /// The send-right type the port insertion calls take.
 const MACH_MSG_TYPE_PORT_SEND: c_uint = 17;
@@ -69,7 +67,9 @@ static BOOT_DEVICE_PORT: AtomicU32 = AtomicU32::new(0);
 
 /// Finds the boot script in the Multiboot modules and runs it.
 pub(crate) fn create() {
-    let mut modules = boot_modules();
+    let Ok(mut modules) = boot_modules() else {
+        kpanic!("bootstrap_create", "cannot copy the boot modules");
+    };
     if modules.is_empty() {
         kpanic!(
             "bootstrap_create",
@@ -82,7 +82,13 @@ pub(crate) fn create() {
             "Loading single multiboot module in compat mode: {}\n",
             first
         );
-        exec_compat(Box::new(modules.remove(0)));
+        let module = modules
+            .remove(0)
+            .and_then(|module| KBox::try_new(module, Kalloc).ok());
+        let Some(module) = module else {
+            kpanic!("bootstrap_create", "cannot keep the bootstrap module");
+        };
+        exec_compat(module);
     } else {
         let cmdline = kernel_cmdline();
         let mut host = BootstrapHost;
@@ -111,7 +117,7 @@ fn is_compat(line: &CStr) -> bool {
 ///
 /// The thread takes ownership of the module, so its image stays mapped
 /// until the image has been copied into the task.
-fn exec_compat(module: Box<MultibootModule>) {
+fn exec_compat(module: KBox<MultibootModule, Kalloc>) {
     // SAFETY: creation may block and the caller holds no locks.
     let Ok(task) =
         (unsafe { task::create_kernel_task(None, MapSource::Fresh) })
@@ -130,7 +136,7 @@ fn exec_compat(module: Box<MultibootModule>) {
     // SAFETY: the thread is live.
     let _ = unsafe { Thread::set_name(thread, c"bootstrap".as_ptr()) };
 
-    let module = Box::into_raw(module);
+    let module = KBox::into_raw(module);
     // SAFETY: the host object and the device port are live, and the fresh
     // task's space receives one send right each.
     unsafe {
@@ -164,18 +170,18 @@ unsafe extern "C" fn user_bootstrap_compat() {
     let exec_info = load_bootstrap(unsafe { &*module });
     // SAFETY: the box came from the launcher, and the image was already
     // copied into the task.
-    unsafe { drop(Box::from_raw(module)) };
+    unsafe { drop(KBox::from_raw(module, Kalloc)) };
 
     let host = port_name(BOOT_HOST_PORT.load(Ordering::Acquire));
     let device = port_name(BOOT_DEVICE_PORT.load(Ordering::Acquire));
     let cmdline = kernel_cmdline();
-    let compat = CompatStrings::from_cmdline(cmdline.to_bytes());
+    let compat = compat_strings(cmdline);
 
     let argv: [*const c_char; 5] = [
         c"bootstrap".as_ptr(),
         compat.flags.as_ptr(),
-        host.as_ptr(),
-        device.as_ptr(),
+        host.as_ptr().cast(),
+        device.as_ptr().cast(),
         compat.root.as_ptr(),
     ];
     let vars = [EnvVar {
@@ -219,7 +225,7 @@ impl Host for BootstrapHost {
         command.task = Some(task);
         // SAFETY: the task is live and fresh.
         let _ =
-            unsafe { task::set_name(task.as_ptr(), command.path.as_bytes()) };
+            unsafe { task::set_name(task.as_ptr(), command.path.to_bytes()) };
         let host = host::host_self();
         // SAFETY: the task is live and the caller holds no locks.
         let _ = unsafe {
@@ -366,9 +372,9 @@ fn set_boot_variables(script: &mut Script, cmdline: &CStr) {
     set_port(script, c"kernel-task", task::kernel_task_self_port());
 
     set_str(script, c"kernel-command-line", cmdline.to_bytes());
-    let compat = CompatStrings::from_cmdline(cmdline.to_bytes());
-    set_str(script, c"boot-args", compat.flags.as_bytes());
-    set_str(script, c"root-device", compat.root.as_bytes());
+    let compat = compat_strings(cmdline);
+    set_str(script, c"boot-args", compat.flags.to_bytes());
+    set_str(script, c"root-device", compat.root.to_bytes());
 }
 
 /// Defines the string variable `name`, halting the kernel on failure.
@@ -463,10 +469,10 @@ fn parse_and_exec_modules(
 /// the boot command line.
 struct CompatStrings {
     /// The `-`-prefixed flags, `-x` when the command line carries none.
-    flags: CString,
+    flags: KCString<Kalloc>,
     /// The `root=` value with any `/dev/` prefix removed, `UNKNOWN` when
     /// the command line names none.
-    root: CString,
+    root: KCString<Kalloc>,
 }
 
 impl CompatStrings {
@@ -476,14 +482,19 @@ impl CompatStrings {
     /// a word.  A word the flags do not care about is skipped whole; the
     /// C's loop cannot step over a separator it does not know, such as a
     /// tab, so the skip advances the first byte before scanning the rest.
-    fn from_cmdline(cmdline: &[u8]) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`KCStringError::Alloc`] when the heap cannot hold the strings.
+    fn from_cmdline(cmdline: &[u8]) -> Result<Self, KCStringError> {
         const fn ends_word(byte: u8) -> bool {
             (byte as i8) <= b' ' as i8
         }
 
-        let mut flags = Vec::with_capacity(cmdline.len() + 2);
-        flags.push(b'-');
-        let mut root = Vec::from(&b"UNKNOWN"[..]);
+        let mut flags = KVec::try_with_capacity(cmdline.len() + 2, Kalloc)?;
+        flags.try_push(b'-')?;
+        let mut root = KVec::new(Kalloc);
+        root.extend_from_slice(b"UNKNOWN")?;
         let mut position = 0;
         while position < cmdline.len() {
             let byte = cmdline[position];
@@ -492,7 +503,7 @@ impl CompatStrings {
             } else if byte == b'-' {
                 position += 1;
                 while !ends_word(cmdline.get(position).copied().unwrap_or(0)) {
-                    flags.push(cmdline[position]);
+                    flags.try_push(cmdline[position])?;
                     position += 1;
                 }
             } else if cmdline[position..].starts_with(b"root=") {
@@ -502,7 +513,7 @@ impl CompatStrings {
                 }
                 root.clear();
                 while !ends_word(cmdline.get(position).copied().unwrap_or(0)) {
-                    root.push(cmdline[position]);
+                    root.try_push(cmdline[position])?;
                     position += 1;
                 }
             } else {
@@ -513,18 +524,38 @@ impl CompatStrings {
             }
         }
         if flags.len() == 1 {
-            flags.push(b'x');
+            flags.try_push(b'x')?;
         }
-        Self {
-            flags: CString::new(flags).expect("the flags hold no NUL"),
-            root: CString::new(root).expect("the root holds no NUL"),
-        }
+        Ok(Self {
+            flags: KCString::try_new(&flags, Kalloc)?,
+            root: KCString::try_new(&root, Kalloc)?,
+        })
     }
 }
 
-/// The decimal name the user bootstrap reads for a port, with its NUL.
-fn port_name(port: u32) -> CString {
-    CString::new(format!("{port}")).expect("a decimal holds no NUL")
+/// [`CompatStrings::from_cmdline`] of the boot command line, halting the
+/// kernel on failure.
+fn compat_strings(cmdline: &CStr) -> CompatStrings {
+    match CompatStrings::from_cmdline(cmdline.to_bytes()) {
+        Ok(compat) => compat,
+        Err(error) => kpanic!(
+            "bootstrap_create",
+            "cannot copy the boot command line: {}",
+            error
+        ),
+    }
+}
+
+/// The decimal name the user bootstrap reads for a port, NUL-padded.
+fn port_name(port: u32) -> [u8; 11] {
+    let mut name = [0; 11];
+    let digits = port.checked_ilog10().unwrap_or(0) as usize + 1;
+    let mut value = port;
+    for slot in name[..digits].iter_mut().rev() {
+        *slot = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    name
 }
 
 /// The module image the ELF loader reads from and places into.

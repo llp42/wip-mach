@@ -31,7 +31,7 @@ use crate::ipc::{IpcPort, MachMsgHeader, ipc_object, ipc_port, ipc_space};
 use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
 use crate::kern::debug::soft_debugger;
-use crate::kern::kheap::try_box;
+use crate::kern::kheap::Kalloc;
 use crate::kern::lock::SimpleLock;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, thread_block, thread_sleep,
@@ -48,7 +48,6 @@ use crate::vm::vm_map::{
     VM_MAP_WAIT_FOR_SPACE, VmMap, VmMapCopy, round_page, trunc_page,
 };
 use crate::vm::vm_user;
-use alloc::boxed::Box;
 use collections::list;
 use core::cell::UnsafeCell;
 use core::ffi::{
@@ -57,6 +56,7 @@ use core::ffi::{
 use core::mem::{align_of, offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
+use kmem::KBox;
 use spin::Mutex;
 
 /// `DEV_STATE_INIT` of <`device/dev_hdr.h`>.
@@ -649,8 +649,8 @@ const fn io_count(count: c_uint) -> c_long {
 /// `io_req_alloc` of <`device/io_req.h`>: moves `ior` into a fresh heap
 /// block, or returns `None` when the heap is exhausted, where the C
 /// dereferenced the null pointer.
-fn io_req_alloc(ior: IoReq) -> Option<Box<IoReq>> {
-    try_box(ior).ok()
+fn io_req_alloc(ior: IoReq) -> Option<KBox<IoReq, Kalloc>> {
+    KBox::try_new(ior, Kalloc).ok()
 }
 
 /// `io_req_free` of <`device/io_req.h`>.
@@ -658,9 +658,9 @@ fn io_req_alloc(ior: IoReq) -> Option<Box<IoReq>> {
 /// # Safety
 ///
 /// `ior` must be a request [`io_req_alloc()`] built, released with
-/// [`Box::into_raw`], that nothing uses.
+/// [`KBox::into_raw`], that nothing uses.
 unsafe fn io_req_free(ior: *mut IoReq) {
-    drop(unsafe { Box::from_raw(ior) });
+    drop(unsafe { KBox::from_raw(ior, Kalloc) });
 }
 
 /// `ds_device_open()` of `device/ds_routines.c`.
@@ -1303,7 +1303,7 @@ unsafe fn device_open(
         port.lock();
         ipc_port::nsrequest(port, 1, Some(notify.as_non_null()));
 
-        let ior = Box::into_raw(ior);
+        let ior = KBox::into_raw(ior);
         let d_open = (*(*device).dev_ops).d_open;
         let result = d_open.map_or(D_SUCCESS, |d_open| {
             d_open(driver_unit((*device).dev_number), mode as c_int, ior)
@@ -1459,7 +1459,7 @@ unsafe fn device_write(
             reply_port_type,
             ..IoReq::new()
         })
-        .map(Box::into_raw) else {
+        .map(KBox::into_raw) else {
             return Err(DeviceError::NoMemory).as_io_return();
         };
 
@@ -1526,7 +1526,7 @@ unsafe fn device_write_inband(
             reply_port_type,
             ..IoReq::new()
         })
-        .map(Box::into_raw) else {
+        .map(KBox::into_raw) else {
             return Err(DeviceError::NoMemory).as_io_return();
         };
 
@@ -1722,7 +1722,7 @@ unsafe fn device_read(
             reply_port_type,
             ..IoReq::new()
         })
-        .map(Box::into_raw) else {
+        .map(KBox::into_raw) else {
             return Err(DeviceError::NoMemory).as_io_return();
         };
 
@@ -1794,7 +1794,7 @@ unsafe fn device_read_inband(
             reply_port_type,
             ..IoReq::new()
         })
-        .map(Box::into_raw) else {
+        .map(KBox::into_raw) else {
             return Err(DeviceError::NoMemory).as_io_return();
         };
 

@@ -32,7 +32,7 @@
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::arch::x86_64::spl;
 use crate::config::MAX_NCPUS;
-use crate::kern::kheap::try_box;
+use crate::kern::kheap::Kalloc;
 use crate::kern::kmutex::KMutex;
 use crate::kern::lock::SimpleLock;
 use crate::kern::machine;
@@ -41,7 +41,6 @@ use crate::kern::sched_prim::{
 };
 use crate::kern::smp::CpuId;
 use crate::utils::cell::SyncCell;
-use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::marker::PhantomData;
@@ -50,6 +49,7 @@ use core::ptr::{self, NonNull};
 use core::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence,
 };
+use kmem::{AllocError, KBox};
 
 // One `QS_PENDING` bit per CPU.
 const _: () = assert!(MAX_NCPUS <= usize::BITS as usize);
@@ -490,10 +490,10 @@ struct RcuBox<T> {
 ///
 /// # Safety
 ///
-/// `head` must be the `head` of an `RcuBox<T>` from `Box::into_raw` that
+/// `head` must be the `head` of an `RcuBox<T>` from `KBox::into_raw` that
 /// no one can reach any more.
 unsafe fn free_box<T>(head: *mut RcuHead) {
-    drop(unsafe { Box::from_raw(head.cast::<RcuBox<T>>()) });
+    drop(unsafe { KBox::from_raw(head.cast::<RcuBox<T>>(), Kalloc) });
 }
 
 /// A value readers see without locking, replaced whole by writers: the
@@ -536,12 +536,16 @@ impl<T: Send + Sync> Rcu<T> {
 
     /// Box `value` as a version to publish.
     fn try_version(value: T) -> Result<*mut RcuBox<T>, T> {
-        try_box(RcuBox {
-            head: RcuHead::new(),
-            value,
-        })
-        .map(Box::into_raw)
-        .map_err(|version| version.value)
+        match KBox::try_new_uninit(Kalloc) {
+            Ok(slot) => Ok(KBox::into_raw(KBox::write(
+                slot,
+                RcuBox {
+                    head: RcuHead::new(),
+                    value,
+                },
+            ))),
+            Err(AllocError) => Err(value),
+        }
     }
 
     /// Read the published version. The guard is a read section: do not
@@ -638,9 +642,9 @@ impl<T: Send + Sync> Rcu<T> {
         let old = self.publish(version);
         self.writer.unlock();
         synchronize_rcu();
-        // SAFETY: `old` came from `Box::into_raw`, and after the GP no
+        // SAFETY: `old` came from `KBox::into_raw`, and after the GP no
         // reader holds it.
-        Ok(unsafe { Box::from_raw(old) }.value)
+        Ok(KBox::into_inner(unsafe { KBox::from_raw(old, Kalloc) }).value)
     }
 
     /// The value, mutably: `&mut self` proves no reader or writer exists.
@@ -669,7 +673,7 @@ impl<T: Clone + Send + Sync> Rcu<T> {
 impl<T> Drop for Rcu<T> {
     fn drop(&mut self) {
         // SAFETY: `&mut self` excludes every reader, so the version can go
-        // now; it came from `Box::into_raw`.
-        drop(unsafe { Box::from_raw(*self.ptr.get_mut()) });
+        // now; it came from `KBox::into_raw`.
+        drop(unsafe { KBox::from_raw(*self.ptr.get_mut(), Kalloc) });
     }
 }

@@ -34,15 +34,16 @@ use crate::glue::time_value::TimeValue64;
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
 use crate::kern::host_time;
+use crate::kern::kheap::Kalloc;
 use crate::kern::smp::CpuId;
 use crate::vm::types::VmProt;
 use crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS;
-use alloc::vec::Vec;
 use core::arch::asm;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use kmem::{AllocError, KVec};
 
 /// `ELF_SHT_SYMTAB` of i386/i386at/elf.h.
 const ELF_SHT_SYMTAB: u32 = 2;
@@ -76,12 +77,16 @@ pub(crate) fn boot_info() -> MultibootRawInfo {
 
 /// Copies the loader's module records, images and command lines, empty
 /// when the loader left none.
-#[must_use]
-pub(crate) fn boot_modules() -> Vec<MultibootModule> {
+///
+/// # Errors
+///
+/// [`AllocError`] when the heap cannot hold the list or a command line.
+pub(crate) fn boot_modules()
+-> Result<KVec<MultibootModule, Kalloc>, AllocError> {
     let info = boot_info();
     let flags = MultibootLoaderFlags::from_raw(info.flags);
     if !flags.contains(MultibootLoaderFlags::MODULES) || info.mods_count == 0 {
-        return Vec::new();
+        return Ok(KVec::new(Kalloc));
     }
     // SAFETY: the loader left `mods_count` records at `mods_addr`, and
     // `i386at_init` copied every record, image and command line into

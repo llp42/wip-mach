@@ -54,14 +54,6 @@ deletes its entry; a change that opens one adds it.
 - **Where**: `crates/host-tests` includes kernel source files verbatim.
 - **Done when**: `crates/host-tests` is gone.
 
-## The kernel links `alloc` and a global allocator
-
-- **ADR**: ADR 0017.
-- **Where**: `kern/kheap.rs` (the `#[global_allocator]` and `try_box`),
-  and the 9 kernel files that use `alloc`.
-- **Done when**: no `extern crate alloc` and no `#[global_allocator]`
-  remain in `crates/`.
-
 ## The slab is derived from GNU Mach
 
 - **ADR**: ADR 0017; ADR 0010.

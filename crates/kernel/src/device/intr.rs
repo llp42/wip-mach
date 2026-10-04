@@ -22,7 +22,7 @@ use crate::ipc::ipc_mqueue;
 use crate::ipc::ipc_port;
 use crate::ipc::{IpcPort, MachMsgHeader, MachMsgType};
 use crate::kern::console::{CStrArg, kprint};
-use crate::kern::kheap::try_box;
+use crate::kern::kheap::Kalloc;
 use crate::kern::machine::CLOCK_HZ;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, clear_wait, thread_block,
@@ -30,12 +30,12 @@ use crate::kern::sched_prim::{
 };
 use crate::kern::slab::kalloc;
 use crate::kern::task::current_task;
-use alloc::boxed::Box;
 use collections::simple_queue;
 use core::ffi::{c_int, c_uint, c_ulong, c_void};
 use core::mem::{offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
+use kmem::KBox;
 use spin::{Mutex, MutexGuard};
 
 /// `IRQGETPICMODE` of <`device/irq_status.h`>.
@@ -290,13 +290,16 @@ pub(crate) unsafe fn insert_intr_entry(
     id: c_int,
     dst_port: *mut c_void,
 ) -> Option<NonNull<UserIntr>> {
-    let new = try_box(UserIntr {
-        chain: simple_queue::Link::new(),
-        interrupts: 0,
-        n_unacked: 0,
-        dst_port,
-        id,
-    })
+    let new = KBox::try_new(
+        UserIntr {
+            chain: simple_queue::Link::new(),
+            interrupts: 0,
+            n_unacked: 0,
+            dst_port,
+            id,
+        },
+        Kalloc,
+    )
     .ok()?;
 
     let (guard, level) = lock_irq();
@@ -311,7 +314,7 @@ pub(crate) unsafe fn insert_intr_entry(
     } else {
         // The queue keeps the entry for good: the delivery thread unlinks a
         // dead one but never frees it, as the C did not.
-        let new = NonNull::from(Box::leak(new));
+        let new = NonNull::from(KBox::leak(new));
         kprint!(
             "irq handler [{}]: new delivery port {:x} entry {:x} for {}\n",
             id,

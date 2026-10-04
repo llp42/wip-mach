@@ -20,8 +20,6 @@
 // dropping the attribute changes the ported code generation.
 #![allow(clippy::inline_always)]
 
-extern crate alloc;
-
 pub mod arch;
 pub mod config;
 pub mod device;

@@ -11,6 +11,7 @@ constructor.
 | `KBoxSlice<T, A>` | a fixed run of `T` | the array layout |
 | `KVec<T, A>` | a growable run of `T` | the array layout of its capacity |
 | `KRawBuf<A>` | untyped bytes | its size, at 8-byte alignment |
+| `KCString<A>` | bytes and their NUL | the array layout |
 | `RadixTree<T, A>` | nodes indexing `NonNull<T>` by 64-bit key | nodes, through `A` |
 
 `A: Alloc` is stored in each owner. A zero-sized `T` or an empty buffer

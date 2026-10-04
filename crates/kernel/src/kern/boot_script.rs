@@ -16,12 +16,13 @@
 //! and symbols; [`Script::exec`] then loads each command's module into the
 //! task it created, names the ports its arguments mention and resumes it.
 
+use crate::kern::console::CStrArg;
+use crate::kern::kheap::Kalloc;
 use crate::kern::task::Task;
-use alloc::ffi::CString;
-use alloc::vec::Vec;
-use core::ffi::{c_char, c_void};
+use core::ffi::{CStr, c_char, c_void};
 use core::fmt;
 use core::ptr::NonNull;
+use kmem::{AllocError, KCString, KCStringError, KVec};
 
 /// A boot-script failure.
 #[derive(Debug)]
@@ -35,7 +36,7 @@ pub(crate) enum Error {
     /// An assignment targeted a function name.
     InvalidAssignment,
     /// A value expression named a symbol that never received a value.
-    UndefinedSymbol(CString),
+    UndefinedSymbol(KCString<Kalloc>),
     /// The kernel operation behind a function or a load failed.
     Host,
 }
@@ -57,11 +58,26 @@ impl fmt::Display for Error {
             Self::UndefinedSymbol(name) => write!(
                 formatter,
                 "boot script references undefined symbol '{}'",
-                name.to_string_lossy()
+                CStrArg::from(name.as_c_str())
             ),
             Self::Host => {
                 formatter.write_str("boot script kernel operation failed")
             }
+        }
+    }
+}
+
+impl From<AllocError> for Error {
+    fn from(_: AllocError) -> Self {
+        Self::OutOfMemory
+    }
+}
+
+impl From<KCStringError> for Error {
+    fn from(error: KCStringError) -> Self {
+        match error {
+            KCStringError::InteriorNul => Self::Syntax,
+            KCStringError::Alloc(_) => Self::OutOfMemory,
         }
     }
 }
@@ -146,8 +162,8 @@ pub(crate) trait Host {
 
 /// The commands one boot script parsed, and its symbol table.
 pub(crate) struct Script {
-    commands: Vec<Command>,
-    symbols: Vec<Symbol>,
+    commands: KVec<Command, Kalloc>,
+    symbols: KVec<Symbol, Kalloc>,
 }
 
 /// One parsed command: the program, the task made for it and its argv.
@@ -155,13 +171,13 @@ pub(crate) struct Command {
     /// The boot loader's opaque module handle.
     pub(crate) hook: *mut c_void,
     /// The path the line named.
-    pub(crate) path: CString,
+    pub(crate) path: KCString<Kalloc>,
     /// The task `task-create` made, if it ran.
     pub(crate) task: Option<NonNull<Task>>,
     /// The arguments, in order.
-    args: Vec<Arg>,
+    args: KVec<Arg, Kalloc>,
     /// The functions to run once the module has loaded, in order.
-    exec_funcs: Vec<Builtin>,
+    exec_funcs: KVec<Builtin, Kalloc>,
 }
 
 /// One argument: its text, its value, or both.
@@ -169,15 +185,14 @@ pub(crate) struct Command {
 /// Text and value concatenate into one argv word; the language lets a value
 /// sit inside a text argument, as in `disk${root-device}`.
 struct Arg {
-    text: Option<CString>,
+    text: Option<KCString<Kalloc>>,
     value: Option<Value>,
 }
 
 /// The value of a symbol or argument.
-#[derive(Clone)]
 enum Value {
     /// A string the boot sequence published or an expression computed.
-    Str(CString),
+    Str(KCString<Kalloc>),
     /// A port the boot sequence published.
     Port(*mut c_void),
     /// A task a `task-create` call made.
@@ -186,10 +201,24 @@ enum Value {
     Pending(usize),
 }
 
+impl Value {
+    /// A copy of the value; a string is copied onto the heap.
+    fn try_clone(&self) -> Result<Self, Error> {
+        Ok(match self {
+            Self::Str(string) => {
+                Self::Str(KCString::try_from_c_str(string, Kalloc)?)
+            }
+            Self::Port(port) => Self::Port(*port),
+            Self::Task(task) => Self::Task(*task),
+            Self::Pending(index) => Self::Pending(*index),
+        })
+    }
+}
+
 /// A resolved value: a [`Value`] with no references left.
 enum Resolved<'a> {
     /// A string, by reference into the symbol table.
-    Str(&'a CString),
+    Str(&'a CStr),
     /// A port handle.
     Port(*mut c_void),
     /// A task handle.
@@ -198,7 +227,7 @@ enum Resolved<'a> {
 
 /// One symbol-table entry.
 struct Symbol {
-    name: CString,
+    name: KCString<Kalloc>,
     state: SymbolState,
 }
 
@@ -244,7 +273,10 @@ fn skip_blanks(line: &[u8], position: &mut usize) {
 }
 
 /// Appends the decimal spelling of `value` to `buffer`.
-fn push_decimal(buffer: &mut Vec<u8>, mut value: u32) {
+fn push_decimal(
+    buffer: &mut KVec<u8, Kalloc>,
+    mut value: u32,
+) -> Result<(), AllocError> {
     let mut digits = [0u8; 10];
     let mut start = digits.len();
     loop {
@@ -255,17 +287,12 @@ fn push_decimal(buffer: &mut Vec<u8>, mut value: u32) {
             break;
         }
     }
-    buffer.extend_from_slice(&digits[start..]);
+    buffer.extend_from_slice(&digits[start..])
 }
 
 /// Appends `argument` to `command`'s argument list.
 fn push_argument(command: &mut Command, argument: Arg) -> Result<(), Error> {
-    command
-        .args
-        .try_reserve(1)
-        .map_err(|_| Error::OutOfMemory)?;
-    command.args.push(argument);
-    Ok(())
+    Ok(command.args.try_push(argument)?)
 }
 
 impl Script {
@@ -273,8 +300,8 @@ impl Script {
     #[must_use]
     pub(crate) const fn new() -> Self {
         Self {
-            commands: Vec::new(),
-            symbols: Vec::new(),
+            commands: KVec::new(Kalloc),
+            symbols: KVec::new(Kalloc),
         }
     }
 
@@ -289,7 +316,7 @@ impl Script {
         name: &[u8],
         value: &[u8],
     ) -> Result<(), Error> {
-        let value = CString::new(value).map_err(|_| Error::Syntax)?;
+        let value = KCString::try_new(value, Kalloc)?;
         let index = self.intern(name)?;
         self.symbols[index].state = SymbolState::Defined(Value::Str(value));
         Ok(())
@@ -334,19 +361,21 @@ impl Script {
     ) -> Result<(), Error> {
         let mut command = Command {
             hook,
-            path: CString::default(),
+            path: KCString::empty(Kalloc),
             task: None,
-            args: Vec::new(),
-            exec_funcs: Vec::new(),
+            args: KVec::new(Kalloc),
+            exec_funcs: KVec::new(Kalloc),
         };
         match self.scan_line(&mut command, host, line) {
             Ok(()) => {
-                if self.commands.try_reserve(1).is_err() {
+                let pushed = match self.commands.try_reserve(1) {
+                    Ok(()) => self.commands.push_within_capacity(command),
+                    Err(AllocError) => Err(command),
+                };
+                pushed.map_err(|command| {
                     self.discard(host, &command);
-                    return Err(Error::OutOfMemory);
-                }
-                self.commands.push(command);
-                Ok(())
+                    Error::OutOfMemory
+                })
             }
             Err(Error::InvalidSymbol) => Err(Error::InvalidSymbol),
             Err(error) => {
@@ -369,7 +398,7 @@ impl Script {
     pub(crate) fn exec(self, host: &mut dyn Host) -> Result<(), Error> {
         let result = self.run(host);
         let aborting = result.is_err();
-        for command in &self.commands {
+        for command in self.commands.iter() {
             if let Some(task) = command.task {
                 // SAFETY: `task` is the task `Host::create_task` made for
                 // this command and the script holds its only reference.
@@ -385,18 +414,15 @@ impl Script {
         if let Some(index) = self
             .symbols
             .iter()
-            .position(|symbol| symbol.name.as_bytes() == name)
+            .position(|symbol| symbol.name.to_bytes() == name)
         {
             return Ok(index);
         }
-        let name = CString::new(name).map_err(|_| Error::Syntax)?;
-        self.symbols
-            .try_reserve(1)
-            .map_err(|_| Error::OutOfMemory)?;
-        self.symbols.push(Symbol {
+        let name = KCString::try_new(name, Kalloc)?;
+        self.symbols.try_push(Symbol {
             name,
             state: SymbolState::Unset,
-        });
+        })?;
         Ok(self.symbols.len() - 1)
     }
 
@@ -421,8 +447,7 @@ impl Script {
             }
             position += 1;
         }
-        command.path =
-            CString::new(&line[start..position]).map_err(|_| Error::Syntax)?;
+        command.path = KCString::try_new(&line[start..position], Kalloc)?;
 
         while position < line.len() {
             skip_blanks(line, &mut position);
@@ -473,8 +498,7 @@ impl Script {
             }
             *position += 1;
         }
-        let text = CString::new(&line[start..*position])
-            .map_err(|_| Error::Syntax)?;
+        let text = KCString::try_new(&line[start..*position], Kalloc)?;
         let mut argument = Arg {
             text: Some(text),
             value: None,
@@ -538,18 +562,14 @@ impl Script {
                         assigned = true;
                     }
                     Builtin::Resume | Builtin::PromptResume => {
-                        command
-                            .exec_funcs
-                            .try_reserve(1)
-                            .map_err(|_| Error::OutOfMemory)?;
-                        command.exec_funcs.push(builtin);
+                        command.exec_funcs.try_push(builtin)?;
                     }
                 }
             } else {
                 let index = self.intern(name)?;
                 produced = Some(match &self.symbols[index].state {
                     SymbolState::Unset => Value::Pending(index),
-                    SymbolState::Defined(value) => value.clone(),
+                    SymbolState::Defined(value) => value.try_clone()?,
                 });
                 assigned = true;
                 next_target = Some(index);
@@ -559,7 +579,7 @@ impl Script {
                 let value = produced.ok_or(Error::Syntax)?;
                 if let Some(previous) = target {
                     self.symbols[previous].state =
-                        SymbolState::Defined(value.clone());
+                        SymbolState::Defined(value.try_clone()?);
                 }
                 result = Some(value);
             }
@@ -579,7 +599,7 @@ impl Script {
             // command and nothing else holds a reference to it.
             unsafe { host.free_task(task, true) };
         }
-        for command in self.commands.drain(..) {
+        for command in self.commands.drain(..).into_iter().flatten() {
             if let Some(task) = command.task {
                 // SAFETY: `task` is the task `Host::create_task` made for
                 // this command and nothing else holds a reference to it.
@@ -591,44 +611,37 @@ impl Script {
 
     /// Loads and starts every command and then runs its queued functions.
     fn run(&self, host: &mut dyn Host) -> Result<(), Error> {
-        for command in &self.commands {
+        for command in self.commands.iter() {
             if command.task.is_none() {
                 continue;
             }
-            let mut argv: Vec<*const c_char> = Vec::new();
-            let mut storage: Vec<Vec<u8>> = Vec::new();
-            argv.try_reserve(command.args.len() + 1)
-                .map_err(|_| Error::OutOfMemory)?;
-            storage
-                .try_reserve(command.args.len())
-                .map_err(|_| Error::OutOfMemory)?;
+            let mut argv: KVec<*const c_char, Kalloc> =
+                KVec::try_with_capacity(command.args.len() + 1, Kalloc)?;
+            let mut storage: KVec<KVec<u8, Kalloc>, Kalloc> =
+                KVec::try_with_capacity(command.args.len(), Kalloc)?;
             // The program sees its path as argv[0], then one entry per
             // argument.
-            argv.push(command.path.as_ptr());
-            for argument in &command.args {
-                let mut buffer: Vec<u8> = Vec::new();
+            argv.try_push(command.path.as_ptr())?;
+            for argument in command.args.iter() {
+                let mut buffer = KVec::new(Kalloc);
                 if let Some(text) = &argument.text {
-                    buffer
-                        .try_reserve(text.as_bytes().len())
-                        .map_err(|_| Error::OutOfMemory)?;
-                    buffer.extend_from_slice(text.as_bytes());
+                    buffer.extend_from_slice(text.to_bytes())?;
                 }
                 if let Some(value) = &argument.value {
                     self.render(host, command, value, &mut buffer)?;
                 }
-                buffer.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
-                buffer.push(0);
-                argv.push(buffer.as_ptr().cast::<c_char>());
+                buffer.try_push(0)?;
+                argv.try_push(buffer.as_ptr().cast::<c_char>())?;
                 // The buffer's heap allocation does not move when the
-                // `Vec` header moves into `storage`, so the argv pointer
+                // `KVec` header moves into `storage`, so the argv pointer
                 // taken above stays valid.
-                storage.push(buffer);
+                storage.try_push(buffer)?;
             }
             host.exec_command(command, &argv)?;
         }
 
-        for command in &self.commands {
-            for builtin in &command.exec_funcs {
+        for command in self.commands.iter() {
+            for builtin in command.exec_funcs.iter() {
                 match builtin {
                     Builtin::Create => (),
                     Builtin::Resume => host.resume_task(command)?,
@@ -647,27 +660,24 @@ impl Script {
         host: &mut dyn Host,
         command: &Command,
         value: &Value,
-        buffer: &mut Vec<u8>,
+        buffer: &mut KVec<u8, Kalloc>,
     ) -> Result<(), Error> {
         match self.resolve(value)? {
             Resolved::Str(string) => {
-                buffer
-                    .try_reserve(string.as_bytes().len())
-                    .map_err(|_| Error::OutOfMemory)?;
-                buffer.extend_from_slice(string.as_bytes());
+                buffer.extend_from_slice(string.to_bytes())?;
             }
             Resolved::Port(port) => {
                 // SAFETY: ports enter the table only through `set_port`,
                 // which the boot sequence fills with live ports.
                 let name = unsafe { host.insert_port(command, port) }?;
-                push_decimal(buffer, name);
+                push_decimal(buffer, name)?;
             }
             Resolved::Task(task) => {
                 // SAFETY: tasks enter commands only through
                 // `Host::create_task`.
                 let name =
                     unsafe { host.insert_task_port(command, task.as_ptr()) }?;
-                push_decimal(buffer, name);
+                push_decimal(buffer, name)?;
             }
         }
         Ok(())
@@ -687,14 +697,19 @@ impl Script {
                 Value::Port(port) => return Ok(Resolved::Port(*port)),
                 Value::Task(task) => return Ok(Resolved::Task(*task)),
                 Value::Pending(index) => {
+                    let symbol = &self.symbols[*index];
                     if hops > self.symbols.len() {
-                        let name = self.symbols[*index].name.clone();
+                        let name =
+                            KCString::try_from_c_str(&symbol.name, Kalloc)?;
                         return Err(Error::UndefinedSymbol(name));
                     }
                     hops += 1;
-                    match &self.symbols[*index].state {
+                    match &symbol.state {
                         SymbolState::Unset => {
-                            let name = self.symbols[*index].name.clone();
+                            let name = KCString::try_from_c_str(
+                                &symbol.name,
+                                Kalloc,
+                            )?;
                             return Err(Error::UndefinedSymbol(name));
                         }
                         SymbolState::Defined(value) => current = value,

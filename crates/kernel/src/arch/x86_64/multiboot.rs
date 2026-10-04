@@ -18,13 +18,13 @@
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
+use crate::kern::kheap::Kalloc;
 use crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS;
 use crate::vm::vm_page;
-use alloc::ffi::CString;
-use alloc::vec::Vec;
 use core::ffi::{CStr, c_char, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr::with_exposed_provenance;
+use kmem::{AllocError, KCString, KVec};
 
 /// The flags the loader set in the information block, saying which fields
 /// are live.
@@ -210,7 +210,7 @@ const _: () = {
 /// copied image and its command line.
 pub(crate) struct MultibootModule {
     image: ModuleImage,
-    command_line: CString,
+    command_line: KCString<Kalloc>,
 }
 
 impl MultibootModule {
@@ -263,6 +263,10 @@ impl Drop for ModuleImage {
 /// Loads `count` module records at `address` into owned modules; each
 /// command line is copied and each image range is adopted.
 ///
+/// # Errors
+///
+/// [`AllocError`] when the heap cannot hold the list or a command line.
+///
 /// # Safety
 ///
 /// `count` live module records must sit at `address`, mapped, and every
@@ -271,23 +275,23 @@ impl Drop for ModuleImage {
 pub(crate) unsafe fn load_modules(
     address: u32,
     count: u32,
-) -> Vec<MultibootModule> {
+) -> Result<KVec<MultibootModule, Kalloc>, AllocError> {
     let records =
         kv_ptr::<MultibootRawModule>(phystokv(address_value(address)));
-    let mut modules = Vec::with_capacity(count as usize);
+    let mut modules = KVec::try_with_capacity(count as usize, Kalloc)?;
     for index in 0..count as usize {
         let record = unsafe { records.add(index).read() };
         let line = kv_ptr::<c_char>(phystokv(address_value(record.string)));
         let line = unsafe { CStr::from_ptr(line) };
-        modules.push(MultibootModule {
+        modules.try_push(MultibootModule {
             image: ModuleImage {
                 start: address_value(record.mod_start),
                 end: address_value(record.mod_end),
             },
-            command_line: CString::from(line),
-        });
+            command_line: KCString::try_from_c_str(line, Kalloc)?,
+        })?;
     }
-    modules
+    Ok(modules)
 }
 
 /// A physical address in the kernel's direct map.
