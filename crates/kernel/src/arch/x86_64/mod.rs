@@ -49,6 +49,7 @@ pub mod per_cpu;
 pub mod phys;
 pub mod pio;
 pub mod pit;
+pub mod platform;
 pub mod pmap;
 pub mod rtc;
 pub mod seg;

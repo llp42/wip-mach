@@ -4,6 +4,7 @@
 //! The `clock` platform for `x86_64`: the HPET counter, `spl`, the RTC and
 //! the mapped time page.
 
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::{apic, rtc, spl};
 use crate::glue::time_value::{MappedTimeValue, TimeValue64};
 use crate::kern::debug::kpanic;
@@ -16,9 +17,6 @@ use core::ffi::c_int;
 use core::pin::Pin;
 use core::ptr::{self, NonNull, addr_of_mut};
 use core::sync::atomic::{AtomicPtr, Ordering, fence};
-
-/// The machine capabilities `clock` needs, as this kernel provides them.
-pub(crate) struct MachPlatform;
 
 /// The interrupt mask [`MachPlatform::enter_critical`] took.
 pub(crate) struct SplGuard(c_int);

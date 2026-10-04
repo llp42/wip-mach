@@ -13,6 +13,7 @@ repository = "https://github.com/llp42/wip-mach"
 [workspace.dependencies]
 collections = { path = "crates/collections" }
 kmem = { path = "crates/kmem" }
+lock = { path = "crates/lock" }
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
 spin = { version = "=0.12.3", default-features = false, features = ["spin_mutex"] }
 

@@ -30,6 +30,7 @@ use crate::kern::lock::SimpleLock;
 use crate::kern::machine;
 use crate::kern::policy::{POLICY_FIXEDPRI, POLICY_TIMESHARE, invalid_policy};
 use crate::kern::processor::{self, Processor, ProcessorRef, ProcessorSet};
+use crate::kern::rcu::{RcuHead, call_rcu};
 use crate::kern::sched::{
     BASEPRI_SYSTEM, RUN_QUEUE_NULL, RunQueue, SCHED_SCALE, invalid_pri,
 };
@@ -53,7 +54,9 @@ use core::ffi::{c_char, c_int, c_long, c_uint, c_void};
 use core::mem::{MaybeUninit, offset_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
-use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+#[cfg(debug_assertions)]
+use lock::HeldLocks;
 
 /// `TASK_NAME_SIZE` in <kern/task.h>, the length of `thread.name`.
 pub const TASK_NAME_SIZE: usize = 32;
@@ -320,6 +323,15 @@ pub struct Thread {
     /// `last_processor`: the processor the thread last ran on.
     pub last_processor: *mut Processor,
     pub name: [c_char; TASK_NAME_SIZE],
+    /// Set by a `lock` unpark, cleared by the park it releases; the
+    /// address is the event the thread parks on.
+    pub(crate) park_token: AtomicBool,
+    /// The locks the thread holds, for the `lock` order checker.
+    #[cfg(debug_assertions)]
+    pub(crate) held_locks: HeldLocks,
+    /// Defers the record's return to its cache past a grace period, so a
+    /// late `lock` unpark still finds it.
+    rcu_head: RcuHead,
 }
 
 tail_queue::adapter!(
@@ -364,11 +376,12 @@ impl Thread {
     #[must_use]
     pub fn new() -> Self {
         // Zero every field except the callouts, which have no all-zero
-        // image (a null wheel pointer); those are written before the
-        // value is assumed initialized.
+        // image (a null wheel pointer), and the held-lock record, whose
+        // layout is `lock`'s; those are written before the value is
+        // assumed initialized.
         let mut slot = MaybeUninit::<Self>::zeroed();
         // SAFETY: `slot` is uninit storage large enough for `Self`; the
-        // two writes below are the first initialization of those fields.
+        // writes below are the first initialization of those fields.
         unsafe {
             let base = slot.as_mut_ptr();
             ptr::addr_of_mut!((*base).timer).write(MachCallout::new(
@@ -381,9 +394,12 @@ impl Thread {
                 depress_timeout_action,
                 (),
             ));
+            #[cfg(debug_assertions)]
+            ptr::addr_of_mut!((*base).held_locks).write(HeldLocks::new());
         }
         // SAFETY: every field is now initialized: zeros accept the
-        // pointers, unions and locks, and the callouts were written.
+        // pointers, unions, locks, park token and RCU head, and the
+        // callouts and held-lock record were written.
         let mut thread = unsafe { slot.assume_init() };
 
         thread.runq = RUN_QUEUE_NULL;
@@ -1853,11 +1869,18 @@ impl Thread {
         unsafe { eventcount::notify_abort(thread) };
         unsafe { crate::arch::x86_64::pcb::pcb_terminate(thread) };
 
-        // SAFETY: the thread came from `THREAD_CACHE`, and the entry check
-        // makes its pointer non-null, so the free is sound.
+        // A `lock` unpark may still be on its way to the record, so it
+        // returns to the cache only once a grace period has passed.
+        // SAFETY: the thread is dead and unreferenced, so nothing else
+        // queues its RCU head; the callback gets that head back, inside the
+        // record that came from `THREAD_CACHE`, once no reader can see it.
         unsafe {
-            (*ptr::addr_of_mut!(THREAD_CACHE))
-                .free(NonNull::new_unchecked(thread.cast::<u8>()));
+            call_rcu(&raw mut (*thread).rcu_head, |head| {
+                let thread =
+                    head.byte_sub(offset_of!(Self, rcu_head)).cast::<u8>();
+                (*ptr::addr_of_mut!(THREAD_CACHE))
+                    .free(NonNull::new_unchecked(thread));
+            });
         }
     }
 

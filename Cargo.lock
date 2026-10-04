@@ -236,6 +236,7 @@ dependencies = [
  "collections",
  "elf-load",
  "kmem",
+ "lock",
  "mach-mig-sys",
  "spin",
 ]
