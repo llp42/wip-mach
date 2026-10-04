@@ -108,7 +108,8 @@ deletes its entry; a change that opens one adds it.
 ## `static mut` holds global state
 
 - **ADR**: ADR 0027.
-- **Where**: 180 `static mut` in 54 kernel files.
+- **Where**: 152 `static mut` in 50 kernel files, and 10 in
+  `mach-mig-sys`.
 - **Done when**: `grep -rn 'static mut ' crates` prints nothing.
 
 ## Module files keep upstream prefixes

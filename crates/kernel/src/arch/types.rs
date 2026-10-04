@@ -4,12 +4,17 @@
 //! Machine scalar types, from `i386/include/mach/i386/vm_types.h`, the header
 //! the 64-bit kernel installs as `<machine/vm_types.h>`.
 
+use core::sync::atomic::AtomicUsize;
+
 /// `vm_offset_t`: a type-neutral pointer, `uintptr_t` in the C.
 pub type VmOffset = usize;
 
 /// `vm_size_t`: the difference between two `vm_offset_t`s, likewise a
 /// `uintptr_t` in the C.
 pub type VmSize = usize;
+
+/// A [`VmSize`] shared between CPUs without a lock.
+pub type AtomicVmSize = AtomicUsize;
 
 /// `rpc_phys_addr_t`: a physical address on the user/kernel interface, always
 /// 64 bits.
