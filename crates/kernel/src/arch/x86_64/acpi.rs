@@ -60,8 +60,7 @@ const fn phystokv(phys: VmOffset) -> VmOffset {
 }
 
 /// Maps the `size` bytes at physical address `phys` into the kernel map
-/// with `mode`, for good: the kernel map cannot take back a range
-/// `kmem_map_aligned_table` made.
+/// with `mode`, until `kmem_unmap_aligned_table` takes them back.
 fn map_physical<T>(
     phys: VmOffset,
     size: VmSize,
@@ -83,12 +82,15 @@ struct BootMemory;
 ///
 /// # Invariants
 ///
-/// `base..base + len` is mapped readable for good: the direct map covers
-/// the low MiB, and [`map_physical`] never unmaps.
+/// `base..base + len` is mapped readable while the window lives: the
+/// direct map covers the low MiB for good, and a `mapped` window is
+/// unmapped only when it drops.
 #[derive(Debug)]
 struct Window {
     base: NonNull<u8>,
     len: usize,
+    /// The range came from [`map_physical`] and is unmapped on drop.
+    mapped: bool,
 }
 
 impl Deref for Window {
@@ -102,6 +104,22 @@ impl Deref for Window {
     }
 }
 
+impl Drop for Window {
+    fn drop(&mut self) {
+        if self.mapped {
+            // SAFETY: `map_physical` mapped this range into the live
+            // `KERNEL_MAP`, and no slice of the window outlives it.
+            unsafe {
+                vm_kern::kmem_unmap_aligned_table(
+                    &mut *KERNEL_MAP.cast::<VmMap>(),
+                    self.base.as_ptr().expose_provenance(),
+                    self.len,
+                );
+            }
+        }
+    }
+}
+
 impl PhysicalMemory for BootMemory {
     type Region<'a> = Window;
 
@@ -111,10 +129,18 @@ impl PhysicalMemory for BootMemory {
             let base = NonNull::new(ptr::with_exposed_provenance_mut::<u8>(
                 phystokv(phys),
             ))?;
-            return Some(Window { base, len });
+            return Some(Window {
+                base,
+                len,
+                mapped: false,
+            });
         }
         let base = map_physical::<u8>(phys, len, VmProt::READ)?;
-        Some(Window { base, len })
+        Some(Window {
+            base,
+            len,
+            mapped: true,
+        })
     }
 }
 

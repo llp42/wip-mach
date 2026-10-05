@@ -1021,6 +1021,35 @@ unsafe fn map_bd(
     virt
 }
 
+/// Takes back a range [`pmap_map_bd`] mapped.
+///
+/// The entries are cleared as `pmap_map_bd` set them, outside the pv
+/// lists: no pv list ever held them, so `pmap_remove` would go looking for
+/// a mapping of a managed page that is not there.
+///
+/// # Safety
+///
+/// `virt..end` must be a kernel range `pmap_map_bd` mapped, which nothing
+/// uses afterwards.
+pub(crate) unsafe fn pmap_unmap_bd(virt: VmOffset, end: VmOffset) {
+    let pmap = kernel_pmap_ptr();
+    let spl = unsafe { read_lock(pmap) };
+    let mut va = virt;
+    while va < end {
+        // SAFETY: the kernel map is live and locked.
+        let pte = unsafe { pte_of(pmap, va) };
+        if !pte.is_null() {
+            // SAFETY: `pte_of()` returned the live entry for `va`.
+            unsafe { *pte = 0 };
+        }
+        va = va.wrapping_add(PAGE_SIZE);
+    }
+    // SAFETY: the kernel map is live, locked at `splvm` by `read_lock()`.
+    unsafe { update_tlbs(pmap, virt, end) };
+    // SAFETY: the kernel map is live and the lock was taken above.
+    unsafe { read_unlock(pmap, spl) };
+}
+
 /// Builds the kernel's level-4 table and directory-pointer tables.
 fn bootstrap_pae() {
     let l4 =

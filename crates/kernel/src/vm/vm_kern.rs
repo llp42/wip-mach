@@ -15,6 +15,7 @@ use crate::arch::x86_64::pmap::pmap_map_bd;
 use crate::arch::x86_64::pmap::pmap_pageable;
 use crate::arch::x86_64::pmap::pmap_reference;
 use crate::arch::x86_64::pmap::pmap_remove;
+use crate::arch::x86_64::pmap::pmap_unmap_bd;
 use crate::arch::x86_64::user_access::{self, UserFault};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
@@ -160,6 +161,9 @@ pub(crate) fn kmem_alloc_wired(
 
 /// Maps a physical table at a kernel address with the physical address's
 /// in-page offset.
+///
+/// No memory backs the range: its page-table entries name `phys_address`
+/// directly, and [`kmem_unmap_aligned_table`] takes it back.
 pub(crate) fn kmem_map_aligned_table(
     map: NonNull<VmMap>,
     phys_address: VmOffset,
@@ -170,9 +174,11 @@ pub(crate) fn kmem_map_aligned_table(
     let nearest_page = phys_address.wrapping_sub(into_page);
     let size = round_page(size.wrapping_add(into_page));
 
-    let virt_addr = kmem_alloc_wired(map, size).ok()?;
+    // SAFETY: the callers pass the live kernel map, unlocked.
+    let virt_addr =
+        kmem_alloc_pageable(unsafe { &mut *map.as_ptr() }, size).ok()?;
 
-    // SAFETY: `virt_addr` is the wired region just allocated, and
+    // SAFETY: `virt_addr` is the free range just reserved, and
     // `nearest_page..nearest_page + size` is the physical range it stands for.
     unsafe {
         pmap_map_bd(
@@ -190,6 +196,24 @@ pub(crate) fn kmem_map_aligned_table(
             virt_addr.wrapping_add(into_page),
         ))
     })
+}
+
+/// Takes back a range [`kmem_map_aligned_table`] mapped, given the address
+/// it returned and the size it was asked for.
+///
+/// # Safety
+///
+/// `addr..addr + size` must be a range `kmem_map_aligned_table` mapped
+/// into `map`, which nothing uses afterwards.
+pub(crate) unsafe fn kmem_unmap_aligned_table(
+    map: &mut VmMap,
+    addr: VmOffset,
+    size: VmSize,
+) {
+    let start = trunc_page(addr);
+    let end = round_page(addr.wrapping_add(size));
+    unsafe { pmap_unmap_bd(start, end) };
+    let _ = kmem_free(map, start, end.wrapping_sub(start));
 }
 
 /// Reserves pageable space in the kernel map.
