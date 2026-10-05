@@ -10,11 +10,12 @@
 //! receive thread fills, the filter lists an interface heads, and the layouts
 //! their bodies read.
 //!
-//! The locks are [`SimpleLock`] values, and [`net_thread`] is the receive
-//! thread's entry.
+//! The send queues and the free pool sit under irq spin locks, since their
+//! users may run with interrupts disabled; the other locks are
+//! [`SimpleLock`] values. [`net_thread`] is the receive thread's entry.
 
 use crate::arch::x86_64::per_cpu::cpu_id;
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::ipc::ipc_kmsg::{self, Kmsg, ikm_plus_overhead};
 use crate::ipc::ipc_mqueue;
 use crate::ipc::ipc_port;
@@ -35,6 +36,7 @@ use core::mem::{offset_of, size_of};
 use core::pin::{Pin, pin};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use lock::RawIrqSpinLock;
 
 /// The most filter words a receive port holds.
 pub(crate) const NET_MAX_FILTER: usize = 128;
@@ -1077,9 +1079,10 @@ const _: () = {
 };
 
 /// Guards the high and low send queues and `NET_THREAD_AWAKE`.
-static NET_QUEUE_LOCK: SimpleLock = SimpleLock::new();
+static NET_QUEUE_LOCK: RawIrqSpinLock<MachPlatform> = RawIrqSpinLock::new();
 /// Guards the free message pool.
-static NET_QUEUE_FREE_LOCK: SimpleLock = SimpleLock::new();
+static NET_QUEUE_FREE_LOCK: RawIrqSpinLock<MachPlatform> =
+    RawIrqSpinLock::new();
 /// Guards the allocation counters.
 static NET_KMSG_TOTAL_LOCK: SimpleLock = SimpleLock::new();
 /// Serializes picking a free hash-header slot.
@@ -1242,13 +1245,9 @@ unsafe fn kmsg_free(kmsg: *mut c_void) {
 ///
 /// # Safety
 ///
-/// The caller must run in kernel mode with `%gs` based at the running CPU's
-/// per-CPU block, as [`spl::splimp`] requires, and must hold neither
-/// [`NET_QUEUE_FREE_LOCK`] nor [`NET_QUEUE_LOCK`].
+/// The caller must hold neither [`NET_QUEUE_FREE_LOCK`] nor
+/// [`NET_QUEUE_LOCK`].
 pub(crate) unsafe fn kmsg_get() -> Option<Kmsg> {
-    // SAFETY: this thread runs in kernel mode with `%gs` based.
-    let s = unsafe { spl::splimp() };
-
     NET_QUEUE_FREE_LOCK.lock();
     let mut kmsg = unsafe { ipc_kmsg::dequeue(queue_free()) };
     if kmsg.is_some() {
@@ -1256,7 +1255,8 @@ pub(crate) unsafe fn kmsg_get() -> Option<Kmsg> {
         // SAFETY: the free lock serializes this counter.
         unsafe { *NET_QUEUE_FREE_HITS.0.get() += 1 };
     }
-    NET_QUEUE_FREE_LOCK.unlock();
+    // SAFETY: the free lock was taken above.
+    unsafe { NET_QUEUE_FREE_LOCK.unlock() };
 
     if kmsg.is_none() {
         NET_QUEUE_LOCK.lock();
@@ -1266,25 +1266,23 @@ pub(crate) unsafe fn kmsg_get() -> Option<Kmsg> {
             // SAFETY: the queue lock serializes this counter.
             unsafe { *NET_QUEUE_FREE_STEALS.0.get() += 1 };
         }
-        NET_QUEUE_LOCK.unlock();
+        // SAFETY: the queue lock was taken above.
+        unsafe { NET_QUEUE_LOCK.unlock() };
     }
 
     if kmsg.is_none() {
         NET_QUEUE_FREE_MISSES.fetch_add(1, Ordering::Relaxed);
     }
-    // SAFETY: `s` is the mask this thread saved.
-    let _ = unsafe { spl::splx(s) };
 
     if want_more() || kmsg.is_none() {
-        // SAFETY: this thread runs in kernel mode with `%gs` based.
-        let s = unsafe { spl::splimp() };
         NET_QUEUE_LOCK.lock();
         // SAFETY: the queue lock serializes the flag.
         let awake = unsafe { *NET_THREAD_AWAKE.0.get() };
-        unsafe { *NET_THREAD_AWAKE.0.get() = true };
-        NET_QUEUE_LOCK.unlock();
-        // SAFETY: `s` is the mask this thread saved.
-        let _ = unsafe { spl::splx(s) };
+        // SAFETY: as above, and the lock is released after the store.
+        unsafe {
+            *NET_THREAD_AWAKE.0.get() = true;
+            NET_QUEUE_LOCK.unlock();
+        }
 
         if !awake {
             unsafe {
@@ -1305,16 +1303,13 @@ pub(crate) unsafe fn kmsg_get() -> Option<Kmsg> {
 /// # Safety
 ///
 /// `kmsg` must be null or a pointer to a message this call owns
-/// exclusively and that is linked into no queue; the caller must run in
-/// kernel mode with `%gs` based, as [`spl::splimp`] requires, and must not
-/// already hold [`NET_QUEUE_FREE_LOCK`].
+/// exclusively and that is linked into no queue; the caller must not already
+/// hold [`NET_QUEUE_FREE_LOCK`].
 pub(crate) unsafe fn kmsg_put(kmsg: *mut c_void) {
     let Some(kmsg) = NonNull::new(kmsg) else {
         return;
     };
 
-    // SAFETY: this thread runs in kernel mode with `%gs` based.
-    let s = unsafe { spl::splimp() };
     NET_QUEUE_FREE_LOCK.lock();
     unsafe { ipc_kmsg::enqueue(queue_free(), Kmsg::from_raw(kmsg.as_ptr())) };
     let size = NET_QUEUE_FREE_SIZE
@@ -1325,21 +1320,17 @@ pub(crate) unsafe fn kmsg_put(kmsg: *mut c_void) {
     if size > *max {
         *max = size;
     }
-    NET_QUEUE_FREE_LOCK.unlock();
-    // SAFETY: `s` is the mask this thread saved.
-    let _ = unsafe { spl::splx(s) };
+    // SAFETY: the free lock was taken above.
+    unsafe { NET_QUEUE_FREE_LOCK.unlock() };
 }
 
 /// Frees the pool's messages beyond its minimum.
 ///
 /// # Safety
 ///
-/// The caller must run in kernel mode with `%gs` based, as
-/// [`spl::splimp`] requires, and must hold none of [`NET_QUEUE_FREE_LOCK`],
-/// [`NET_QUEUE_LOCK`] or [`NET_KMSG_TOTAL_LOCK`].
+/// The caller must hold none of [`NET_QUEUE_FREE_LOCK`], [`NET_QUEUE_LOCK`]
+/// or [`NET_KMSG_TOTAL_LOCK`].
 pub(crate) unsafe fn kmsg_collect() {
-    // SAFETY: this thread runs in kernel mode with `%gs` based.
-    let mut s = unsafe { spl::splimp() };
     NET_QUEUE_FREE_LOCK.lock();
     while NET_QUEUE_FREE_SIZE.load(Ordering::Relaxed)
         > NET_QUEUE_FREE_MIN.load(Ordering::Relaxed)
@@ -1347,9 +1338,8 @@ pub(crate) unsafe fn kmsg_collect() {
         // SAFETY: the free lock serializes the queue.
         let kmsg = unsafe { ipc_kmsg::dequeue(queue_free()) };
         NET_QUEUE_FREE_SIZE.fetch_sub(1, Ordering::Relaxed);
-        NET_QUEUE_FREE_LOCK.unlock();
-        // SAFETY: `s` is the mask this thread saved.
-        let _ = unsafe { spl::splx(s) };
+        // SAFETY: the free lock was taken above.
+        unsafe { NET_QUEUE_FREE_LOCK.unlock() };
 
         if let Some(kmsg) = kmsg {
             // SAFETY: the dequeued message is this call's allocation.
@@ -1359,13 +1349,10 @@ pub(crate) unsafe fn kmsg_collect() {
             NET_KMSG_TOTAL_LOCK.unlock();
         }
 
-        // SAFETY: this thread runs in kernel mode with `%gs` based.
-        s = unsafe { spl::splimp() };
         NET_QUEUE_FREE_LOCK.lock();
     }
-    NET_QUEUE_FREE_LOCK.unlock();
-    // SAFETY: `s` is the mask this thread saved.
-    let _ = unsafe { spl::splx(s) };
+    // SAFETY: the free lock was taken above.
+    unsafe { NET_QUEUE_FREE_LOCK.unlock() };
 }
 
 /// Allocates messages into the free pool while it should grow.
@@ -1399,7 +1386,7 @@ unsafe fn kmsg_more() {
 ///
 /// # Safety
 ///
-/// Called holding [`NET_QUEUE_LOCK`] at splimp; it returns holding the lock.
+/// Called holding [`NET_QUEUE_LOCK`]; it returns holding the lock.
 unsafe fn deliver(nonblocking: bool) -> bool {
     let kmsg;
     let high_priority;
@@ -1419,9 +1406,8 @@ unsafe fn deliver(nonblocking: bool) -> bool {
             None => return false,
         },
     }
-    NET_QUEUE_LOCK.unlock();
-    // SAFETY: `spl0()` only opens the gates on this CPU.
-    let _ = unsafe { spl::spl0() };
+    // SAFETY: the caller holds the queue lock.
+    unsafe { NET_QUEUE_LOCK.unlock() };
 
     let mut send_list = IpcKmsgQueue {
         base: ptr::null_mut(),
@@ -1484,8 +1470,6 @@ unsafe fn deliver(nonblocking: bool) -> bool {
         }
     }
 
-    // SAFETY: this thread runs in kernel mode with `%gs` based.
-    let _ = unsafe { spl::splimp() };
     NET_QUEUE_LOCK.lock();
     true
 }
@@ -1500,18 +1484,14 @@ unsafe fn deliver(nonblocking: bool) -> bool {
 pub(crate) unsafe fn ast() {
     NET_AST_TAKEN.fetch_add(1, Ordering::Relaxed);
 
-    // SAFETY: this thread runs in kernel mode with `%gs` based.
-    let s = unsafe { spl::splimp() };
     NET_QUEUE_LOCK.lock();
-    // SAFETY: the lock is held, and `deliver` returns holding it.
-    while unsafe { !*NET_THREAD_AWAKE.0.get() && deliver(true) } {}
-    NET_QUEUE_LOCK.unlock();
-    // SAFETY: `splsched()` only changes this CPU's mask from kernel
-    // mode.
-    let _ = unsafe { spl::splsched() };
+    // SAFETY: the lock is held, and `deliver` returns holding it, so it is
+    // held for the release.
+    unsafe {
+        while !*NET_THREAD_AWAKE.0.get() && deliver(true) {}
+        NET_QUEUE_LOCK.unlock();
+    }
     ast::off(cpu_id(), AstReason::NETWORK);
-    // SAFETY: `s` is the mask this thread saved.
-    let _ = unsafe { spl::splx(s) };
 }
 
 /// The receive thread body, which never returns.
@@ -1527,8 +1507,6 @@ unsafe fn thread_continue_inner() -> ! {
         // SAFETY: the receive thread may allocate.
         unsafe { kmsg_more() };
 
-        // SAFETY: this thread runs in kernel mode with `%gs` based.
-        let s = unsafe { spl::splimp() };
         NET_QUEUE_LOCK.lock();
         // SAFETY: the lock is held, and `deliver` returns holding it.
         while unsafe { deliver(false) } {}
@@ -1541,9 +1519,8 @@ unsafe fn thread_continue_inner() -> ! {
                 0,
             );
         };
-        NET_QUEUE_LOCK.unlock();
-        // SAFETY: `s` is the mask this thread saved.
-        let _ = unsafe { spl::splx(s) };
+        // SAFETY: the queue lock is held, as `deliver` left it.
+        unsafe { NET_QUEUE_LOCK.unlock() };
 
         // SAFETY: the current thread holds no spin lock and has set its wait
         // state.
@@ -1569,8 +1546,6 @@ pub(crate) unsafe fn thread() -> ! {
     // lock.
     unsafe { Thread::set_own_priority(0) };
 
-    // SAFETY: this thread runs in kernel mode with `%gs` based.
-    let s = unsafe { spl::splimp() };
     NET_QUEUE_LOCK.lock();
     // SAFETY: the queue lock serializes the flag.
     unsafe { *NET_THREAD_AWAKE.0.get() = false };
@@ -1581,9 +1556,8 @@ pub(crate) unsafe fn thread() -> ! {
             0,
         );
     };
-    NET_QUEUE_LOCK.unlock();
-    // SAFETY: `s` is the mask this thread saved.
-    let _ = unsafe { spl::splx(s) };
+    // SAFETY: the queue lock was taken above.
+    unsafe { NET_QUEUE_LOCK.unlock() };
 
     // SAFETY: the current thread holds no spin lock and has set its wait
     // state.
@@ -2353,11 +2327,9 @@ pub(crate) unsafe fn init() {
         );
     }
 
-    NET_QUEUE_FREE_LOCK.init();
     // SAFETY: this call owns the queues before threads start.
     unsafe { (*queue_free()).base = ptr::null_mut() };
 
-    NET_QUEUE_LOCK.init();
     unsafe {
         (*queue_high()).base = ptr::null_mut();
         (*queue_low()).base = ptr::null_mut();
