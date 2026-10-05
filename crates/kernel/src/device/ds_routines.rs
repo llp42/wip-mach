@@ -18,7 +18,6 @@ use crate::arch::x86_64::io_req::{DevT, IoReq, IoReqQueue};
 use crate::arch::x86_64::irq;
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::platform::MachPlatform;
-use crate::arch::x86_64::spl;
 use crate::arch::x86_64::user_access;
 use crate::config::NINTR;
 use crate::device::dev_lookup;
@@ -2144,7 +2143,6 @@ pub(crate) unsafe fn iodone(ior: *mut IoReq) {
             return;
         }
 
-        let s = spl::splsched();
         if (*ior).op & IO_CALL == 0 {
             (*ior).lock.lock();
             (*ior).op |= IO_DONE;
@@ -2153,13 +2151,10 @@ pub(crate) unsafe fn iodone(ior: *mut IoReq) {
             thread_wakeup_prim(ior.cast::<c_void>(), 0, THREAD_AWAKENED);
         } else {
             (*ior).op |= IO_DONE;
-            {
-                let _guard = IO_DONE_LIST_LOCK.lock();
-                io_done_list().push_back_ptr(NonNull::new_unchecked(ior));
-                thread_wakeup_prim(io_done_event(), 0, THREAD_AWAKENED);
-            }
+            let _guard = IO_DONE_LIST_LOCK.lock();
+            io_done_list().push_back_ptr(NonNull::new_unchecked(ior));
+            thread_wakeup_prim(io_done_event(), 0, THREAD_AWAKENED);
         }
-        spl::splx(s);
     }
 }
 
@@ -2167,9 +2162,6 @@ pub(crate) unsafe fn iodone(ior: *mut IoReq) {
 /// request.
 unsafe extern "C" fn io_done_thread_continue() {
     loop {
-        // SAFETY: the interrupt level and the list lock serialize the list
-        // against `iodone()`.
-        let mut s = unsafe { spl::splhigh() };
         loop {
             let guard = IO_DONE_LIST_LOCK.lock();
             // SAFETY: the list is this module's static and the lock is held.
@@ -2182,14 +2174,10 @@ unsafe extern "C" fn io_done_thread_continue() {
                         assert_wait(NonNull::new(io_done_event()), 0);
                     }
                     drop(guard);
-                    // SAFETY: `s` is this iteration's `splhigh()`.
-                    unsafe { spl::splx(s) };
                     break;
                 }
                 Some(entry) => {
                     drop(guard);
-                    // SAFETY: `s` is this iteration's `splhigh()`.
-                    unsafe { spl::splx(s) };
                     let ior = ptr::from_mut(entry);
                     // SAFETY: every list entry is a live request.
                     let finished =
@@ -2198,9 +2186,6 @@ unsafe extern "C" fn io_done_thread_continue() {
                         // SAFETY: the completion released the request.
                         unsafe { io_req_free(ior) };
                     }
-                    // SAFETY: raising the level has no precondition the
-                    // I/O-done thread does not meet.
-                    s = unsafe { spl::splhigh() };
                 }
             }
         }

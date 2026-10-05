@@ -8,14 +8,15 @@
 
 //! The I/O request the device layer and the x86 drivers share.
 
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::device::r#return::DeviceError;
-use crate::kern::lock::SimpleLock;
 use crate::utils::kd_queue::{KdEvent, KdEventQueue};
 use crate::vm::vm_map::VmMapCopy;
 use collections::simple_queue::{self, SimpleQueue};
 use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
+use lock::RawIrqSpinLock;
 
 /// A device number.
 pub type DevT = u16;
@@ -58,13 +59,18 @@ pub struct IoReq {
     pub rlink: *mut Self,
     pub copy: *mut VmMapCopy,
     pub total: c_long,
-    pub lock: SimpleLock,
+    pub(crate) lock: RawIrqSpinLock<MachPlatform>,
     pub physrec: c_long,
     pub rectotal: c_long,
 }
 
+/// Where the fields after the request's lock start: the lock is one word in
+/// release builds and grows by its lock class in debug builds.
+const AFTER_LOCK: usize =
+    (144 + size_of::<RawIrqSpinLock<MachPlatform>>()).next_multiple_of(8);
+
 const _: () = {
-    assert!(size_of::<IoReq>() == 168);
+    assert!(size_of::<IoReq>() == AFTER_LOCK + 16);
     assert!(align_of::<IoReq>() == 8);
     assert!(offset_of!(IoReq, node) == 0);
     assert!(offset_of!(IoReq, device) == 8);
@@ -86,8 +92,8 @@ const _: () = {
     assert!(offset_of!(IoReq, copy) == 128);
     assert!(offset_of!(IoReq, total) == 136);
     assert!(offset_of!(IoReq, lock) == 144);
-    assert!(offset_of!(IoReq, physrec) == 152);
-    assert!(offset_of!(IoReq, rectotal) == 160);
+    assert!(offset_of!(IoReq, physrec) == AFTER_LOCK);
+    assert!(offset_of!(IoReq, rectotal) == AFTER_LOCK + 8);
 };
 
 simple_queue::adapter!(
@@ -130,7 +136,7 @@ impl IoReq {
             rlink: ptr::null_mut(),
             copy: ptr::null_mut(),
             total: 0,
-            lock: SimpleLock::new(),
+            lock: RawIrqSpinLock::new(),
             physrec: 0,
             rectotal: 0,
         }
