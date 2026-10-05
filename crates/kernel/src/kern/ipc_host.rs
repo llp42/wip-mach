@@ -8,13 +8,13 @@
 //! The host, processor and processor-set ports.
 
 use crate::arch::types::VmOffset;
-use crate::ipc::{IpcPort, IpcSpace, ipc_port, ipc_space};
+use crate::ipc::{IpcPort, ipc_port, ipc_space};
 use crate::kern::debug::kpanic;
 use crate::kern::error::Error;
 use crate::kern::host::{self, Host};
 use crate::kern::ipc_kobject::set;
+use crate::kern::ipc_mig::current_space;
 use crate::kern::processor::{self, Processor, ProcessorSet};
-use crate::kern::task::current_task;
 use core::ffi::{c_uint, c_void};
 use core::ptr;
 use core::ptr::NonNull;
@@ -89,9 +89,7 @@ pub(crate) unsafe fn init() {
 ///
 /// # Safety
 ///
-/// Must run on the current thread's own context after `init()` has built
-/// the host port: `current_task()` requires a live current thread, and that
-/// task's IPC space must already be set.
+/// Must run after `init()` has built the host port.
 pub(crate) unsafe fn mach_host_self() -> c_uint {
     // SAFETY: `realhost` is the live host object.
     let host_self = unsafe { (*host::realhost()).host_self };
@@ -101,9 +99,7 @@ pub(crate) unsafe fn mach_host_self() -> c_uint {
 
     // SAFETY: the host port is live and active from `init` on.
     let sright = unsafe { ipc_port::make_send(port) };
-    // SAFETY: the running task is live, and its space is set before any IPC
-    // call the task can make; the `current_space()` macro.
-    let space = unsafe { IpcSpace::from_raw((*current_task()).itk_space) };
+    let space = current_space();
     // SAFETY: the right is live and belongs to this task's space; the
     // successful copyout consumes it.
     unsafe { ipc_port::copyout_send(sright.as_ptr(), space) }
@@ -113,7 +109,7 @@ pub(crate) unsafe fn mach_host_self() -> c_uint {
 ///
 /// # Safety
 ///
-/// Runs on the caller's own thread once [`init`] has built the host port.
+/// Runs once [`init`] has built the host port.
 pub(crate) unsafe extern "C" fn mach_host_self_entry() -> c_uint {
     unsafe { mach_host_self() }
 }

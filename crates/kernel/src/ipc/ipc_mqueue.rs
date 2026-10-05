@@ -285,11 +285,9 @@ pub(crate) unsafe fn send(
         }
     }
 
+    let task = current_task();
     // SAFETY: the current task is live.
-    unsafe {
-        let task = current_task();
-        (*task).messages_sent = (*task).messages_sent.wrapping_add(1);
-    }
+    unsafe { (*task).messages_sent = (*task).messages_sent.wrapping_add(1) };
 
     Ok(())
 }
@@ -708,11 +706,11 @@ unsafe fn finish_receive(
     // SAFETY: the port is live and locked.
     unsafe { port.unlock() };
 
+    let task = current_task();
     // SAFETY: the current task is live.
     unsafe {
-        let task = current_task();
         (*task).messages_received = (*task).messages_received.wrapping_add(1);
-    }
+    };
 
     Received::Kmsg { kmsg, seqno }
 }

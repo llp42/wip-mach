@@ -288,14 +288,24 @@ static TASK_COLLECT_ALLOWED: AtomicI32 = AtomicI32::new(1);
 static TASK_COLLECT_LAST_TICK: AtomicU32 = AtomicU32::new(0);
 static TASK_COLLECT_MAX_RATE: AtomicU32 = AtomicU32::new(0);
 
-/// The running thread's task.
+/// Returns the running thread's task.
 ///
-/// # Safety
+/// The task is live for as long as the thread runs. The pointer stays raw:
+/// other threads write the task's fields concurrently.
 ///
-/// Must be called from a thread context: every running CPU has a live
-/// current thread with a live task.
-pub(crate) unsafe fn current_task() -> *mut Task {
-    unsafe { (*per_cpu::thread()).task }
+/// # Panics
+///
+/// If the CPU runs no thread: early in boot, before its first one, or after
+/// its processor shut down.
+pub(crate) fn current_task() -> *mut Task {
+    let thread = per_cpu::thread();
+    assert!(!thread.is_null(), "current_task: no current thread");
+    // SAFETY: a non-null per-CPU thread is the one this CPU runs or is
+    // switching to, and a thread is freed only once stopped, so it is live.
+    // Its `task` is written once, before it first runs, and it holds a
+    // reference to that task until it is freed: the task is live while the
+    // thread runs.
+    unsafe { (*thread).task }
 }
 
 /// The pages the pmap has resident.
@@ -669,7 +679,7 @@ pub(crate) unsafe fn terminate(task: *mut Task) -> Result<(), Error> {
         return Err(Error::InvalidArgument);
     }
 
-    let cur_task = unsafe { current_task() };
+    let cur_task = current_task();
     let cur_thread = per_cpu::thread();
 
     if task == cur_task {
@@ -1121,7 +1131,7 @@ pub(crate) unsafe fn suspend(task: *mut Task) -> Result<(), Error> {
     unsafe { hold(task) }?;
     unsafe { dowait(task, false) }?;
 
-    if unsafe { current_task() } == task {
+    if current_task() == task {
         let thread = per_cpu::thread();
         // SAFETY: the current thread is live.
         unsafe { Thread::hold(thread) };
@@ -1326,9 +1336,9 @@ pub(crate) unsafe fn assign(
         return Ok(());
     }
 
-    // SAFETY: the task lock is held, and the current thread is live.
-    unsafe {
-        if current_task() == task {
+    if current_task() == task {
+        // SAFETY: the task lock is held, and the current thread is live.
+        unsafe {
             (*task).lock.unlock();
             Thread::freeze(per_cpu::thread());
             (*task).lock.lock();

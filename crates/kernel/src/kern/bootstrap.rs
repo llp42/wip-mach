@@ -29,6 +29,7 @@ use crate::kern::boot_script::{self, Command, Host, Script};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
 use crate::kern::host;
+use crate::kern::ipc_mig::current_map;
 use crate::kern::kheap::Kalloc;
 use crate::kern::lock::SimpleLock;
 use crate::kern::printf;
@@ -36,7 +37,7 @@ use crate::kern::sched_prim::{self, THREAD_AWAKENED};
 use crate::kern::task::{self, BASEPRI_USER, MapSource, Task, current_task};
 use crate::kern::thread::Thread;
 use crate::vm::types::{VmInherit, VmProt};
-use crate::vm::vm_map::{VmMap, round_page, trunc_page};
+use crate::vm::vm_map::{round_page, trunc_page};
 use crate::vm::vm_user;
 use core::ffi::{CStr, c_char, c_uint, c_void};
 use core::mem::size_of;
@@ -592,13 +593,12 @@ impl ModuleImage<'_> {
         };
 
         let addr = segment.addr();
-        // SAFETY: runs on the thread that receives the image; its task
-        // and map are live.
-        let map = unsafe { (*current_task()).map }.cast::<VmMap>();
+        let map = current_map();
         let mut start_page = trunc_page(addr);
         let end_page = round_page(addr.wrapping_add(segment.mem_len()));
         let page_count = end_page - start_page;
         if let Some(mut map) = NonNull::new(map) {
+            // SAFETY: the running task's map is live while this thread runs.
             let result = unsafe {
                 vm_user::allocate(
                     map.as_mut(),
@@ -632,6 +632,7 @@ impl ModuleImage<'_> {
         if mem_prot != VmProt::ALL
             && let Some(mut map) = NonNull::new(map)
         {
+            // SAFETY: the running task's map is live while this thread runs.
             let result = unsafe {
                 vm_user::protect(
                     map.as_mut(),
@@ -727,9 +728,8 @@ unsafe fn copyout_bytes(from: *const c_void, to: VmOffset, len: usize) {
 ///
 /// # Safety
 ///
-/// Runs on the current thread, whose pcb and map are live; `info` must be
-/// the record the ELF loader filled, and every string must outlive the
-/// call.
+/// Runs on the current thread, whose pcb is live; `info` must be the record
+/// the ELF loader filled, and every string must outlive the call.
 unsafe fn build_args_and_stack(
     info: &elf_load::ExecInfo,
     argv: &[*const c_char],
@@ -752,7 +752,7 @@ unsafe fn build_args_and_stack(
     let mut stack_base = user_stack_low(stack_size);
     let _ = unsafe {
         vm_user::map(
-            &mut *(*current_task()).map.cast::<VmMap>(),
+            &mut *current_map(),
             &mut vm_user::MapRequest {
                 address: &mut stack_base,
                 size: stack_size,
@@ -902,7 +902,7 @@ unsafe extern "C" fn user_bootstrap() {
         kprint!(" {}", argument);
     }
 
-    // SAFETY: runs on the current task.
+    // SAFETY: the current task is live, and nothing is locked.
     let _ = unsafe { task::suspend(current_task()) };
 
     unsafe {

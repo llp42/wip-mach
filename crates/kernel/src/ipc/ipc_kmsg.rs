@@ -907,14 +907,13 @@ unsafe fn clean_partial(
 ///
 /// # Safety
 ///
-/// `header` must point at the live message header being processed, and the
-/// call must run in thread context.
+/// `header` must point at the live message header being processed.
 unsafe fn entry_lookup_failed(header: *mut MachMsgHeader, port_name: c_uint) {
     if !mach_port_name_valid(port_name) {
         return;
     }
 
-    let task = unsafe { task::current_task() };
+    let task = task::current_task();
     // SAFETY: the task is live and its name array is NUL-terminated within
     // the size the format's precision reads.
     let (name_len, task_name) = unsafe {

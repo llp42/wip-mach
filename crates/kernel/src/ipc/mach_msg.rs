@@ -175,8 +175,8 @@ pub(crate) unsafe fn send(
     // The C option word is an `int` whose low bits the masks below select;
     // reading its pattern as unsigned keeps the same bits.
     let bits = option as c_uint;
-    let space = unsafe { current_space() };
-    let map = unsafe { current_map() };
+    let space = current_space();
+    let map = current_map();
 
     let kmsg = unsafe { ipc_kmsg::get(user, send_size) }?;
 
@@ -284,8 +284,8 @@ pub(crate) unsafe fn receive(
     // reading its pattern as unsigned keeps the same bits.
     let bits = option as c_uint;
     let self_ = per_cpu::thread();
-    let space = unsafe { current_space() };
-    let map = unsafe { current_map() };
+    let space = current_space();
+    let map = current_map();
 
     // SAFETY: the space is live and unlocked; on success the copyin holds a
     // reference for the returned object and leaves its queue locked.
@@ -342,9 +342,8 @@ pub(crate) unsafe fn receive(
 /// is the one the wakeup supplied.
 pub(crate) unsafe extern "C" fn mach_msg_receive_continue() {
     let self_ = per_cpu::thread();
-    // SAFETY: the continuation runs in the current thread's context.
-    let space = unsafe { current_space() };
-    let map = unsafe { current_map() };
+    let space = current_space();
+    let map = current_map();
 
     let (user, option, rcv_size, time_out, notify, object, mqueue) = unsafe {
         (
@@ -442,9 +441,8 @@ pub(crate) unsafe fn trap(
 /// thread's stack is the one the wakeup supplied.
 pub(crate) unsafe extern "C" fn mach_msg_continue() {
     let self_ = per_cpu::thread();
-    // SAFETY: the continuation runs in the current thread's context.
-    let space = unsafe { current_space() };
-    let map = unsafe { current_map() };
+    let space = current_space();
+    let map = current_map();
 
     let (user, rcv_size, object, mqueue) = unsafe {
         (

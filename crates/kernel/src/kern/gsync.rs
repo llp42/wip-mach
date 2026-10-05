@@ -395,9 +395,7 @@ pub(crate) fn wait(
         return Err(Error::InvalidAddress);
     }
 
-    // SAFETY: the caller promises a live task, and `current_task()` reads the
-    // running thread's.
-    let remote = task.as_ptr() != unsafe { current_task() };
+    let remote = task.as_ptr() != current_task();
     let mut args = VmArgs {
         object: ptr::null_mut(),
         offset: 0,
@@ -518,8 +516,7 @@ pub(crate) fn wake(
     let (key, bucket_index) =
         prepare_key(unsafe { &*task.as_ptr() }, addr, flags, &mut args)?;
 
-    // SAFETY: the running thread's task, which cannot change here.
-    let remote = unsafe { current_task() } != task.as_ptr();
+    let remote = current_task() != task.as_ptr();
     if remote && flags.contains(Flags::MUTATE) {
         // See `gsync_wait()` on why the reference is taken.
         // SAFETY: the lookup returned `args.object` locked.

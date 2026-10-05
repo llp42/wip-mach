@@ -388,10 +388,9 @@ pub(crate) unsafe fn retrieve_thread_self_fast(
 ///
 /// # Safety
 ///
-/// Must be called from a thread context: the current task and its space are
-/// live, and nothing may be locked.
+/// Must be called with nothing locked.
 pub(crate) unsafe fn mach_task_self() -> c_uint {
-    let task = unsafe { current_task() };
+    let task = current_task();
     let sright = unsafe { retrieve_task_self_fast(task) };
 
     // SAFETY: the current task's space is live, and `copyout_send` handles
@@ -408,7 +407,7 @@ pub(crate) unsafe fn mach_task_self() -> c_uint {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context, with nothing locked.
+/// Must be called with nothing locked.
 pub(crate) unsafe extern "C" fn mach_task_self_entry() -> c_uint {
     unsafe { mach_task_self() }
 }
@@ -447,10 +446,9 @@ pub(crate) unsafe extern "C" fn mach_thread_self_entry() -> c_uint {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context: the current task and its space are
-/// live, and nothing may be locked.
+/// Must be called with nothing locked.
 pub(crate) unsafe fn mach_reply_port() -> c_uint {
-    let task = unsafe { current_task() };
+    let task = current_task();
     let Some(space) = IpcSpace::new(unsafe { (*task).itk_space }) else {
         return MACH_PORT_NULL;
     };
@@ -471,7 +469,7 @@ pub(crate) unsafe fn mach_reply_port() -> c_uint {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context, with nothing locked.
+/// Must be called with nothing locked.
 pub(crate) unsafe extern "C" fn mach_reply_port_entry() -> c_uint {
     unsafe { mach_reply_port() }
 }

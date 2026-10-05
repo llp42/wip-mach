@@ -212,9 +212,9 @@ fn printf_once(printed: &AtomicBool, message: &CStr) {
 ///
 /// # Safety
 ///
-/// `space` must be live and the caller must run in a thread context.
+/// `space` must be live.
 unsafe fn report_bogus_port(space: IpcSpace, name: c_uint, action: &CStr) {
-    let task = unsafe { current_task() };
+    let task = current_task();
     if !port_name_valid(name) || space.as_ptr() != unsafe { (*task).itk_space }
     {
         return;
@@ -757,9 +757,7 @@ pub(crate) unsafe fn mod_refs(
     let entry = match unsafe { lookup_write(space, name) } {
         Ok(entry) => entry,
         Err(error) => {
-            // SAFETY: the task is live in this thread context and the space
-            // is live.
-            let task = unsafe { current_task() };
+            let task = current_task();
             if port_name_valid(name)
                 && space.as_ptr() == unsafe { (*task).itk_space }
             {

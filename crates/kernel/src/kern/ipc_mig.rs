@@ -74,23 +74,33 @@ const IKOT_TASK: c_uint = 2;
 /// The kernel-object type of a device port.
 const IKOT_DEVICE: c_uint = 10;
 
-/// The running task's IPC space.
+/// Returns the running task's IPC space.
 ///
-/// # Safety
+/// The space is live for as long as the thread runs: its task holds a
+/// reference to it. After the task's death the space is dead as well.
 ///
-/// Must be called from a thread context: the running task is live and its
-/// space is not null.
-pub(crate) unsafe fn current_space() -> IpcSpace {
+/// # Panics
+///
+/// If the CPU runs no thread, as [`task::current_task()`] does.
+pub(crate) fn current_space() -> IpcSpace {
+    // SAFETY: the running thread's task is live. Task creation sets its
+    // `itk_space` to a fresh, non-null space before the task has a thread,
+    // and nothing writes the field again.
     unsafe { IpcSpace::from_raw((*task::current_task()).itk_space) }
 }
 
-/// The running task's address space.
+/// Returns the running task's address space.
 ///
-/// # Safety
+/// The map is live for as long as the thread runs: its task holds a
+/// reference to it.
 ///
-/// Must be called from a thread context: the running task is live and its map
-/// is not null.
-pub(crate) unsafe fn current_map() -> *mut VmMap {
+/// # Panics
+///
+/// If the CPU runs no thread, as [`task::current_task()`] does.
+pub(crate) fn current_map() -> *mut VmMap {
+    // SAFETY: the running thread's task is live. Task creation sets its
+    // `map` before the task has a thread, and nothing writes the field
+    // again.
     unsafe { (*task::current_task()).map.cast() }
 }
 
@@ -237,7 +247,7 @@ pub(crate) unsafe extern "C" fn thread_set_self_state(
 ///
 /// # Safety
 ///
-/// Must be called from a thread context with nothing locked.
+/// Must be called with nothing locked.
 unsafe fn copyin_send(name: c_uint) -> Option<*mut c_void> {
     unsafe {
         ipc_object::copyin(current_space(), name, MACH_MSG_TYPE_COPY_SEND)
@@ -261,9 +271,9 @@ unsafe fn release_send(object: *mut c_void) {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context with nothing locked.
+/// Must be called with nothing locked.
 unsafe fn fast_send_right_lookup(name: c_uint) -> Option<IpcPort> {
-    let space = unsafe { current_space() };
+    let space = current_space();
 
     unsafe {
         space.lock_read();
@@ -288,7 +298,7 @@ unsafe fn fast_send_right_lookup(name: c_uint) -> Option<IpcPort> {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context with nothing locked.
+/// Must be called with nothing locked.
 unsafe fn port_name_to_device(name: c_uint) -> Option<NonNull<c_void>> {
     if let Some(port) = unsafe { fast_send_right_lookup(name) } {
         // SAFETY: the lookup returned the live, locked port; a matching
@@ -324,7 +334,7 @@ unsafe fn port_name_to_device(name: c_uint) -> Option<NonNull<c_void>> {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context with nothing locked.
+/// Must be called with nothing locked.
 unsafe fn port_name_to_thread(name: c_uint) -> Option<NonNull<Thread>> {
     if let Some(port) = unsafe { fast_send_right_lookup(name) } {
         // SAFETY: the lookup returned the live, locked port; a matching
@@ -358,7 +368,7 @@ unsafe fn port_name_to_thread(name: c_uint) -> Option<NonNull<Thread>> {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context with nothing locked.
+/// Must be called with nothing locked.
 unsafe fn port_name_to_task(name: c_uint) -> Option<NonNull<Task>> {
     if let Some(port) = unsafe { fast_send_right_lookup(name) } {
         // SAFETY: the lookup returned the live, locked port; a matching
@@ -393,7 +403,7 @@ unsafe fn port_name_to_task(name: c_uint) -> Option<NonNull<Task>> {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context with nothing locked.
+/// Must be called with nothing locked.
 unsafe fn port_name_to_map(name: c_uint) -> Option<NonNull<VmMap>> {
     if let Some(port) = unsafe { fast_send_right_lookup(name) } {
         // SAFETY: the lookup returned the live, locked port; a matching
@@ -431,7 +441,7 @@ unsafe fn port_name_to_map(name: c_uint) -> Option<NonNull<VmMap>> {
 ///
 /// # Safety
 ///
-/// Must be called from a thread context with nothing locked.
+/// Must be called with nothing locked.
 unsafe fn port_name_to_space(name: c_uint) -> Option<IpcSpace> {
     if let Some(port) = unsafe { fast_send_right_lookup(name) } {
         // SAFETY: the lookup returned the live, locked port; a matching
@@ -530,7 +540,7 @@ pub(crate) unsafe fn syscall_vm_map(
     };
 
     let port = if mach_port_name_valid(request.memory_object) {
-        let space = unsafe { current_space() };
+        let space = current_space();
         match unsafe {
             ipc_object::copyin(
                 space,
@@ -760,11 +770,11 @@ pub(crate) unsafe fn syscall_task_create(
         let object = unsafe { ipc_tt::convert_task_to_port(child) }
             .map_or(ptr::null_mut(), IpcPort::as_ptr);
 
+        let space = current_space();
         // SAFETY: the object is the send right the conversion produced or the
         // null it left behind; the copyout inserts the name into the current
         // space and always returns one.
         let (_, name) = unsafe {
-            let space = current_space();
             ipc_kmsg::copyout_object(space, object, MACH_MSG_TYPE_PORT_SEND)
         };
 
@@ -883,7 +893,7 @@ pub(crate) unsafe fn syscall_task_set_special_port(
     };
 
     let port = if mach_port_name_valid(port_name) {
-        let space = unsafe { current_space() };
+        let space = current_space();
         match unsafe {
             ipc_object::copyin(space, port_name, MACH_MSG_TYPE_COPY_SEND)
         } {
@@ -1079,7 +1089,7 @@ pub(crate) unsafe fn syscall_mach_port_insert_right(
     }
 
     let object = if mach_port_name_valid(right) {
-        let current = unsafe { current_space() };
+        let current = current_space();
         match unsafe { ipc_object::copyin(current, right, right_type) } {
             Ok(object) => object,
             Err(error) => {

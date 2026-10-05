@@ -19,8 +19,8 @@ use crate::arch::x86_64::pmap::pmap_unmap_bd;
 use crate::arch::x86_64::user_access::{self, UserFault};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
+use crate::kern::ipc_mig::current_map;
 use crate::kern::slab::slab_collect;
-use crate::kern::task::current_task;
 use crate::vm::error::Error;
 use crate::vm::types::{Pmap, VmInherit, VmObject, VmProt};
 use crate::vm::vm_map::{
@@ -784,9 +784,7 @@ pub(crate) unsafe fn copyinmap(
         return Ok(());
     }
 
-    // SAFETY: `current_task()` is the running task, whose map is live.
-    let current_map = unsafe { (*current_task()).map };
-    if current_map == ptr::from_ref(map).cast_mut().cast::<c_void>() {
+    if ptr::eq(current_map(), map) {
         // SAFETY: `copyin` is the real asm routine, and the C's `int`
         // argument converts to its `size_t` parameter.
         return unsafe {
@@ -825,9 +823,7 @@ pub(crate) unsafe fn copyoutmap(
         return Ok(());
     }
 
-    // SAFETY: `current_task()` is the running task, whose map is live.
-    let current_map = unsafe { (*current_task()).map };
-    if current_map == ptr::from_ref(map).cast_mut().cast::<c_void>() {
+    if ptr::eq(current_map(), map) {
         // SAFETY: `user_access::copyout` is the real routine, and the
         // C's `int` argument converts to its `size_t` parameter.
         return unsafe {
