@@ -9,9 +9,10 @@
 
 use crate::arch::x86_64::per_cpu::cpu_id;
 use crate::arch::x86_64::pio::Port;
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::kern::smp::CpuId;
 use core::ffi::c_int;
+use lock::SpinLock;
 
 /// The PIT control port.
 const PITCTL_PORT: Port = Port::new(0x43);
@@ -56,6 +57,10 @@ const CLKNUM: u32 = 1_193_182;
 /// The longest wait one counter load covers.
 const MAX_PIT_USEC: u32 = 54924;
 
+/// The timer's ports: the control port is shared by every counter, and a
+/// counter is loaded in two writes. No interrupt handler touches them.
+static PIT: SpinLock<(), MachPlatform> = SpinLock::new(());
+
 /// Program counter 2 for a one-shot wait of `usec` microseconds.
 fn prepare_sleep(usec: u32) {
     let aux = PITAUX_PORT.read_u8();
@@ -83,6 +88,8 @@ fn sleep() {
 
 /// Busy-waits for `usec` microseconds.
 pub(crate) fn udelay(mut usec: u32) {
+    // Counter 2 times one wait at a time.
+    let _pit = PIT.lock();
     while usec > MAX_PIT_USEC {
         prepare_sleep(MAX_PIT_USEC);
         sleep();
@@ -103,9 +110,7 @@ pub(crate) fn clkstart() {
         return;
     }
 
-    // SAFETY: disabling interrupts has no precondition.
-    let s = unsafe { spl::sploff() };
-
+    let _pit = PIT.lock();
     PITCTL_PORT.write_u8(PIT0_MODE);
 
     let hz_rate = crate::kern::machine::CLOCK_HZ;
@@ -120,7 +125,4 @@ pub(crate) fn clkstart() {
     // quotient's low two bytes.
     PITCTR0_PORT.write_u8(clknumb as u8);
     PITCTR0_PORT.write_u8((clknumb >> 8) as u8);
-
-    // SAFETY: `s` is the flags word just returned by `sploff()`.
-    unsafe { spl::splon(s) };
 }

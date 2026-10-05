@@ -27,7 +27,7 @@ use crate::arch::x86_64::clock_platform::softclock;
 use crate::arch::x86_64::ioapic::CURR_IPL;
 use crate::arch::x86_64::per_cpu;
 use core::arch::asm;
-use core::ffi::{c_int, c_ulong};
+use core::ffi::c_int;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 /// The level with interrupts open.
@@ -232,41 +232,6 @@ pub(crate) unsafe extern "C" fn splx_cli(level: c_int) {
     }
     if current_ipl() != level {
         set_current_ipl(level);
-    }
-}
-
-/// Returns the interrupt flag and disables interrupts.
-///
-/// # Safety
-///
-/// The caller must be in kernel mode; the returned flags must be
-/// restored with [`splon`].
-pub(crate) unsafe fn sploff() -> c_ulong {
-    let flags: c_ulong;
-    // SAFETY: The `pushfq`/`popq` pair reads the flags into a register and
-    // leaves the stack as it found it.
-    unsafe {
-        asm!(
-            "pushfq",
-            "popq {flags}",
-            flags = out(reg) flags,
-            options(att_syntax),
-        );
-    }
-    interrupts_disable();
-    flags
-}
-
-/// Restores the interrupt flag a [`sploff`] returned.
-///
-/// # Safety
-///
-/// `n` must come from an unmatched [`sploff`] on this CPU.
-pub(crate) unsafe fn splon(n: c_ulong) {
-    // SAFETY: The `pushq`/`popfq` pair restores the flags word the caller
-    // got from `sploff`, and the stack ends where it started.
-    unsafe {
-        asm!("pushq {n}", "popfq", n = in(reg) n, options(att_syntax));
     }
 }
 
