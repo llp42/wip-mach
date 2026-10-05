@@ -19,7 +19,6 @@ use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
 use crate::arch::x86_64::io_req::{DevT, IoReq};
 use crate::arch::x86_64::kd::ConsDev;
 use crate::arch::x86_64::pio::Port;
-use crate::arch::x86_64::spl;
 use crate::config::NCOM;
 use crate::device::chario::{
     self, DMBIC, DMBIS, DMGET, DMSET, TF_CRMOD, TF_ECHO, TF_EVENP, TF_LITOUT,
@@ -796,8 +795,7 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> IoResult {
     }
     let addr = tty_addr(tp);
 
-    // SAFETY: raising to `spltty` has no precondition.
-    let s = unsafe { spl::spltty() };
+    tp.t_lock.lock();
     if com().carrier[index] == 0 {
         tp.t_state |= TS_CARR_ON;
     } else {
@@ -809,8 +807,8 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> IoResult {
         }
         fix_modem_state(unit, c_int::from(status));
     }
-    // SAFETY: `s` is the level `spltty()` returned.
-    unsafe { spl::splx(s) };
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 
     // The C passed the `int` mode to the `dev_mode_t` parameter unchanged.
     let result = chario::open(tp, dev, flag as c_uint, ior);
@@ -820,15 +818,14 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> IoResult {
         timer();
     }
 
-    // SAFETY: raising to `spltty` has no precondition.
-    let s = unsafe { spl::spltty() };
+    tp.t_lock.lock();
     while intr_id(addr).read_u8() & 1 == 0 {
         let _ = line_stat(addr).read_u8();
         let _ = txrx(addr).read_u8();
         let _ = modem_stat(addr).read_u8();
     }
-    // SAFETY: `s` is the level `spltty()` returned.
-    unsafe { spl::splx(s) };
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
     Ok(result)
 }
 
@@ -974,20 +971,10 @@ pub(crate) unsafe fn comsetstat(
     let Some(tp) = tty_mut(unit) else {
         return Err(DeviceError::NoSuchDevice);
     };
-    match flavor {
-        TTY_SET_BREAK => {
-            modem_ctl(tp, TM_BRK, DMBIS);
-            Ok(())
-        }
-        TTY_CLEAR_BREAK => {
-            modem_ctl(tp, TM_BRK, DMBIC);
-            Ok(())
-        }
-        TTY_MODEM => {
-            let bits = unsafe { *data };
-            modem_ctl(tp, bits, DMSET);
-            Ok(())
-        }
+    let (bits, how) = match flavor {
+        TTY_SET_BREAK => (TM_BRK, DMBIS),
+        TTY_CLEAR_BREAK => (TM_BRK, DMBIC),
+        TTY_MODEM => (unsafe { *data }, DMSET),
         _ => {
             let result = unsafe {
                 chario::tty_set_status(ptr::from_mut(tp), flavor, data, count)
@@ -995,9 +982,14 @@ pub(crate) unsafe fn comsetstat(
             if result.is_ok() && flavor == TTY_STATUS {
                 apply_params(tp, unit);
             }
-            result
+            return result;
         }
-    }
+    };
+    tp.t_lock.lock();
+    modem_ctl(tp, bits, how);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
+    Ok(())
 }
 
 /// The `TTY_MODEM` value `comgetstat()` reads back.
@@ -1028,6 +1020,9 @@ pub(crate) fn intr(unit: c_int) {
     // SAFETY: `configure_bus_device()` wrote this live entry.
     let addr = port_addr(unsafe { (*dev).address });
 
+    // The line's tty lock covers its state and its registers, against the
+    // thread side and the other CPUs.
+    com().tty[index].t_lock.lock();
     loop {
         let id = intr_id(addr).read_u8() & MASKI;
         if id & 1 != 0 {
@@ -1103,6 +1098,8 @@ pub(crate) fn intr(unit: c_int) {
             _ => (),
         }
     }
+    // SAFETY: the tty lock was taken above.
+    unsafe { com().tty[index].t_lock.unlock() };
 }
 
 /// The interrupt handler of [`intr`].
@@ -1126,15 +1123,14 @@ pub(crate) fn apply_params(tp: &mut Tty, unit: c_int) {
 fn params(tp: &mut Tty, index: usize) {
     let addr = tty_addr(tp);
 
-    // SAFETY: raising to `spltty` has no precondition.
-    let s = unsafe { spl::spltty() };
+    tp.t_lock.lock();
 
     if tp.t_ispeed == B0 {
         tp.t_state |= TS_HUPCLS;
         modem_ctl_reg(addr).write_u8(I_OUT2);
         com().modem[index] = 0;
-        // SAFETY: `s` is the level `spltty()` returned.
-        unsafe { spl::splx(s) };
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
         return;
     }
 
@@ -1171,8 +1167,8 @@ fn params(tp: &mut Tty, index: usize) {
     modem_ctl_reg(addr).write_u8(I_DTR | I_RTS | I_OUT2);
     com().modem[index] |= TM_DTR | TM_RTS;
 
-    // SAFETY: `s` is the level `spltty()` returned.
-    unsafe { spl::splx(s) };
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 }
 
 /// Sends the next queued character when the transmitter is free.
@@ -1233,29 +1229,21 @@ fn com_timer_action(callout: Pin<&MachCallout>) {
 
 /// Kicks every line whose output stayed stuck across two ticks.
 pub(crate) fn timer() {
-    // SAFETY: raising to `spltty` has no precondition.
-    let s = unsafe { spl::spltty() };
-
     for index in 0..NCOM {
         let tp = &mut com().tty[index];
-        if tp.t_state & TS_ISOPEN == 0 {
-            continue;
+        tp.t_lock.lock();
+        if tp.t_state & TS_ISOPEN != 0 && tp.t_outq.count() != 0 {
+            com().timer_state[index] += 1;
+            if com().timer_state[index] >= 2 {
+                let stuck = ptr::from_mut(tp);
+                kprint!("Tty {:x} was stuck\n", stuck.expose_provenance());
+                let nch = tp.t_outq.get().unwrap_or(0xff);
+                txrx(tty_addr(tp)).write_u8(nch);
+            }
         }
-        if tp.t_outq.count() == 0 {
-            continue;
-        }
-        com().timer_state[index] += 1;
-        if com().timer_state[index] < 2 {
-            continue;
-        }
-        let stuck = ptr::from_mut(tp);
-        kprint!("Tty {:x} was stuck\n", stuck.expose_provenance());
-        let nch = tp.t_outq.get().unwrap_or(0xff);
-        txrx(tty_addr(tp)).write_u8(nch);
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
     }
-
-    // SAFETY: `s` is the level `spltty()` returned.
-    unsafe { spl::splx(s) };
 }
 
 /// Records the modem status `modem_stat` as the line `unit`'s modem bits.
@@ -1299,7 +1287,8 @@ pub(crate) fn modem_intr(unit: c_int, stat: c_int) {
     }
 }
 
-/// Sets, clears or reports the line's modem bits, per `how`.
+/// Sets, clears or reports the line's modem bits, per `how`.  The caller
+/// holds `tp`'s lock.
 pub(crate) fn modem_ctl(tp: &Tty, bits: c_int, how: c_int) -> c_int {
     let unit = minor(tp.t_dev);
     let Some(index) = index(unit) else {
@@ -1324,9 +1313,6 @@ pub(crate) fn modem_ctl(tp: &Tty, bits: c_int, how: c_int) -> c_int {
     }
     // SAFETY: `configure_bus_device()` wrote this live entry.
     let dev_addr = port_addr(unsafe { (*dev).address });
-
-    // SAFETY: raising to `spltty` has no precondition.
-    let s = unsafe { spl::spltty() };
 
     let mut b = 0;
     match how {
@@ -1358,9 +1344,6 @@ pub(crate) fn modem_ctl(tp: &Tty, bits: c_int, how: c_int) -> c_int {
         modem_ctl_reg(dev_addr).write_u8(out);
     }
 
-    // SAFETY: `s` is the level `spltty()` returned.
-    unsafe { spl::splx(s) };
-
     com().modem[index]
 }
 
@@ -1368,7 +1351,7 @@ pub(crate) fn modem_ctl(tp: &Tty, bits: c_int, how: c_int) -> c_int {
 ///
 /// # Safety
 ///
-/// `tp` must point at a live tty.
+/// `tp` must point at a live tty whose lock the caller holds.
 pub(crate) unsafe fn commctl(tp: *mut Tty, bits: c_int, how: c_int) -> c_int {
     modem_ctl(unsafe { &mut *tp }, bits, how)
 }
@@ -1402,14 +1385,15 @@ pub(crate) fn getc(unit: c_int) -> c_int {
     // SAFETY: `configure_bus_device()` wrote this live entry.
     let addr = port_addr(unsafe { (*dev).address });
 
-    // SAFETY: raising to `spltty` has no precondition.
-    let s = unsafe { spl::spltty() };
+    // The line's lock keeps its interrupt handler from taking the character.
+    let lock = &com().tty[index].t_lock;
+    lock.lock();
     while line_stat(addr).read_u8() & I_DR == 0 {
         core::hint::spin_loop();
     }
     let c = txrx(addr).read_u8();
-    // SAFETY: `s` is the level `spltty()` returned.
-    unsafe { spl::splx(s) };
+    // SAFETY: the tty lock was taken above.
+    unsafe { lock.unlock() };
     c_int::from(c)
 }
 
