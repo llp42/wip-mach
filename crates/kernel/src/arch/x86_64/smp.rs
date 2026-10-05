@@ -11,7 +11,7 @@ use crate::kern::machine;
 use crate::kern::smp as kern_smp;
 use crate::kern::smp::CpuId;
 use core::arch::asm;
-use core::ffi::{c_uint, c_ulong};
+use core::ffi::{c_int, c_uint, c_ulong};
 
 /// How far a startup IPI's vector shifts its target address.
 const STARTUP_VECTOR_SHIFT: u32 = 20 - 8;
@@ -27,8 +27,6 @@ const EDGE: c_uint = 0;
 const DE_ASSERT: c_uint = 0;
 /// The asserted IPI level.
 const ASSERT: c_uint = 1;
-/// The IPI destination shorthand of every CPU but this one.
-const ALL_EXCLUDING_SELF: c_uint = 3;
 /// The INIT IPI delivery mode.
 const INIT: c_uint = 5;
 /// The startup IPI delivery mode.
@@ -103,31 +101,15 @@ fn wait_for_ipi() {
     }
 }
 
-/// Sends the INIT assert and de-assert IPIs to every other CPU.
-fn send_ipi_init(bsp_apic_id: u32) {
+/// Sends the INIT assert and de-assert IPIs to the CPU with `apic_id`.
+fn send_ipi_init(apic_id: u32) {
     clear_error_status();
     let _ = error_status();
 
-    apic::send_ipi(
-        ALL_EXCLUDING_SELF,
-        INIT,
-        PHYSICAL,
-        ASSERT,
-        EDGE,
-        0,
-        bsp_apic_id,
-    );
+    apic::send_ipi(NO_SHORTHAND, INIT, PHYSICAL, ASSERT, EDGE, 0, apic_id);
     wait_for_ipi();
 
-    apic::send_ipi(
-        ALL_EXCLUDING_SELF,
-        INIT,
-        PHYSICAL,
-        DE_ASSERT,
-        EDGE,
-        0,
-        bsp_apic_id,
-    );
+    apic::send_ipi(NO_SHORTHAND, INIT, PHYSICAL, DE_ASSERT, EDGE, 0, apic_id);
     wait_for_ipi();
 
     let error = error_status();
@@ -136,8 +118,9 @@ fn send_ipi_init(bsp_apic_id: u32) {
     }
 }
 
-/// Whether both startup IPIs went out and were accepted.
-fn send_ipi_startup_twice(bsp_apic_id: u32, vector: c_uint) -> bool {
+/// Whether both startup IPIs to the CPU with `apic_id` went out and were
+/// accepted.
+fn send_ipi_startup_twice(apic_id: u32, vector: c_uint) -> bool {
     let mut send_err = 0;
     let mut accept_err = 0;
 
@@ -146,13 +129,13 @@ fn send_ipi_startup_twice(bsp_apic_id: u32, vector: c_uint) -> bool {
         let _ = error_status();
 
         apic::send_ipi(
-            ALL_EXCLUDING_SELF,
+            NO_SHORTHAND,
             STARTUP,
             PHYSICAL,
             DE_ASSERT,
             EDGE,
             vector,
-            bsp_apic_id,
+            apic_id,
         );
 
         pit::udelay(10);
@@ -188,7 +171,12 @@ pub(crate) fn pmap_update(cpu: CpuId) {
     send_ipi(cpu, CALL_PMAP_UPDATE);
 }
 
-/// Starts the application processors at `start_eip`.
+/// Starts the application processors at `start_eip`: every online CPU but
+/// the boot one, each addressed by the APIC ID the MADT recorded for it.
+///
+/// A processor the MADT left out, marked unusable, or listed beyond the
+/// CPU cap is sent nothing and stays halted; a broadcast would start it
+/// too, and its unrecorded APIC ID would make it boot as CPU 0.
 pub(crate) fn startup_cpus(bsp_apic_id: u32, start_eip: c_ulong) {
     // SAFETY: `wbinvd` touches no registers and the stack stays balanced; the
     // memory clobber of the C macro is the default.
@@ -196,14 +184,21 @@ pub(crate) fn startup_cpus(bsp_apic_id: u32, start_eip: c_ulong) {
 
     kprint!("Sending IPIs from BSP APIC ID {}...\n", bsp_apic_id);
 
-    send_ipi_init(bsp_apic_id);
     // The C passed the shifted address through an `int`; only the vector
     // byte reaches the ICR, and that is what the shift leaves here.
     let vector = (start_eip >> STARTUP_VECTOR_SHIFT) as c_uint;
-    if !send_ipi_startup_twice(bsp_apic_id, vector) {
-        kprint!("FATAL: APs failed to start\n");
-        loop {
-            pause();
+    for cpu in CpuId::online().skip(1) {
+        let Ok(apic_id) =
+            u32::try_from(apic::cpu_apic_id(cpu.bits() as c_int))
+        else {
+            continue;
+        };
+        send_ipi_init(apic_id);
+        if !send_ipi_startup_twice(apic_id, vector) {
+            kprint!("FATAL: AP {} failed to start\n", cpu);
+            loop {
+                pause();
+            }
         }
     }
 

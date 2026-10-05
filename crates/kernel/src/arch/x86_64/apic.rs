@@ -586,16 +586,17 @@ pub(crate) fn irq_override(pin: u8) -> Option<NonNull<IrqOverrideData>> {
     None
 }
 
-/// The APIC ID recorded for a kernel ID.
-fn cpu_apic_id(kernel_id: c_int) -> c_int {
+/// The APIC ID recorded for a kernel ID, or -1 for a CPU the MADT walk did
+/// not record.
+pub(crate) fn cpu_apic_id(kernel_id: c_int) -> c_int {
     let Ok(index) = usize::try_from(kernel_id) else {
         return -1;
     };
-    if MAX_NCPUS <= index {
+    if usize::from(ncpus()) <= index {
         return -1;
     }
-    // SAFETY: `index` is below `MAX_NCPUS`, the length of the list
-    // `data_init()` allocated.
+    // SAFETY: `index` is below `ncpus()`, and the list holds at least that
+    // many entries, before `refit_cpulist()` and after.
     c_int::from(unsafe { *APIC_DATA.cpu_lapic_list.add(index) })
 }
 
