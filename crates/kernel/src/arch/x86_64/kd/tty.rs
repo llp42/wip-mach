@@ -13,7 +13,6 @@ use super::{KbEntry, console, esc, kd, kdinit, keyboard};
 use crate::arch::types::VmOffset;
 use crate::arch::vm_param::PAGE_SHIFT;
 use crate::arch::x86_64::io_req::{DevT, IoReq};
-use crate::arch::x86_64::spl;
 use crate::device::chario::{
     LINESW, LdiscSwitch, TS_BUSY, TS_CARR_ON, TS_ISOPEN, TS_TTSTOP, TS_WOPEN,
     TTLOWAT, Tty, tty_get_status, tty_portdeath, tty_queue_completion,
@@ -87,11 +86,10 @@ pub(crate) unsafe fn kdopen(
     ior: *mut IoReq,
 ) -> IoResult {
     let tp = tty();
-    // SAFETY: raising to `splhigh` has no precondition.
-    let o_pri = unsafe { spl::splhigh() };
     tp.t_lock.lock();
     if tp.t_state & (TS_ISOPEN | TS_WOPEN) == 0 {
-        tp.t_lock.unlock();
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
         // SAFETY: ttychars allocates the character buffers, and must not run
         // under the tty lock.
         unsafe { ttychars(tp) };
@@ -104,9 +102,8 @@ pub(crate) unsafe fn kdopen(
         kdinit();
     }
     tp.t_state |= TS_CARR_ON;
-    tp.t_lock.unlock();
-    // SAFETY: `o_pri` is the level `splhigh()` returned above.
-    unsafe { spl::splx(o_pri) };
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
     // SAFETY: the request is the caller's.  The C passed the `int flag` to
     // the `dev_mode_t mode` parameter unchanged.
     Ok(crate::device::chario::open(
@@ -124,15 +121,12 @@ pub(crate) unsafe fn kdopen(
 /// The device layer calls this for an open console.
 pub(crate) unsafe fn kdclose(_dev: DevT, _flag: c_int) {
     let tp = tty();
-    // SAFETY: raising to `splhigh` has no precondition; the tty lock is taken
-    // at that level.
-    let s = unsafe { spl::splhigh() };
     tp.t_lock.lock();
-    // SAFETY: the tty is the driver's own.
-    unsafe { ttyclose(tp) };
-    tp.t_lock.unlock();
-    // SAFETY: `s` is the level `splhigh()` returned above.
-    unsafe { spl::splx(s) };
+    // SAFETY: the tty is the driver's own, and its lock is held.
+    unsafe {
+        ttyclose(tp);
+        tp.t_lock.unlock();
+    }
 }
 
 /// Reads from the console tty through its line discipline.
@@ -253,12 +247,13 @@ pub(crate) unsafe fn kdsetstat(
     }
 }
 
-/// Draws the tty's queued output; the tty layer calls this at `spltty`.
+/// Draws the tty's queued output; the tty layer calls this with the tty
+/// locked.
 ///
 /// # Safety
 ///
-/// `tp` must be the driver's own live [`Tty`], and the call must run at
-/// `spltty` with the tty lock held, as `t_start` callers guarantee.
+/// `tp` must be the driver's own live [`Tty`], and the call must run with
+/// the tty lock held, as `t_start` callers guarantee.
 unsafe fn kdstart(tp: *mut Tty) {
     // SAFETY: the tty layer passes the driver's own tty.
     let tp = unsafe { &mut *tp };
@@ -273,11 +268,7 @@ unsafe fn kdstart(tp: *mut Tty) {
         let Some(ch) = tp.t_outq.get() else {
             break;
         };
-        // SAFETY: the clock's soft interrupt level is the driver's.
-        let o_pri = unsafe { spl::splsoftclock() };
         esc::putc_esc(ch);
-        // SAFETY: `o_pri` came from `splsoftclock()`, which `splx` accepts.
-        unsafe { spl::splx(o_pri) };
     }
     let lowat = match TTLOWAT.get(usize::from(tp.t_ospeed)) {
         Some(&w) => w,
@@ -285,7 +276,7 @@ unsafe fn kdstart(tp: *mut Tty) {
     };
     if tp.t_outq.count() <= lowat {
         // SAFETY: the delayed write queue is the tty's and stays at its
-        // address; `kdstart` runs at spltty with the tty lock held.
+        // address; `kdstart` runs with the tty lock held.
         unsafe {
             tty_queue_completion(core::ptr::addr_of_mut!(tp.t_delayed_write));
         };

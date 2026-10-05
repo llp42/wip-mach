@@ -855,13 +855,10 @@ pub(crate) fn close(dev: c_int) {
     let addr = tty_addr(tp);
 
     // The tty is closed under its lock, as `chario::close` requires.
-    // SAFETY: raising to `splhigh` has no precondition.
-    let s = unsafe { spl::splhigh() };
     tp.t_lock.lock();
     chario::close(tp);
-    tp.t_lock.unlock();
-    // SAFETY: `s` is the level `splhigh()` returned.
-    unsafe { spl::splx(s) };
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 
     if tp.t_state & TS_HUPCLS != 0 || tp.t_state & TS_ISOPEN == 0 {
         intr_enab(addr).write_u8(0);

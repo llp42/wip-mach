@@ -10,12 +10,11 @@
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
 use crate::arch::x86_64::io_req::{D_NOWAIT, IoDone, IoReq, IoReqQueue};
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::device::cirbuf::{self, Cirbuf};
 use crate::device::ds_routines;
 use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 use crate::ipc::IpcPort;
-use crate::kern::lock::SimpleLock;
 use crate::kern::machine;
 use crate::mig;
 use crate::vm::vm_map::VmMapCopy;
@@ -25,6 +24,7 @@ use core::mem::{offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
+use lock::RawIrqSpinLock;
 
 /// How many baud-rate slots the speed tables have.
 pub(crate) const NSPEEDS: usize = 18;
@@ -142,7 +142,7 @@ type TtySetstat =
 // The fields keep their `t_` prefix.
 #[allow(clippy::struct_field_names)]
 pub struct Tty {
-    pub(crate) t_lock: SimpleLock,
+    pub(crate) t_lock: RawIrqSpinLock<MachPlatform>,
     pub(crate) t_inq: Cirbuf,
     pub(crate) t_outq: Cirbuf,
     pub(crate) t_addr: Option<NonNull<c_char>>,
@@ -179,7 +179,7 @@ impl Tty {
     /// The zero image a C `static` began with, ready for [`chars`].
     pub(crate) const fn new() -> Self {
         Self {
-            t_lock: SimpleLock::new(),
+            t_lock: RawIrqSpinLock::new(),
             t_inq: Cirbuf::new(),
             t_outq: Cirbuf::new(),
             t_addr: None,
@@ -254,8 +254,7 @@ pub(crate) struct LdiscSwitch {
     pub(crate) l_rint: Option<unsafe fn(c_uint, *mut Tty)>,
     /// Invoked with a live, locked tty, as [`ttymodem()`] requires.
     pub(crate) l_modem: Option<unsafe fn(*mut Tty, c_int) -> bool>,
-    /// Invoked with a live tty locked at `spltty`, as [`tty_output()`]
-    /// requires.
+    /// Invoked with a live, locked tty, as [`tty_output()`] requires.
     pub(crate) l_start: Option<unsafe fn(*mut Tty)>,
 }
 
@@ -347,21 +346,6 @@ fn pdma_water(speed: u8) -> c_int {
     } else {
         0
     }
-}
-
-/// Takes `tp`'s lock at `splhigh`.
-fn lock_irq(tp: &Tty) -> c_int {
-    // SAFETY: the caller runs in kernel mode, as raising the level requires.
-    let level = unsafe { spl::splhigh() };
-    tp.t_lock.lock();
-    level
-}
-
-/// Releases `tp`'s lock and restores `level`.
-fn unlock_irq(tp: &Tty, level: c_int) {
-    tp.t_lock.unlock();
-    // SAFETY: `level` is the value `lock_irq()` returned for this tty.
-    unsafe { spl::splx(level) };
 }
 
 /// Pins the queue at `head` for one operation.
@@ -549,7 +533,7 @@ pub(crate) fn open(
     mode: c_uint,
     ior: &mut IoReq,
 ) -> DeviceSuccess {
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
     tp.t_dev = dev;
 
     if let Some(mctl) = tp.t_mctl {
@@ -577,7 +561,8 @@ pub(crate) fn open(
                     char_open_done,
                 );
             };
-            unlock_irq(tp, level);
+            // SAFETY: the tty lock was taken above.
+            unsafe { tp.t_lock.unlock() };
             return DeviceSuccess::IoQueued;
         }
     }
@@ -589,7 +574,8 @@ pub(crate) fn open(
         unsafe { mctl(ptr::from_mut(tp), TM_RTS, DMBIS) };
     }
 
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
     DeviceSuccess::Success
 }
 
@@ -602,7 +588,7 @@ pub(crate) unsafe fn char_open_done(ior: *mut IoReq) -> bool {
     let ior = unsafe { &mut *ior };
     // SAFETY: `open()` set `dev_ptr` to the tty that stays live.
     let tp = unsafe { &mut *ior.dev_ptr.cast::<Tty>() };
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
 
     if tp.t_state & TS_ISOPEN == 0 {
         // SAFETY: the open queue is the tty's and stays at its address.
@@ -613,7 +599,8 @@ pub(crate) unsafe fn char_open_done(ior: *mut IoReq) -> bool {
                 char_open_done,
             );
         };
-        unlock_irq(tp, level);
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
         return false;
     }
 
@@ -625,7 +612,8 @@ pub(crate) unsafe fn char_open_done(ior: *mut IoReq) -> bool {
         unsafe { mctl(ptr::from_mut(tp), TM_RTS, DMBIS) };
     }
 
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 
     ior.error = Ok(());
     unsafe { ds_routines::ds_open_done(ptr::from_mut(ior)) };
@@ -658,7 +646,7 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
         data = with_exposed_provenance_mut(addr);
     }
 
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
 
     let result =
         if tp.t_state & TS_CARR_ON == 0 && tp.t_state & TS_ONDELAY == 0 {
@@ -669,7 +657,8 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
             Ok(write_output(tp, ior, data, count))
         };
 
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 
     if !inband {
         // SAFETY: the copyout above mapped `count` bytes at `addr` in
@@ -741,7 +730,7 @@ pub(crate) unsafe fn char_write_done(ior: *mut IoReq) -> bool {
     let ior = unsafe { &mut *ior };
     // SAFETY: `write_output()` set `dev_ptr` to the tty that stays live.
     let tp = unsafe { &mut *ior.dev_ptr.cast::<Tty>() };
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
 
     if tp.t_outq.count() > high_water(tp) || tp.t_state & TS_CARR_ON == 0 {
         // SAFETY: the write queue is the tty's and stays at its address.
@@ -752,11 +741,13 @@ pub(crate) unsafe fn char_write_done(ior: *mut IoReq) -> bool {
                 char_write_done,
             );
         };
-        unlock_irq(tp, level);
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
         return false;
     }
 
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 
     if let Some(port) = IpcPort::valid(ior.reply_port) {
         // The C narrowed the long difference to the reply's `int` count.
@@ -794,14 +785,16 @@ pub(crate) fn read(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
     // SAFETY: `device_read_alloc()`'s contract; the request is live.
     unsafe { ds_routines::device_read_alloc(ptr::from_mut(ior), size) }?;
 
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
 
     if tp.t_state & TS_CARR_ON == 0 && tp.t_state & TS_ONDELAY == 0 {
-        unlock_irq(tp, level);
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
         return Err(DeviceError::IoError);
     }
     if tp.t_state & TS_CARR_ON == 0 && ior.mode & D_NOWAIT != 0 {
-        unlock_irq(tp, level);
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
         return Err(DeviceError::WouldBlock);
     }
 
@@ -816,7 +809,8 @@ pub(crate) fn read(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
                 char_read_done,
             );
         };
-        unlock_irq(tp, level);
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
         return Ok(DeviceSuccess::IoQueued);
     }
 
@@ -847,7 +841,8 @@ pub(crate) fn read(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
         tp.t_state &= !TS_RTS_DOWN;
     }
 
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
     Ok(DeviceSuccess::Success)
 }
 
@@ -870,7 +865,7 @@ pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> bool {
     let ior = unsafe { &mut *ior };
     // SAFETY: `read()` set `dev_ptr` to the tty that stays live.
     let tp = unsafe { &mut *ior.dev_ptr.cast::<Tty>() };
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
 
     if tp.t_inq.count() <= 0 || tp.t_state & TS_CARR_ON == 0 {
         // SAFETY: the read queue is the tty's and stays at its address.
@@ -881,7 +876,8 @@ pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> bool {
                 char_read_done,
             );
         };
-        unlock_irq(tp, level);
+        // SAFETY: the tty lock was taken above.
+        unsafe { tp.t_lock.unlock() };
         return false;
     }
 
@@ -912,7 +908,8 @@ pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> bool {
         tp.t_state &= !TS_RTS_DOWN;
     }
 
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 
     unsafe { ds_routines::ds_read_done(ior) };
     true
@@ -955,8 +952,7 @@ pub(crate) fn close(tp: &mut Tty) {
 ///
 /// # Safety
 ///
-/// `tp` must point at a live tty, and the caller must hold its lock at
-/// `spltty`, as the C contract requires.
+/// `tp` must point at a live tty, and the caller must hold its lock.
 pub(crate) unsafe fn ttyclose(tp: *mut Tty) {
     close(unsafe { &mut *tp });
 }
@@ -964,7 +960,7 @@ pub(crate) unsafe fn ttyclose(tp: *mut Tty) {
 /// Completes the requests whose reply port died, returning whether there was
 /// one.
 pub(crate) fn port_death(tp: &mut Tty, port: *mut c_void) -> bool {
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
 
     // The queues may never have been initialized, as the C comment says; a
     // zeroed head is an empty list, so the walks find nothing.
@@ -978,7 +974,8 @@ pub(crate) fn port_death(tp: &mut Tty, port: *mut c_void) -> bool {
             || clean_queue(&mut tp.t_delayed_open, port, tty_close_open_reply)
     };
 
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
     result
 }
 
@@ -993,7 +990,7 @@ pub(crate) unsafe fn tty_portdeath(tp: *mut Tty, port: *mut c_void) -> bool {
 
 /// The `TTY_STATUS` read of `tty_get_status()`.
 pub(crate) fn status(tp: &Tty) -> TtyStatus {
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
     let mut status = TtyStatus {
         tt_ispeed: c_int::from(tp.t_ispeed),
         tt_ospeed: c_int::from(tp.t_ospeed),
@@ -1003,7 +1000,8 @@ pub(crate) fn status(tp: &Tty) -> TtyStatus {
     if tp.t_state & TS_HUPCLS != 0 {
         status.tt_flags |= TF_HUPCLS;
     }
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
     status
 }
 
@@ -1045,7 +1043,7 @@ pub(crate) fn apply_status(
         return Err(DeviceError::InvalidOperation);
     };
 
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
     tp.t_ispeed = ispeed;
     tp.t_ospeed = ospeed;
     // The C stored the int in a char, truncating; this keeps that.
@@ -1054,20 +1052,22 @@ pub(crate) fn apply_status(
     if status.tt_flags & TF_HUPCLS != 0 {
         tp.t_state |= TS_HUPCLS;
     }
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
     Ok(())
 }
 
 /// The `TTY_FLUSH` case of `tty_set_status()`.
 pub(crate) fn set_flush(tp: &mut Tty, flags: c_int) {
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
     flush(tp, flags);
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 }
 
 /// The `TTY_STOP` case of `tty_set_status()`.
 pub(crate) fn stop_output(tp: &mut Tty) {
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
     if tp.t_state & TS_TTSTOP == 0 {
         tp.t_state |= TS_TTSTOP;
         if let Some(stop) = tp.t_stop {
@@ -1076,17 +1076,19 @@ pub(crate) fn stop_output(tp: &mut Tty) {
             unsafe { stop(ptr::from_mut(tp), 0) };
         }
     }
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 }
 
 /// The `TTY_START` case of `tty_set_status()`.
 pub(crate) fn start_output(tp: &mut Tty) {
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
     if tp.t_state & TS_TTSTOP != 0 {
         tp.t_state &= !TS_TTSTOP;
         start(tp);
     }
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 }
 
 /// Applies the status flavor `flavor` from `data` to the line.
@@ -1228,8 +1230,7 @@ pub(crate) fn start(tp: &mut Tty) {
 ///
 /// # Safety
 ///
-/// `tp` must point at a live tty, and the caller must hold its lock at
-/// `spltty`, as the C contract requires.
+/// `tp` must point at a live tty, and the caller must hold its lock.
 pub(crate) unsafe fn tty_output(tp: *mut Tty) {
     start(unsafe { &mut *tp });
 }
@@ -1263,7 +1264,7 @@ unsafe fn tty_from_timeout(callout: *const MachCallout) -> *mut Tty {
 unsafe fn ttypush(tp: *mut Tty) {
     // SAFETY: the callout recovers the tty it is embedded in, which stays live.
     let tp = unsafe { &mut *tp };
-    let level = lock_irq(tp);
+    tp.t_lock.lock();
     let state = tp.t_state;
 
     if state & TS_MIN_TO != 0 {
@@ -1289,7 +1290,8 @@ unsafe fn ttypush(tp: *mut Tty) {
         tp.t_state = state & !TS_MIN_TO_RCV;
     }
 
-    unlock_irq(tp, level);
+    // SAFETY: the tty lock was taken above.
+    unsafe { tp.t_lock.unlock() };
 }
 
 /// Put one input character on the tty's input queue.
@@ -1342,8 +1344,7 @@ pub(crate) fn input(tp: &mut Tty, c: c_uint) {
 ///
 /// # Safety
 ///
-/// `tp` must point at a live tty, and the caller must hold its lock at
-/// `spltty`, as the C contract requires.
+/// `tp` must point at a live tty, and the caller must hold its lock.
 pub(crate) unsafe fn ttyinput(c: c_uint, tp: *mut Tty) {
     input(unsafe { &mut *tp }, c);
 }
@@ -1385,8 +1386,7 @@ pub(crate) fn modem(tp: &mut Tty, carrier_up: bool) -> bool {
 ///
 /// # Safety
 ///
-/// `tp` must point at a live tty, and the caller must hold its lock at
-/// `spltty`, as the C contract requires.
+/// `tp` must point at a live tty, and the caller must hold its lock.
 pub(crate) unsafe fn ttymodem(tp: *mut Tty, carrier_up: c_int) -> bool {
     modem(unsafe { &mut *tp }, carrier_up != 0)
 }
