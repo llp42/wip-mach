@@ -13,9 +13,8 @@ use crate::ipc::ipc_right;
 use crate::ipc::{IE_BITS_TYPE_MASK, IpcEntry, IpcSpace, IpcSpaceRecord};
 use crate::kern::lock::LockData;
 
+use crate::ipc::error::Error;
 use crate::kern::slab::{KmemCache, kmem_cache_init};
-use crate::kern::types::KernError;
-use crate::vm::error::Error;
 use crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS;
 use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
@@ -205,9 +204,9 @@ pub(crate) unsafe fn release(space: IpcSpace) {
 }
 
 /// `ipc_space_create()` in C.
-pub(crate) fn create() -> Result<IpcSpace, KernError> {
+pub(crate) fn create() -> Result<IpcSpace, Error> {
     let Some(space) = alloc() else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     // SAFETY: the fresh allocation is unshared, and this call initializes it
@@ -241,9 +240,9 @@ pub(crate) fn create() -> Result<IpcSpace, KernError> {
 }
 
 /// `ipc_space_create_special()` in C.
-pub(crate) fn create_special() -> Result<IpcSpace, KernError> {
+pub(crate) fn create_special() -> Result<IpcSpace, Error> {
     let Some(space) = alloc() else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     // SAFETY: the fresh allocation is unshared, and this call initializes it

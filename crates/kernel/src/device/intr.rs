@@ -16,7 +16,7 @@ use crate::arch::x86_64::irq::{self, IrqDev, UserIntr, UserIntrQueue};
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::platform::MachPlatform;
 use crate::config::NINTR;
-use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
+use crate::device::r#return::DeviceError;
 use crate::ipc::ipc_kmsg;
 use crate::ipc::ipc_mqueue;
 use crate::ipc::ipc_port;
@@ -55,9 +55,6 @@ const DEVICE_INTR_NOTIFY: c_int = 100;
 
 /// `DEVICE_NOTIFY_MSGH_SEQNO` of <device/intr.h>.
 const DEVICE_NOTIFY_MSGH_SEQNO: u32 = 0;
-
-/// `KERN_INVALID_ARGUMENT` of <`mach/kern_return.h`>.
-const KERN_INVALID_ARGUMENT: c_int = 4;
 
 /// The `mach_msg_type_t` initializer of `deliver_intr()`.
 const INTR_TYPE: MachMsgType =
@@ -452,7 +449,7 @@ unsafe fn deliver_intr(id: c_int, dst_port: NonNull<c_void>) -> bool {
     unsafe { ipc_port::copy_send(dst_port.as_ptr()) };
     // SAFETY: `kmsg` is a live message this call owns and the remote port
     // holds the reference `copy_send()` just made.
-    unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
+    let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
     true
 }
 
@@ -585,24 +582,30 @@ pub(crate) fn enable_line(id: c_int) {
 /// `irq_acknowledge()` of `device/intr.c`: account a userland acknowledgement
 /// and report the line to enable.
 ///
+/// # Errors
+///
+/// Returns [`DeviceError::InvalidArgument`] when no registration names the
+/// port, and [`DeviceError::InvalidOperation`] when it has nothing left to
+/// acknowledge.
+///
 /// # Safety
 ///
 /// `receive_port` must be the port named by a live registration.
 pub(crate) unsafe fn irq_acknowledge(
     receive_port: *mut c_void,
-) -> Result<c_int, c_int> {
+) -> Result<c_int, DeviceError> {
     let guard = INTR_LOCK.lock();
     let entry =
         unsafe { search_intr(ptr::addr_of_mut!(irq::IRQTAB), receive_port) };
     let result = entry.map_or_else(
         || {
             kprint!("didn't find user intr for interrupt !?\n");
-            Err(KERN_INVALID_ARGUMENT)
+            Err(DeviceError::InvalidArgument)
         },
         |e| {
             // SAFETY: `e` is live under the lock.
             if unsafe { (*e.as_ptr()).n_unacked } == 0 {
-                Err(DeviceError::InvalidOperation as c_int)
+                Err(DeviceError::InvalidOperation)
             } else {
                 // SAFETY: the count is nonzero, as the branch checked.
                 unsafe { (*e.as_ptr()).n_unacked -= 1 };
@@ -636,16 +639,16 @@ pub(crate) unsafe fn irqgetstat(
     flavor: c_uint,
     data: *mut c_int,
     count: *mut c_uint,
-) -> c_int {
+) -> Result<(), DeviceError> {
     match getstat(flavor) {
         Some((mode, n)) => {
             unsafe {
                 *data = mode;
                 *count = n;
             }
-            Ok(DeviceSuccess::Success).as_io_return()
+            Ok(())
         }
-        None => Err(DeviceError::InvalidOperation).as_io_return(),
+        None => Err(DeviceError::InvalidOperation),
     }
 }
 

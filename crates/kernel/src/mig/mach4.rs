@@ -17,7 +17,7 @@
 use crate::arch::types::{VmOffset, VmSize};
 use crate::ipc::{IpcPort, IpcSpace};
 use crate::kern::task::Task;
-use crate::vm::error::{KERN_INVALID_ARGUMENT, KERN_SUCCESS};
+use crate::mig::code::{KERN_INVALID_ARGUMENT, KERN_SUCCESS};
 use crate::vm::memory_object_proxy;
 use crate::vm::types::VmProt;
 use crate::vm::vm_map::VmMap;
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn memory_object_create_proxy(
             unsafe { proxy.write(port.as_ptr()) };
             KERN_SUCCESS
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -118,6 +118,6 @@ pub unsafe extern "C" fn vm_region_create_proxy(
             };
             KERN_SUCCESS
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }

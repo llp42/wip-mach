@@ -227,7 +227,7 @@ pub(crate) unsafe fn map(
                 copy = needs_copy;
             }
             vm_object::StrategicResult::Interrupted => {
-                return Err(Error::SendInterrupted);
+                return Err(Error::Interrupted);
             }
             vm_object::StrategicResult::NullObject(error)
             | vm_object::StrategicResult::Failed(error) => return Err(error),

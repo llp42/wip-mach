@@ -18,11 +18,11 @@ use crate::device::dev_lookup;
 use crate::device::dev_name::nomap;
 use crate::device::ds_routines::{MachDevice, driver_unit};
 use crate::device::r#return::DeviceError;
-use crate::glue;
 use crate::ipc::{IpcPort, ipc_port, ipc_space};
 use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
 use crate::kern::slab::{CacheInitFlags, KmemCache};
+use crate::mig;
 use crate::vm::error::Error;
 use crate::vm::vm_object;
 use crate::vm::vm_resident::VM_PAGE_FICTITIOUS_ADDR;
@@ -37,9 +37,6 @@ use lock::SpinLock;
 /// `DEV_HASH_COUNT` of `device/dev_pager.c`: the number of buckets in both
 /// tables.
 const DEV_HASH_COUNT: usize = 127;
-
-/// `KERN_RESOURCE_SHORTAGE` of <`mach/kern_return.h`>.
-const KERN_RESOURCE_SHORTAGE: c_int = 6;
 
 /// `MEMORY_OBJECT_COPY_NONE` of <`mach/memory_object.h`>.
 const MEMORY_OBJECT_COPY_NONE: c_int = 0;
@@ -59,26 +56,6 @@ struct DevPager {
     device: *mut MachDevice,
     offset: VmOffset,
     prot: c_int,
-}
-
-/// The failure `device_pager_setup()` reported.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SetupError {
-    /// The `D_INVALID_OPERATION` of a device whose driver cannot map.
-    InvalidOperation,
-    /// The `KERN_RESOURCE_SHORTAGE` of a failed record or port allocation.
-    ResourceShortage,
-}
-
-impl SetupError {
-    /// The code the C returned for this failure: the `D_*` code goes to the
-    /// device map caller, the `kern_return_t` to `device_pager_setup()`.
-    pub(crate) const fn code(self) -> c_int {
-        match self {
-            Self::InvalidOperation => DeviceError::InvalidOperation as i32,
-            Self::ResourceShortage => KERN_RESOURCE_SHORTAGE,
-        }
-    }
 }
 
 /// `dev_pager_cache` of `device/dev_pager.c`: the `struct dev_pager` slab
@@ -460,6 +437,12 @@ pub(crate) unsafe fn device_map_page(
 
 /// `device_pager_setup()` of `device/dev_pager.c`.
 ///
+/// # Errors
+///
+/// Returns [`DeviceError::InvalidOperation`] when the driver cannot map, and
+/// [`DeviceError::ResourceShortage`] when the record or its port cannot be
+/// allocated.
+///
 /// # Safety
 ///
 /// `device` must be a live, referenced mach device whose `dev_ops` is live,
@@ -468,20 +451,20 @@ pub(crate) unsafe fn setup(
     device: *mut MachDevice,
     prot: c_int,
     offset: VmOffset,
-) -> Result<IpcPort, SetupError> {
+) -> Result<IpcPort, DeviceError> {
     let ops = unsafe { (*device).dev_ops };
     if ops.is_null() {
-        return Err(SetupError::InvalidOperation);
+        return Err(DeviceError::InvalidOperation);
     }
     // SAFETY: `ops` belongs to the live device.
     let Some(d_mmap) = (unsafe { (*ops).d_mmap }) else {
-        return Err(SetupError::InvalidOperation);
+        return Err(DeviceError::InvalidOperation);
     };
     if ptr::fn_addr_eq(
         d_mmap,
         nomap as unsafe fn(DevT, VmOffset, c_int) -> VmOffset,
     ) {
-        return Err(SetupError::InvalidOperation);
+        return Err(DeviceError::InvalidOperation);
     }
 
     // SAFETY: the package is initialized, and a found record is referenced
@@ -498,7 +481,7 @@ pub(crate) unsafe fn setup(
     // unshared.
     let Some(buf) = (unsafe { (*ptr::addr_of_mut!(DEV_PAGER_CACHE)).alloc() })
     else {
-        return Err(SetupError::ResourceShortage);
+        return Err(DeviceError::ResourceShortage);
     };
     let rec = buf.as_ptr().cast::<DevPager>();
     // SAFETY: the kernel space is live and the port cache is initialized,
@@ -511,7 +494,7 @@ pub(crate) unsafe fn setup(
             (*ptr::addr_of_mut!(DEV_PAGER_CACHE))
                 .free(NonNull::new_unchecked(rec.cast::<u8>()));
         }
-        return Err(SetupError::ResourceShortage);
+        return Err(DeviceError::ResourceShortage);
     };
 
     // SAFETY: the cache object is uninitialized and owned here; the device
@@ -580,11 +563,11 @@ pub(crate) unsafe fn data_request(
 
         let control = pager_request.map_or(ptr::null_mut(), IpcPort::as_ptr);
         let Some(object) = vm_object::lookup(control) else {
-            let _ = glue::r_memory_object_data_error(
+            let _ = mig::r_memory_object_data_error(
                 control,
                 offset,
                 length,
-                Error::Failure.as_kern_return(),
+                Error::Failure,
             );
             deallocate(rec);
             return;
@@ -600,11 +583,8 @@ pub(crate) unsafe fn data_request(
             record.cast::<c_void>(),
         );
         if let Err(error) = result {
-            let _ = glue::r_memory_object_data_error(
-                control,
-                offset,
-                length,
-                error.as_kern_return(),
+            let _ = mig::r_memory_object_data_error(
+                control, offset, length, error,
             );
         }
         vm_object::deallocate(object.as_ptr());
@@ -649,7 +629,7 @@ pub(crate) unsafe fn init_pager(
     // this once before any data request.
     unsafe {
         (*rec.as_ptr()).pager_request = pager_request;
-        let _ = glue::r_memory_object_ready(
+        let _ = mig::r_memory_object_ready(
             pager_request.map_or(ptr::null_mut(), IpcPort::as_ptr),
             c_int::from(false),
             MEMORY_OBJECT_COPY_NONE,

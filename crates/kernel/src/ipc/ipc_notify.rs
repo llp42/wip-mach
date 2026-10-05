@@ -224,7 +224,7 @@ pub(crate) unsafe fn port_deleted(port: *mut c_void, name: c_uint) {
     };
 
     // SAFETY: the message holds the right the queue consumes.
-    unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
+    let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
 /// `ipc_notify_msg_accepted()` in C.
@@ -246,7 +246,7 @@ pub(crate) unsafe fn msg_accepted(port: *mut c_void, name: c_uint) {
     };
 
     // SAFETY: the message holds the right the queue consumes.
-    unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
+    let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
 /// `ipc_notify_port_destroyed()` in C.
@@ -273,7 +273,7 @@ pub(crate) unsafe fn port_destroyed(port: *mut c_void, right: *mut c_void) {
     };
 
     // SAFETY: the message holds the right the queue consumes.
-    unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
+    let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
 /// `ipc_notify_no_senders()` in C.
@@ -296,7 +296,7 @@ pub(crate) unsafe fn no_senders(port: NonNull<c_void>, mscount: c_uint) {
     };
 
     // SAFETY: the message holds the right the queue consumes.
-    unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
+    let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
 /// `ipc_notify_send_once()` in C.
@@ -317,7 +317,7 @@ pub(crate) unsafe fn send_once(port: NonNull<c_void>) {
     };
 
     // SAFETY: the message holds the right the queue consumes.
-    unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
+    let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
 /// `ipc_notify_dead_name()` in C.
@@ -339,5 +339,5 @@ pub(crate) unsafe fn dead_name(port: *mut c_void, name: c_uint) {
     };
 
     // SAFETY: the message holds the right the queue consumes.
-    unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
+    let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }

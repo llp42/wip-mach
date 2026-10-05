@@ -15,8 +15,9 @@
 
 pub mod arch;
 pub mod device;
-pub mod glue;
+pub mod ipc;
 pub mod kern;
+pub mod mig;
 pub mod utils;
 pub mod vm;
 

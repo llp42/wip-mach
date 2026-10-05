@@ -27,12 +27,11 @@ use crate::device::chario::{
     TM_RTS, TS_BUSY, TS_CARR_ON, TS_FLUSH, TS_HUPCLS, TS_ISOPEN, TS_MIN,
     TS_TIMEOUT, TS_TTSTOP, TS_WOPEN, Tty,
 };
-use crate::device::r#return::DeviceError;
+use crate::device::r#return::{DeviceError, IoResult};
 use crate::kern::console::{CStrArg, kprint, write_cstr};
 use crate::kern::machine;
 use crate::utils::atoi::mach_atoi;
 use crate::utils::cell::SyncCell;
-use crate::utils::string::{strcmp, strncmp, strstr};
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of};
@@ -48,13 +47,13 @@ pub struct BusDriver {
     /// Autoconfiguration calls this before interrupts are enabled, with a
     /// live [`BusCtlr`] entry and the virtual address it maps to probe;
     /// the callee may assume single-threaded execution.
-    pub probe: Option<unsafe fn(VmOffset, *mut BusCtlr) -> c_int>,
+    pub probe: Option<unsafe fn(VmOffset, *mut BusCtlr) -> bool>,
     /// # Safety
     ///
     /// Autoconfiguration calls this before interrupts are enabled, with a
     /// live [`BusDevice`] entry and the virtual address of the master
     /// controller it is a slave of.
-    pub slave: Option<unsafe fn(*mut BusDevice, VmOffset) -> c_int>,
+    pub slave: Option<unsafe fn(*mut BusDevice, VmOffset) -> bool>,
     /// # Safety
     ///
     /// Autoconfiguration calls this before interrupts are enabled, once
@@ -531,49 +530,42 @@ pub(crate) fn probe_general(
 ///
 /// `dev` must point at a live `bus_ctlr` table entry; the bus configuration
 /// calls it that way.
-pub(crate) unsafe fn comprobe(_port: VmOffset, dev: *mut BusCtlr) -> c_int {
+pub(crate) unsafe fn comprobe(_port: VmOffset, dev: *mut BusCtlr) -> bool {
     let (unit, address) = unsafe {
         (
             ptr::addr_of!((*dev).unit).read(),
             ptr::addr_of!((*dev).address).read(),
         )
     };
-    c_int::from(probe_general(address, unit, false))
+    probe_general(address, unit, false)
 }
 
 /// `comcnprobe()` of `i386/i386at/com.c`.
-pub(crate) fn cnprobe(cp: &mut ConsDev) -> c_int {
+pub(crate) fn cnprobe(cp: &mut ConsDev) {
     let parameter = CONSOLE_PARAMETER.to_bytes();
-    let cmdline = crate::arch::x86_64::model_dep::kernel_cmdline().as_ptr();
+    let cmdline = crate::arch::x86_64::model_dep::kernel_cmdline();
+    let line = cmdline.to_bytes();
 
-    // SAFETY: `cmdline` is the boot loader's NUL-terminated command line, and
-    // the literal is NUL-terminated.
-    let console = unsafe { strstr(cmdline, parameter.as_ptr().cast()) };
-    if !console.is_null() {
+    if let Some(at) = line
+        .windows(parameter.len())
+        .position(|window| window == parameter)
+    {
         // SAFETY: the match is inside the command line, and the parse stops
         // at its end.
         unsafe {
             mach_atoi(
-                console.cast::<u8>().add(parameter.len()),
+                cmdline.as_ptr().cast::<u8>().add(at + parameter.len()),
                 &raw mut com().rcline,
             )
         };
     }
 
-    // SAFETY: the command line is NUL-terminated, and the literal is.
-    if unsafe {
-        strncmp(
-            cmdline,
-            parameter.as_ptr().add(1).cast(),
-            parameter.len() - 1,
-        )
-    } == 0
-    {
+    if line.starts_with(&parameter[1..]) {
         // SAFETY: the match is inside the command line, and the parse
         // stops at its end.
         unsafe {
             mach_atoi(
-                cmdline.cast::<u8>().add(parameter.len() - 1),
+                cmdline.as_ptr().cast::<u8>().add(parameter.len() - 1),
                 &raw mut com().rcline,
             )
         };
@@ -587,7 +579,7 @@ pub(crate) fn cnprobe(cp: &mut ConsDev) -> c_int {
         let (name, dev_unit, address) =
             unsafe { ((*device).name, (*device).unit, (*device).address) };
         // SAFETY: `name` is the entry's NUL-terminated name.
-        let named = unsafe { strcmp(name, c"com".as_ptr()) } == 0;
+        let named = unsafe { CStr::from_ptr(name) } == c"com";
         if named
             && dev_unit == com().rcline
             && probe_general(address, dev_unit, false)
@@ -601,7 +593,6 @@ pub(crate) fn cnprobe(cp: &mut ConsDev) -> c_int {
 
     cp.cn_dev = makedev(unit);
     cp.cn_pri = pri;
-    0
 }
 
 /// `comcnprobe()` of `i386/i386at/com.c`.
@@ -609,8 +600,8 @@ pub(crate) fn cnprobe(cp: &mut ConsDev) -> c_int {
 /// # Safety
 ///
 /// `cp` must point at the console table's entry, writable.
-pub(crate) unsafe fn comcnprobe(cp: *mut ConsDev) -> c_int {
-    cnprobe(unsafe { &mut *cp })
+pub(crate) unsafe fn comcnprobe(cp: *mut ConsDev) {
+    cnprobe(unsafe { &mut *cp });
 }
 
 /// `comattach()` of `i386/i386at/com.c`.
@@ -657,9 +648,9 @@ pub(crate) unsafe fn comattach(dev: *mut BusDevice) {
 }
 
 /// `comcninit()` of `i386/i386at/com.c`.
-pub(crate) fn cninit(cp: &ConsDev) -> c_int {
+pub(crate) fn cninit(cp: &ConsDev) {
     let Some(cndev) = NonNull::new(com().cndev) else {
-        return 0;
+        return;
     };
     let dev = cndev.as_ptr();
     // SAFETY: `comcndev` was set by `cnprobe()` to a live table entry.
@@ -711,8 +702,6 @@ pub(crate) fn cninit(cp: &ConsDev) -> c_int {
             vga.add(2 * i + 1).write_volatile(0x0c);
         }
     }
-
-    0
 }
 
 /// `comcninit()` of `i386/i386at/com.c`.
@@ -721,8 +710,8 @@ pub(crate) fn cninit(cp: &ConsDev) -> c_int {
 ///
 /// `cp` must point at the console table's entry, initialized by
 /// `comcnprobe()`.
-pub(crate) unsafe fn comcninit(cp: *mut ConsDev) -> c_int {
-    cninit(unsafe { &*cp })
+pub(crate) unsafe fn comcninit(cp: *mut ConsDev) {
+    cninit(unsafe { &*cp });
 }
 
 /// `com_reprobe()` of `i386/i386at/com.c`.
@@ -752,8 +741,7 @@ fn reprobe(unit: c_int) -> bool {
         // NUL-terminated bus name.
         if unsafe {
             configure_bus_device(name, address, phys, 0, c"atbus".as_ptr())
-        } != 0
-        {
+        } {
             return true;
         }
     }
@@ -761,10 +749,10 @@ fn reprobe(unit: c_int) -> bool {
 }
 
 /// `comopen()` of `i386/i386at/com.c`.
-pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> c_int {
+pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> IoResult {
     let unit = minor(dev);
     let Some(index) = index(unit) else {
-        return DeviceError::NoSuchDevice as c_int;
+        return Err(DeviceError::NoSuchDevice);
     };
 
     let mut isai = info(index);
@@ -772,13 +760,13 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> c_int {
     // read.
     if isai.is_null() || unsafe { (*isai).alive } == 0 {
         if !reprobe(unit) {
-            return DeviceError::NoSuchDevice as c_int;
+            return Err(DeviceError::NoSuchDevice);
         }
         isai = info(index);
         // SAFETY: `isai` is the attached entry or null, checked before the
         // field read.
         if isai.is_null() || unsafe { (*isai).alive } == 0 {
-            return DeviceError::NoSuchDevice as c_int;
+            return Err(DeviceError::NoSuchDevice);
         }
     }
 
@@ -824,8 +812,7 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> c_int {
     unsafe { spl::splx(s) };
 
     // The C passed the `int` mode to the `dev_mode_t` parameter unchanged.
-    let result =
-        chario::io_return(Ok(chario::open(tp, dev, flag as c_uint, ior)));
+    let result = chario::open(tp, dev, flag as c_uint, ior);
 
     if com().timer_active == 0 {
         com().timer_active = 1;
@@ -841,7 +828,7 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> c_int {
     }
     // SAFETY: `s` is the level `spltty()` returned.
     unsafe { spl::splx(s) };
-    result
+    Ok(result)
 }
 
 /// `comopen()` of `i386/i386at/com.c`.
@@ -853,7 +840,7 @@ pub(crate) unsafe fn comopen(
     dev: DevT,
     flag: c_int,
     ior: *mut IoReq,
-) -> c_int {
+) -> IoResult {
     open(c_int::from(dev), flag, unsafe { &mut *ior })
 }
 
@@ -897,11 +884,11 @@ pub(crate) unsafe fn comclose(dev: DevT, _flag: c_int) {
 }
 
 /// `comread()` of `i386/i386at/com.c`.
-pub(crate) fn read(dev: c_int, ior: &mut IoReq) -> c_int {
+pub(crate) fn read(dev: c_int, ior: &mut IoReq) -> IoResult {
     let Some(tp) = tty_mut(minor(dev)) else {
-        return DeviceError::NoSuchDevice as c_int;
+        return Err(DeviceError::NoSuchDevice);
     };
-    chario::io_return(chario::read(tp, ior))
+    chario::read(tp, ior)
 }
 
 /// `comread()` of `i386/i386at/com.c`.
@@ -909,16 +896,16 @@ pub(crate) fn read(dev: c_int, ior: &mut IoReq) -> c_int {
 /// # Safety
 ///
 /// `ior` must point at a live read request.
-pub(crate) unsafe fn comread(dev: DevT, ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn comread(dev: DevT, ior: *mut IoReq) -> IoResult {
     read(c_int::from(dev), unsafe { &mut *ior })
 }
 
 /// `comwrite()` of `i386/i386at/com.c`.
-pub(crate) fn write(dev: c_int, ior: &mut IoReq) -> c_int {
+pub(crate) fn write(dev: c_int, ior: &mut IoReq) -> IoResult {
     let Some(tp) = tty_mut(minor(dev)) else {
-        return DeviceError::NoSuchDevice as c_int;
+        return Err(DeviceError::NoSuchDevice);
     };
-    chario::io_return(chario::write(tp, ior))
+    chario::write(tp, ior)
 }
 
 /// `comwrite()` of `i386/i386at/com.c`.
@@ -926,16 +913,16 @@ pub(crate) fn write(dev: c_int, ior: &mut IoReq) -> c_int {
 /// # Safety
 ///
 /// `ior` must point at a live write request.
-pub(crate) unsafe fn comwrite(dev: DevT, ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn comwrite(dev: DevT, ior: *mut IoReq) -> IoResult {
     write(c_int::from(dev), unsafe { &mut *ior })
 }
 
 /// `comportdeath()` of `i386/i386at/com.c`.
-pub(crate) fn port_death(dev: c_int, port: *mut c_void) -> c_int {
+pub(crate) fn port_death(dev: c_int, port: *mut c_void) -> bool {
     let Some(tp) = tty_mut(minor(dev)) else {
-        return 0;
+        return false;
     };
-    c_int::from(chario::port_death(tp, port))
+    chario::port_death(tp, port)
 }
 
 /// `comportdeath()` of `i386/i386at/com.c`.
@@ -943,7 +930,7 @@ pub(crate) fn port_death(dev: c_int, port: *mut c_void) -> c_int {
 /// # Safety
 ///
 /// `port` is the reply port that died, as the device layer received it.
-pub(crate) unsafe fn comportdeath(dev: DevT, port: VmOffset) -> c_int {
+pub(crate) unsafe fn comportdeath(dev: DevT, port: VmOffset) -> bool {
     port_death(c_int::from(dev), ptr::with_exposed_provenance_mut(port))
 }
 
@@ -957,7 +944,7 @@ pub(crate) unsafe fn comgetstat(
     flavor: c_uint,
     data: *mut c_int,
     count: *mut u32,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let unit = c_int::from(dev) & 0xff;
     if flavor == TTY_MODEM {
         let status = modem_status(unit);
@@ -965,10 +952,10 @@ pub(crate) unsafe fn comgetstat(
             *data = status;
             *count = 1;
         }
-        return 0;
+        return Ok(());
     }
     let Some(tp) = tty_mut(unit) else {
-        return DeviceError::NoSuchDevice as c_int;
+        return Err(DeviceError::NoSuchDevice);
     };
     unsafe { chario::tty_get_status(ptr::from_mut(tp), flavor, data, count) }
 }
@@ -983,30 +970,30 @@ pub(crate) unsafe fn comsetstat(
     flavor: c_uint,
     data: *mut c_int,
     count: u32,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let unit = c_int::from(dev) & 0xff;
     let Some(tp) = tty_mut(unit) else {
-        return DeviceError::NoSuchDevice as c_int;
+        return Err(DeviceError::NoSuchDevice);
     };
     match flavor {
         TTY_SET_BREAK => {
             modem_ctl(tp, TM_BRK, DMBIS);
-            0
+            Ok(())
         }
         TTY_CLEAR_BREAK => {
             modem_ctl(tp, TM_BRK, DMBIC);
-            0
+            Ok(())
         }
         TTY_MODEM => {
             let bits = unsafe { *data };
             modem_ctl(tp, bits, DMSET);
-            0
+            Ok(())
         }
         _ => {
             let result = unsafe {
                 chario::tty_set_status(ptr::from_mut(tp), flavor, data, count)
             };
-            if result == 0 && flavor == TTY_STATUS {
+            if result.is_ok() && flavor == TTY_STATUS {
                 apply_params(tp, unit);
             }
             result
@@ -1426,13 +1413,13 @@ pub(crate) fn getc(unit: c_int) -> c_int {
 }
 
 /// `comcnputc()` of `i386/i386at/com.c`.
-pub(crate) fn console_putc(dev: c_int, c: c_int) -> c_int {
+pub(crate) fn console_putc(dev: c_int, c: c_int) {
     let Some(index) = index(minor(dev)) else {
-        return 0;
+        return;
     };
     let dev_ptr = info(index);
     if dev_ptr.is_null() {
-        return 0;
+        return;
     }
     // SAFETY: `configure_bus_device()` wrote this live entry.
     let addr = port_addr(unsafe { (*dev_ptr).address });
@@ -1446,7 +1433,6 @@ pub(crate) fn console_putc(dev: c_int, c: c_int) -> c_int {
     }
     // The C passed the `int` to `outb()`, which writes the low byte.
     txrx(addr).write_u8(c as u8);
-    0
 }
 
 /// `comcnputc()` of `i386/i386at/com.c`.
@@ -1454,8 +1440,8 @@ pub(crate) fn console_putc(dev: c_int, c: c_int) -> c_int {
 /// # Safety
 ///
 /// The console layer calls this for its own console unit.
-pub(crate) unsafe fn comcnputc(dev: DevT, c: c_int) -> c_int {
-    console_putc(c_int::from(dev), c)
+pub(crate) unsafe fn comcnputc(dev: DevT, c: c_int) {
+    console_putc(c_int::from(dev), c);
 }
 
 /// `comcngetc()` of `i386/i386at/com.c`.

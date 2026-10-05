@@ -13,15 +13,15 @@ use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
 use crate::arch::x86_64::pmap::pmap_clear_modify;
 use crate::arch::x86_64::pmap::pmap_is_modified;
 use crate::arch::x86_64::pmap::pmap_page_protect;
-use crate::glue::{
-    memory_object_change_completed, memory_object_data_return,
-    memory_object_lock_completed, memory_object_supply_completed,
-};
 use crate::ipc::{IpcPort, ipc_port};
 use crate::kern::debug::kpanic;
 use crate::kern::host::Host;
 use crate::kern::sched_prim::{assert_wait, thread_block};
-use crate::vm::error::{Error, error_from_kern_return};
+use crate::mig::{
+    memory_object_change_completed, memory_object_data_return,
+    memory_object_lock_completed, memory_object_supply_completed,
+};
+use crate::vm::error::Error;
 use crate::vm::types::{VmObject, VmPage, VmProt};
 use crate::vm::vm_map::{VmMapCopy, round_page};
 use crate::vm::vm_pageout::vm_pageout_setup;
@@ -194,7 +194,7 @@ unsafe fn lock_page(
                 || prot == VmProt::NO_CHANGE)
             && (should_return == Return::None
                 || (!unsafe { (*page).is_dirty() }
-                    && unsafe { pmap_is_modified((*page).phys_addr) } == 0
+                    && !unsafe { pmap_is_modified((*page).phys_addr) }
                     && (!unsafe { (*page).is_precious() }
                         || should_return != Return::All)));
         if unchanged {
@@ -237,7 +237,7 @@ unsafe fn lock_page(
     if should_return != Return::None {
         unsafe {
             if !(*page).is_dirty() {
-                (*page).set_dirty(pmap_is_modified((*page).phys_addr) != 0);
+                (*page).set_dirty(pmap_is_modified((*page).phys_addr));
             }
         }
 
@@ -327,7 +327,7 @@ impl PageoutBatch {
         // the paging reference the caller holds; the copy is the live
         // page-list copy just made.
         unsafe {
-            memory_object_data_return(
+            let _ = memory_object_data_return(
                 (*object).pager,
                 (*object).pager_request,
                 self.paging_offset,
@@ -605,7 +605,7 @@ unsafe fn lock_request_reply(
         // the reply right, and the C re-locks around it.
         unsafe {
             (*object).lock.unlock();
-            memory_object_lock_completed(
+            let _ = memory_object_lock_completed(
                 reply_to,
                 reply_to_type,
                 (*object).pager_request,
@@ -785,9 +785,9 @@ unsafe fn supply_continuation(
     unsafe { (*object.as_ptr()).lock.unlock() };
 
     // SAFETY: the copy is live and owned by this call.
-    let (code, new_copy) = unsafe { VmMapCopy::invoke_cont(*copy) };
+    let (continued, new_copy) = unsafe { VmMapCopy::invoke_cont(*copy) };
 
-    match error_from_kern_return(code) {
+    match continued {
         Ok(()) => {
             if *copy != orig_copy {
                 // SAFETY: the copy is live and was replaced.
@@ -973,7 +973,7 @@ unsafe fn supply_finish(
         // SAFETY: the object is live under the caller's reference, and the
         // C sends the reply before releasing it.
         unsafe {
-            memory_object_supply_completed(
+            let _ = memory_object_supply_completed(
                 request.reply_to,
                 request.reply_to_type,
                 (*object.as_ptr()).pager_request,
@@ -981,10 +981,7 @@ unsafe fn supply_finish(
                 // `data_cnt` is a `mach_msg_type_number_t` byte count;
                 // `vm_size_t` holds every value it can name.
                 request.data_cnt as VmSize,
-                match result {
-                    Ok(()) => 0,
-                    Err(error) => error.as_kern_return(),
-                },
+                result,
                 error_offset,
             );
         }
@@ -1427,7 +1424,7 @@ pub(crate) unsafe fn change_attributes(
         // SAFETY: `reply_to` is a live port and the C sends the raw request
         // values back.
         unsafe {
-            memory_object_change_completed(
+            let _ = memory_object_change_completed(
                 reply_to,
                 reply_to_type,
                 c_int::from(may_cache),

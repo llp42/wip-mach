@@ -6,30 +6,33 @@
 //! The MIG support entry points of <`mach/mig_support.h`> and the kernel-side
 //! RPC stubs, which `kern/ipc_mig.c` defined and `kern/ipc_mig.h` declares.
 //!
-//! [`crate::kern::ipc_mig_ffi`] is the `extern "C"` edge; this module holds
-//! the routines themselves.
+//! The symbols the generated code calls are in [`crate::mig::runtime`]; this
+//! module holds the routines themselves.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::user_access;
+use crate::device::dev_lookup;
 use crate::device::ds_routines::{
     device_deallocate, device_reference, ds_device_write_trap,
     ds_device_writev_trap,
 };
-use crate::ipc::ipc_kmsg::{self, Kmsg, MsgReturn};
-use crate::ipc::ipc_mqueue::{
-    ipc_mqueue_copyin, ipc_mqueue_receive, ipc_mqueue_send,
-};
+use crate::device::r#return::Reply;
+use crate::ipc::error::Error as IpcError;
+use crate::ipc::error::SendError;
+use crate::ipc::ipc_kmsg;
+use crate::ipc::ipc_mqueue;
 use crate::ipc::{IpcPort, IpcSpace, MachMsgHeader};
 use crate::ipc::{ipc_object, ipc_port, ipc_space};
 use crate::kern::debug::kpanic;
+use crate::kern::error::{Error, RpcError};
 use crate::kern::ipc_tt::{self, TaskSpecialPort};
 use crate::kern::syscall_subr;
 use crate::kern::task::{self, MapSource, Task};
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
+use crate::mig::code::{KERN_SUCCESS, io_return, kern_return};
 use crate::vm::types::{VmInherit, VmProt};
-use crate::vm::vm_map::{VmMap, VmMapCopy};
+use crate::vm::vm_map::VmMap;
 use crate::vm::vm_user;
 use core::ffi::{c_int, c_uint, c_ulong, c_void};
 use core::mem::size_of;
@@ -37,8 +40,6 @@ use core::ptr::{self, NonNull};
 
 /// `MACH_PORT_NULL` in <mach/port.h>: no port name.
 const MACH_PORT_NULL: c_uint = 0;
-/// `KERN_SUCCESS` in <`mach/kern_return.h`>.
-pub(crate) const KERN_SUCCESS: c_int = 0;
 /// The `natural_t` words the C scratch array of `thread_set_self_state()`
 /// held.
 const MAX_SELF_STATE: usize = 150;
@@ -59,30 +60,11 @@ const MACH_MSG_TYPE_PORT_SEND: c_uint = 17;
 const MACH_MSG_TYPE_COPY_SEND: c_uint = 19;
 /// `MACH_MSG_TYPE_MAKE_SEND_ONCE` of <mach/message.h>.
 const MACH_MSG_TYPE_MAKE_SEND_ONCE: c_uint = 21;
-/// `MACH_MSG_OPTION_NONE` of <mach/message.h>.  The port passes it to the
-/// message-queue option word, which is unsigned like the C's parameter.
-const MACH_MSG_OPTION_NONE: c_uint = 0;
-/// `MACH_SEND_MSG` of <mach/message.h>.
-const MACH_SEND_MSG: c_int = 0x0000_0001;
-/// `MACH_RCV_MSG` of <mach/message.h>.
-const MACH_RCV_MSG: c_int = 0x0000_0002;
 /// `MACH_SEND_ALWAYS` of <mach/message.h>: internal to the kernel.  The
 /// port passes it to the message-queue option word, which is unsigned.
 const MACH_SEND_ALWAYS: c_uint = 0x0001_0000;
 /// `MACH_MSG_TIMEOUT_NONE` of <mach/message.h>.
 const MACH_MSG_TIMEOUT_NONE: c_uint = 0;
-/// `MACH_MSG_SIZE_MAX` of <mach/message.h>: an unbounded receive.
-const MACH_MSG_SIZE_MAX: c_uint = c_uint::MAX;
-/// `MACH_MSG_SUCCESS` of <mach/message.h>.
-const MACH_MSG_SUCCESS: c_int = 0;
-/// `MACH_MSG_MASK` of <mach/message.h>: masks off the class bits.
-const MACH_MSG_MASK: c_int = 0x0000_3c00;
-/// `MACH_SEND_INTERRUPTED` of <mach/message.h>.
-const MACH_SEND_INTERRUPTED: c_int = 0x1000_0007;
-/// `MACH_RCV_INTERRUPTED` of <mach/message.h>.
-const MACH_RCV_INTERRUPTED: c_int = 0x1000_4005;
-/// `MACH_RCV_BODY_ERROR` of <mach/message.h>.
-const MACH_RCV_BODY_ERROR: c_int = 0x1000_400c;
 /// `IE_BITS_TYPE_MASK` of <`ipc/ipc_entry.h>`: the capability-type field.
 const IE_BITS_TYPE_MASK: u32 = 0x001f_0000;
 /// `MACH_PORT_TYPE_SEND` of <mach/port.h>.
@@ -93,59 +75,6 @@ const IKOT_THREAD: c_uint = 1;
 const IKOT_TASK: c_uint = 2;
 /// `IKOT_DEVICE` of <`kern/ipc_kobject.h`>.
 const IKOT_DEVICE: c_uint = 10;
-/// `KERN_INVALID_RIGHT` of <`mach/kern_return.h`>.
-const KERN_INVALID_RIGHT: c_int = 17;
-/// `KERN_INVALID_VALUE` of <`mach/kern_return.h`>.
-const KERN_INVALID_VALUE: c_int = 18;
-/// `KERN_INVALID_CAPABILITY` of <`mach/kern_return.h`>.
-const KERN_INVALID_CAPABILITY: c_int = 20;
-/// `sizeof(mach_msg_header_t)`: the header the receive path copies back when
-/// it fails before a body is available.  At most 32 bytes on both targets, so
-/// the narrowing from `usize` cannot lose anything.
-const MESSAGE_HEADER_SIZE: c_uint = size_of::<MachMsgHeader>() as c_uint;
-
-/// The code a kernel-RPC helper hands back to its trap adapter.
-///
-/// The trap ABI is the domain: the user-side stub compares the code against
-/// the `MACH_*` and `KERN_*` sets, so a helper carries the code itself rather
-/// than an error identity that would have to be mapped back to one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
-    /// `MACH_SEND_INTERRUPTED`: the target name did not name the object the
-    /// stub needed, so the user stub should retry over IPC.
-    SendInterrupted,
-    /// A `kern_return_t`, exactly as a callee produced it.
-    KernReturn(c_int),
-}
-
-impl Error {
-    const fn raw(self) -> c_int {
-        match self {
-            Self::SendInterrupted => MACH_SEND_INTERRUPTED,
-            Self::KernReturn(code) => code,
-        }
-    }
-}
-
-impl From<KernError> for Error {
-    fn from(error: KernError) -> Self {
-        Self::KernReturn(c_int::from(error))
-    }
-}
-
-impl From<crate::vm::error::Error> for Error {
-    fn from(error: crate::vm::error::Error) -> Self {
-        Self::KernReturn(error.as_kern_return())
-    }
-}
-
-/// The `kern_return_t` a helper result hands its adapter.
-pub(crate) const fn kern_return(result: Result<(), Error>) -> c_int {
-    match result {
-        Ok(()) => KERN_SUCCESS,
-        Err(error) => error.raw(),
-    }
-}
 
 /// `current_space()` of <kern/thread.h>: the running task's IPC space.
 ///
@@ -225,27 +154,6 @@ pub(crate) unsafe fn abort_rpc(thread: *mut Thread) {
     }
 }
 
-/// `mig_deallocate()` of `kern/ipc_mig.c`.
-///
-/// # Safety
-///
-/// A non-null `addr` must be the address of a live map-copy object the caller
-/// owns and no longer uses; null is ignored.
-pub(crate) unsafe fn mig_deallocate(addr: VmOffset, _size: VmSize) {
-    unsafe { crate::vm::vm_map::vm_map_copy_discard(addr as *mut VmMapCopy) };
-}
-
-/// `mig_deallocate()` of <`mach/mig_support.h>`: the MIG runtime's
-/// deallocation entry.
-///
-/// # Safety
-///
-/// A non-null `addr` must be the address of a live map-copy object the caller
-/// owns and no longer uses; null is ignored.
-pub unsafe extern "C" fn mig_deallocate_entry(addr: VmOffset, size: VmSize) {
-    unsafe { mig_deallocate(addr, size) };
-}
-
 /// Copy the user's state words into `scratch`, reporting how many were copied.
 ///
 /// # Safety
@@ -269,7 +177,7 @@ unsafe fn copy_self_state(
             words * size_of::<c_uint>(),
         )
     };
-    if faulted != 0 { None } else { Some(words) }
+    if faulted.is_err() { None } else { Some(words) }
 }
 
 /// Set the current thread's machine state from a user buffer.
@@ -282,13 +190,13 @@ pub(crate) unsafe fn set_self_state(
     flavor: c_int,
     new_state: *mut c_uint,
     count: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let mut scratch = [0; MAX_SELF_STATE];
 
     let Some(words) =
         (unsafe { copy_self_state(new_state, count, &mut scratch) })
     else {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     };
 
     let thread = per_cpu::thread();
@@ -309,7 +217,7 @@ pub(crate) unsafe fn set_self_state(
         if result.is_ok() {
             crate::arch::x86_64::locore::thread_exception_return();
         }
-        result
+        result.map_err(Error::Machine)
     }
 }
 
@@ -324,10 +232,7 @@ pub(crate) unsafe extern "C" fn thread_set_self_state(
     new_state: *mut c_uint,
     new_state_count: c_uint,
 ) -> c_int {
-    match unsafe { set_self_state(flavor, new_state, new_state_count) } {
-        Ok(()) => KERN_SUCCESS,
-        Err(error) => c_int::from(error),
-    }
+    kern_return(unsafe { set_self_state(flavor, new_state, new_state_count) })
 }
 
 /// The `ipc_object_copyin()` the `port_name_to_*()` slow paths share: one send
@@ -412,7 +317,7 @@ unsafe fn port_name_to_device(name: c_uint) -> Option<NonNull<c_void>> {
     // SAFETY: the copyin returned one live reference to the object the name
     // denoted.
     let device = unsafe {
-        NonNull::new(crate::device::dev_lookup_ffi::dev_port_lookup(object))
+        NonNull::new(dev_lookup::port_lookup(object).cast::<c_void>())
     };
     // SAFETY: the reference the copyin returned is the one this releases.
     unsafe { release_send(object) };
@@ -571,11 +476,11 @@ unsafe fn port_name_to_space(name: c_uint) -> Option<IpcSpace> {
 pub(crate) unsafe fn mach_msg_send_from_kernel(
     msg: *mut c_void,
     send_size: c_uint,
-) -> MsgReturn {
+) -> Result<(), SendError> {
     let remote = unsafe { (*msg.cast::<MachMsgHeader>()).remote() };
     // `MACH_PORT_VALID()` over the kernel header's pointer-wide field.
     if remote == 0 || remote == usize::MAX {
-        return MsgReturn::SEND_INVALID_DEST;
+        return Err(SendError::InvalidDest);
     }
 
     let Ok(kmsg) = (unsafe { ipc_kmsg::get_from_kernel(msg, send_size) })
@@ -587,172 +492,14 @@ pub(crate) unsafe fn mach_msg_send_from_kernel(
     unsafe { ipc_kmsg::copyin_from_kernel(kmsg) };
     // SAFETY: the message is live and holds the send right the send consumes;
     // the C's `ipc_mqueue_send_always` discarded the result.
-    unsafe {
-        ipc_mqueue_send(
+    let _ = unsafe {
+        ipc_mqueue::send(
             kmsg.as_ptr(),
             MACH_SEND_ALWAYS,
             MACH_MSG_TIMEOUT_NONE,
-        );
-    }
-    MsgReturn::SUCCESS
-}
-
-/// `mach_msg()` of `kern/ipc_mig.c`: like `mach_msg_trap()`, but the message
-/// lives in kernel space.
-///
-/// # Safety
-///
-/// `msg` must point at a readable and writable kernel message of the size the
-/// selected option needs, and the caller must hold no locks.
-pub(crate) unsafe fn mach_msg(
-    msg: *mut c_void,
-    option: c_int,
-    send_size: c_uint,
-    rcv_size: c_uint,
-    rcv_name: c_uint,
-    _time_out: c_uint,
-    _notify: c_uint,
-) -> MsgReturn {
-    let space = unsafe { current_space() };
-    let map = unsafe { current_map() };
-
-    if option & MACH_SEND_MSG != 0 {
-        let Ok(kmsg) = (unsafe { ipc_kmsg::get_from_kernel(msg, send_size) })
-        else {
-            kpanic!("mach_msg", "mach_msg")
-        };
-
-        // SAFETY: the message is live, the space and map are live, and the
-        // caller holds no locks.
-        let copied = unsafe {
-            ipc_kmsg::copyin(kmsg, space, &mut *map, MACH_PORT_NULL)
-        };
-        if let Err(error) = copied {
-            // SAFETY: this call owns the message.
-            unsafe { ipc_kmsg::free(kmsg) };
-            return error;
-        }
-
-        loop {
-            // SAFETY: the message is live and holds the copied-in rights the
-            // queue consumes.
-            let mr = unsafe {
-                ipc_mqueue_send(
-                    kmsg.as_ptr(),
-                    MACH_MSG_OPTION_NONE,
-                    MACH_MSG_TIMEOUT_NONE,
-                )
-            };
-            if mr != MACH_SEND_INTERRUPTED {
-                break;
-            }
-        }
-    }
-
-    if option & MACH_RCV_MSG != 0 {
-        let (kmsg, seqno) = loop {
-            let mut mqueue = ptr::null_mut();
-            let mut object = ptr::null_mut();
-            // SAFETY: the space is live and the caller holds no locks; the
-            // two out-pointers are this call's live locals.
-            let mr = unsafe {
-                ipc_mqueue_copyin(
-                    space.as_ptr(),
-                    rcv_name,
-                    &raw mut mqueue,
-                    &raw mut object,
-                )
-            };
-            if mr != MACH_MSG_SUCCESS {
-                return MsgReturn::from_raw(mr);
-            }
-
-            let mut kmsg = ptr::null_mut();
-            let mut seqno = 0;
-            // SAFETY: the copyin returned the locked queue and its reference
-            // to `object`; the two out-pointers are live locals.
-            let mr = unsafe {
-                ipc_mqueue_receive(
-                    mqueue,
-                    MACH_MSG_OPTION_NONE,
-                    MACH_MSG_SIZE_MAX,
-                    MACH_MSG_TIMEOUT_NONE,
-                    &raw mut kmsg,
-                    &raw mut seqno,
-                )
-            };
-            // SAFETY: the copyin's reference to the object is the one this
-            // releases, and the receive released the queue lock.
-            unsafe { ipc_object::release(object) };
-
-            if mr == MACH_RCV_INTERRUPTED {
-                continue;
-            }
-            if mr != MACH_MSG_SUCCESS {
-                return MsgReturn::from_raw(mr);
-            }
-            // SAFETY: a successful receive returned a live message.
-            break (unsafe { Kmsg::from_raw(kmsg) }, seqno);
-        };
-
-        // SAFETY: the message is live and this call owns it.
-        unsafe { kmsg.set_header_seqno(seqno) };
-
-        // SAFETY: the message is live.
-        if rcv_size < unsafe { kmsg.header_size() } {
-            unsafe {
-                ipc_kmsg::copyout_dest(kmsg, space);
-                ipc_kmsg::put_to_kernel(msg, kmsg, MESSAGE_HEADER_SIZE);
-            }
-            return MsgReturn::RCV_TOO_LARGE;
-        }
-
-        // SAFETY: the message is live, the space and map are live, and the
-        // caller holds no locks.
-        let mr = unsafe {
-            ipc_kmsg::copyout(kmsg, space, &mut *map, MACH_PORT_NULL)
-        };
-        if mr != MsgReturn::SUCCESS {
-            if mr.raw() & !MACH_MSG_MASK == MACH_RCV_BODY_ERROR {
-                // SAFETY: the message is live and this call owns it.
-                unsafe {
-                    ipc_kmsg::put_to_kernel(msg, kmsg, kmsg.header_size());
-                };
-            } else {
-                unsafe {
-                    ipc_kmsg::copyout_dest(kmsg, space);
-                    ipc_kmsg::put_to_kernel(msg, kmsg, MESSAGE_HEADER_SIZE);
-                }
-            }
-            return mr;
-        }
-
-        // SAFETY: the message is live and this call owns it.
-        unsafe { ipc_kmsg::put_to_kernel(msg, kmsg, kmsg.header_size()) };
-    }
-
-    MsgReturn::SUCCESS
-}
-
-/// `mach_msg()` of `kern/ipc_mig.c`: the kernel-space `mach_msg` entry.
-///
-/// # Safety
-///
-/// `msg` must point at a readable and writable kernel message of the size
-/// the selected option needs, and the caller must hold no locks.
-pub unsafe extern "C" fn mach_msg_entry(
-    msg: *mut c_void,
-    option: c_int,
-    send_size: c_uint,
-    rcv_size: c_uint,
-    rcv_name: c_uint,
-    time_out: c_uint,
-    notify: c_uint,
-) -> c_int {
-    unsafe {
-        mach_msg(msg, option, send_size, rcv_size, rcv_name, time_out, notify)
-    }
-    .raw()
+        )
+    };
+    Ok(())
 }
 
 /// The arguments of `syscall_vm_map()`, which the trap passes as eleven
@@ -779,9 +526,9 @@ pub(crate) struct VmMapRequest {
 /// of one address in the current map, and the caller must hold no locks.
 pub(crate) unsafe fn syscall_vm_map(
     request: &VmMapRequest,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(map) = (unsafe { port_name_to_map(request.target_map) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     let port = if mach_port_name_valid(request.memory_object) {
@@ -807,7 +554,7 @@ pub(crate) unsafe fn syscall_vm_map(
     // The C ignored the copyin result and handed `vm_map()` whatever the
     // stack held when it failed; zero is the deterministic stand-in.
     unsafe {
-        user_access::copyin(
+        let _ = user_access::copyin(
             request.address.cast(),
             ptr::addr_of_mut!(addr).cast(),
             size_of::<VmOffset>(),
@@ -817,7 +564,7 @@ pub(crate) unsafe fn syscall_vm_map(
     // SAFETY: the map is live and unlocked, `port` is the right the copyin
     // produced or an invalid-name sentinel, and the caller permits the
     // mapping.
-    let result = crate::vm::error::kern_return(unsafe {
+    let result = unsafe {
         vm_user::map(
             &mut *map.as_ptr(),
             &mut vm_user::MapRequest {
@@ -833,12 +580,12 @@ pub(crate) unsafe fn syscall_vm_map(
                 inheritance: VmInherit::from_bits(request.inheritance),
             },
         )
-    });
-    if result == KERN_SUCCESS {
+    };
+    if result.is_ok() {
         // SAFETY: `vm_map()` wrote the mapped address into `addr`, and the
         // caller promises the user address is writable.
         unsafe {
-            user_access::copyout(
+            let _ = user_access::copyout(
                 ptr::addr_of!(addr).cast(),
                 request.address.cast(),
                 size_of::<VmOffset>(),
@@ -850,11 +597,7 @@ pub(crate) unsafe fn syscall_vm_map(
     unsafe { release_send(port) };
     VmMap::deallocate(map);
 
-    if result == KERN_SUCCESS {
-        Ok(())
-    } else {
-        Err(Error::KernReturn(result))
-    }
+    result.map_err(RpcError::Vm)
 }
 
 /// `syscall_vm_map()` of <`kern/ipc_mig.h>`: the trap 64 entry.
@@ -904,14 +647,14 @@ pub(crate) unsafe fn syscall_vm_allocate(
     address: *mut VmOffset,
     size: VmSize,
     anywhere: c_int,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(map) = (unsafe { port_name_to_map(target_map) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     let mut addr = 0;
     unsafe {
-        user_access::copyin(
+        let _ = user_access::copyin(
             address.cast(),
             ptr::addr_of_mut!(addr).cast(),
             size_of::<VmOffset>(),
@@ -926,7 +669,7 @@ pub(crate) unsafe fn syscall_vm_allocate(
         // SAFETY: the allocation wrote the address into `addr`, and the
         // caller promises the user address is writable.
         unsafe {
-            user_access::copyout(
+            let _ = user_access::copyout(
                 ptr::addr_of!(addr).cast(),
                 address.cast(),
                 size_of::<VmOffset>(),
@@ -935,7 +678,7 @@ pub(crate) unsafe fn syscall_vm_allocate(
     }
     VmMap::deallocate(map);
 
-    result.map_err(Error::from)
+    result.map_err(RpcError::from)
 }
 
 /// `syscall_vm_allocate()` of <`kern/ipc_mig.h>`: the trap 65 entry.
@@ -964,9 +707,9 @@ pub(crate) unsafe fn syscall_vm_deallocate(
     target_map: c_uint,
     start: VmOffset,
     size: VmSize,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(map) = (unsafe { port_name_to_map(target_map) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     // SAFETY: the map is live and unlocked, and the caller holds no locks.
@@ -974,7 +717,7 @@ pub(crate) unsafe fn syscall_vm_deallocate(
         unsafe { vm_user::deallocate(&mut *map.as_ptr(), start, size) };
     VmMap::deallocate(map);
 
-    result.map_err(Error::from)
+    result.map_err(RpcError::from)
 }
 
 /// `syscall_vm_deallocate()` of <`kern/ipc_mig.h>`: the trap 66 entry.
@@ -1000,9 +743,9 @@ pub(crate) unsafe fn syscall_task_create(
     parent_task: c_uint,
     inherit_memory: c_int,
     child_task: *mut c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(parent) = (unsafe { port_name_to_task(parent_task) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     let source = if inherit_memory != 0 {
@@ -1028,7 +771,7 @@ pub(crate) unsafe fn syscall_task_create(
         };
 
         unsafe {
-            user_access::copyout(
+            let _ = user_access::copyout(
                 ptr::addr_of!(name).cast(),
                 child_task.cast(),
                 size_of::<c_uint>(),
@@ -1040,7 +783,7 @@ pub(crate) unsafe fn syscall_task_create(
     // here.
     unsafe { task::deallocate(parent.as_ptr()) };
 
-    created.map(|_| ()).map_err(Error::from)
+    created.map(|_| ()).map_err(RpcError::from)
 }
 
 /// `syscall_task_create()` of <`kern/ipc_mig.h>`: the trap 68 entry.
@@ -1067,9 +810,9 @@ pub(crate) unsafe extern "C" fn syscall_task_create_entry(
 /// locks.
 pub(crate) unsafe fn syscall_task_terminate(
     task_name: c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(task) = (unsafe { port_name_to_task(task_name) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     // SAFETY: the task is live and the caller holds no locks.
@@ -1078,7 +821,7 @@ pub(crate) unsafe fn syscall_task_terminate(
     // here.
     unsafe { task::deallocate(task.as_ptr()) };
 
-    result.map_err(Error::from)
+    result.map_err(RpcError::from)
 }
 
 /// `syscall_task_terminate()` of <`kern/ipc_mig.h>`: the trap 69 entry.
@@ -1101,9 +844,9 @@ pub(crate) unsafe extern "C" fn syscall_task_terminate_entry(
 /// locks.
 pub(crate) unsafe fn syscall_task_suspend(
     task_name: c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(task) = (unsafe { port_name_to_task(task_name) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     // SAFETY: the task is live and the caller holds no locks.
@@ -1112,7 +855,7 @@ pub(crate) unsafe fn syscall_task_suspend(
     // here.
     unsafe { task::deallocate(task.as_ptr()) };
 
-    result.map_err(Error::from)
+    result.map_err(RpcError::from)
 }
 
 /// `syscall_task_suspend()` of <`kern/ipc_mig.h>`: the trap 70 entry.
@@ -1136,9 +879,9 @@ pub(crate) unsafe fn syscall_task_set_special_port(
     task_name: c_uint,
     which_port: c_int,
     port_name: c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(target) = (unsafe { port_name_to_task(task_name) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     let port = if mach_port_name_valid(port_name) {
@@ -1159,7 +902,7 @@ pub(crate) unsafe fn syscall_task_set_special_port(
     };
 
     let result = TaskSpecialPort::from_int(which_port).map_or(
-        Err(KernError::InvalidArgument),
+        Err(Error::InvalidArgument),
         |which| {
             // SAFETY: the task is live and owns the right on success; the
             // caller holds no locks.
@@ -1176,7 +919,7 @@ pub(crate) unsafe fn syscall_task_set_special_port(
     // here.
     unsafe { task::deallocate(target.as_ptr()) };
 
-    result.map_err(Error::from)
+    result.map_err(RpcError::from)
 }
 
 /// `syscall_task_set_special_port()` of <`kern/ipc_mig.h>`: the trap 71 entry.
@@ -1204,9 +947,9 @@ pub(crate) unsafe fn syscall_mach_port_allocate(
     task_name: c_uint,
     right: c_uint,
     namep: *mut c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(space) = (unsafe { port_name_to_space(task_name) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     // SAFETY: the space is live and unlocked, and the caller holds no locks.
@@ -1214,7 +957,7 @@ pub(crate) unsafe fn syscall_mach_port_allocate(
         unsafe { crate::ipc::mach_port::allocate(Some(space), right) };
     if let Ok(name) = result {
         unsafe {
-            user_access::copyout(
+            let _ = user_access::copyout(
                 ptr::addr_of!(name).cast(),
                 namep.cast(),
                 size_of::<c_uint>(),
@@ -1225,7 +968,7 @@ pub(crate) unsafe fn syscall_mach_port_allocate(
     // here.
     unsafe { ipc_space::release(space) };
 
-    result.map(|_| ()).map_err(Error::from)
+    result.map(|_| ()).map_err(RpcError::from)
 }
 
 /// `syscall_mach_port_allocate()` of <`kern/ipc_mig.h>`: the trap 72 entry.
@@ -1251,9 +994,9 @@ pub(crate) unsafe fn syscall_mach_port_allocate_name(
     task_name: c_uint,
     right: c_uint,
     name: c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(space) = (unsafe { port_name_to_space(task_name) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     // SAFETY: the space is live and unlocked, and the caller holds no locks.
@@ -1264,7 +1007,7 @@ pub(crate) unsafe fn syscall_mach_port_allocate_name(
     // here.
     unsafe { ipc_space::release(space) };
 
-    result.map_err(Error::from)
+    result.map_err(RpcError::from)
 }
 
 /// `syscall_mach_port_allocate_name()` of <`kern/ipc_mig.h>`: the trap 75
@@ -1289,9 +1032,9 @@ pub(crate) unsafe extern "C" fn syscall_mach_port_allocate_name_entry(
 pub(crate) unsafe fn syscall_mach_port_deallocate(
     task_name: c_uint,
     name: c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(space) = (unsafe { port_name_to_space(task_name) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     // SAFETY: the space is live and unlocked, and the caller holds no locks.
@@ -1301,7 +1044,7 @@ pub(crate) unsafe fn syscall_mach_port_deallocate(
     // here.
     unsafe { ipc_space::release(space) };
 
-    result.map_err(Error::from)
+    result.map_err(RpcError::from)
 }
 
 /// `syscall_mach_port_deallocate()` of <`kern/ipc_mig.h>`: the trap 73 entry.
@@ -1326,16 +1069,16 @@ pub(crate) unsafe fn syscall_mach_port_insert_right(
     name: c_uint,
     right: c_uint,
     right_type: c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(space) = (unsafe { port_name_to_space(task_name) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     if !mach_msg_type_port_any(right_type) {
         // SAFETY: the reference `port_name_to_space()` took is the one
         // released here.
         unsafe { ipc_space::release(space) };
-        return Err(Error::KernReturn(KERN_INVALID_VALUE));
+        return Err(RpcError::Ipc(IpcError::InvalidValue));
     }
 
     let object = if mach_port_name_valid(right) {
@@ -1368,7 +1111,7 @@ pub(crate) unsafe fn syscall_mach_port_insert_right(
     // here.
     unsafe { ipc_space::release(space) };
 
-    result.map_err(Error::from)
+    result.map_err(RpcError::from)
 }
 
 /// `syscall_mach_port_insert_right()` of <`kern/ipc_mig.h>`: the trap 74
@@ -1396,9 +1139,9 @@ pub(crate) unsafe extern "C" fn syscall_mach_port_insert_right_entry(
 /// locks.
 pub(crate) unsafe fn syscall_thread_depress_abort(
     thread_name: c_uint,
-) -> Result<(), Error> {
+) -> Result<(), RpcError> {
     let Some(thread) = (unsafe { port_name_to_thread(thread_name) }) else {
-        return Err(Error::SendInterrupted);
+        return Err(RpcError::NotKernelObject);
     };
 
     // SAFETY: the thread is live, and the routine takes its own locks.
@@ -1407,11 +1150,7 @@ pub(crate) unsafe fn syscall_thread_depress_abort(
     // here.
     unsafe { Thread::deallocate(thread.as_ptr()) };
 
-    if result == KERN_SUCCESS {
-        Ok(())
-    } else {
-        Err(Error::KernReturn(result))
-    }
+    result.map_err(RpcError::Kern)
 }
 
 /// `syscall_thread_depress_abort()` of <`kern/ipc_mig.h>`: the trap 76 entry.
@@ -1428,9 +1167,6 @@ pub(crate) unsafe extern "C" fn syscall_thread_depress_abort_entry(
 
 /// `syscall_device_write_request()` of `kern/ipc_mig.c`.
 ///
-/// Returns an `io_return_t` unchanged: its domain is the `D_*` set plus the
-/// `KERN_*` codes the device layer reuses, which no single Rust enum covers.
-///
 /// # Safety
 ///
 /// Reached as trap 40 with user arguments, and the caller must hold no locks.
@@ -1441,16 +1177,16 @@ pub(crate) unsafe fn syscall_device_write_request(
     recnum: c_ulong,
     data: VmOffset,
     data_count: VmSize,
-) -> c_int {
+) -> Result<Reply, RpcError> {
     let Some(device) = (unsafe { port_name_to_device(device_name) }) else {
-        return KERN_INVALID_CAPABILITY;
+        return Err(RpcError::Ipc(IpcError::InvalidCapability));
     };
 
     if reply_name != MACH_PORT_NULL {
         // SAFETY: the reference `port_name_to_device()` took is the one
         // released here.
         unsafe { device_deallocate(device) };
-        return KERN_INVALID_RIGHT;
+        return Err(RpcError::Ipc(IpcError::InvalidRight));
     }
 
     // SAFETY: the device is live and its reference is held, and the trap does
@@ -1467,7 +1203,7 @@ pub(crate) unsafe fn syscall_device_write_request(
     // SAFETY: the reference `port_name_to_device()` took is the one released
     // here.
     unsafe { device_deallocate(device) };
-    result
+    result.map_err(RpcError::Device)
 }
 
 /// `syscall_device_write_request()` of <`kern/ipc_mig.h>`: the trap 40 entry.
@@ -1483,7 +1219,7 @@ pub(crate) unsafe extern "C" fn syscall_device_write_request_entry(
     data: VmOffset,
     data_count: VmSize,
 ) -> c_int {
-    unsafe {
+    match unsafe {
         syscall_device_write_request(
             device_name,
             reply_name,
@@ -1492,13 +1228,13 @@ pub(crate) unsafe extern "C" fn syscall_device_write_request_entry(
             data,
             data_count,
         )
+    } {
+        Ok(reply) => io_return(Ok(reply)),
+        Err(error) => c_int::from(error),
     }
 }
 
 /// `syscall_device_writev_request()` of `kern/ipc_mig.c`.
-///
-/// Returns an `io_return_t` unchanged, as
-/// [`syscall_device_write_request()`] does.
 ///
 /// # Safety
 ///
@@ -1510,16 +1246,16 @@ pub(crate) unsafe fn syscall_device_writev_request(
     recnum: c_ulong,
     iovec: *mut c_void,
     iocount: VmSize,
-) -> c_int {
+) -> Result<Reply, RpcError> {
     let Some(device) = (unsafe { port_name_to_device(device_name) }) else {
-        return KERN_INVALID_CAPABILITY;
+        return Err(RpcError::Ipc(IpcError::InvalidCapability));
     };
 
     if reply_name != MACH_PORT_NULL {
         // SAFETY: the reference `port_name_to_device()` took is the one
         // released here.
         unsafe { device_deallocate(device) };
-        return KERN_INVALID_RIGHT;
+        return Err(RpcError::Ipc(IpcError::InvalidRight));
     }
 
     // SAFETY: the device is live and its reference is held, and the trap does
@@ -1537,7 +1273,7 @@ pub(crate) unsafe fn syscall_device_writev_request(
     // SAFETY: the reference `port_name_to_device()` took is the one released
     // here.
     unsafe { device_deallocate(device) };
-    result
+    result.map_err(RpcError::Device)
 }
 
 /// `syscall_device_writev_request()` of <`kern/ipc_mig.h>`: the trap 39 entry.
@@ -1553,7 +1289,7 @@ pub(crate) unsafe extern "C" fn syscall_device_writev_request_entry(
     iovec: *mut c_void,
     iocount: VmSize,
 ) -> c_int {
-    unsafe {
+    match unsafe {
         syscall_device_writev_request(
             device_name,
             reply_name,
@@ -1562,5 +1298,8 @@ pub(crate) unsafe extern "C" fn syscall_device_writev_request_entry(
             iovec,
             iocount,
         )
+    } {
+        Ok(reply) => io_return(Ok(reply)),
+        Err(error) => c_int::from(error),
     }
 }

@@ -78,9 +78,37 @@ unsafe extern "C" fn inst_fetch_fault() -> c_int {
     naked_asm!("movq $-1, %rax", "ret", options(att_syntax));
 }
 
+/// A user address a copy could not reach: the access faulted, or the
+/// address lies at or above `VM_MAX_USER_ADDRESS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UserFault;
+
 /// `copyin()` of `i386/i386/locore.S` and `x86_64/locore.S`: copy `cn`
 /// bytes from the user address `userbuf` to the kernel address
-/// `kernelbuf`, returning 1 instead of copying when the user read faults.
+/// `kernelbuf`.
+///
+/// # Errors
+///
+/// Returns [`UserFault`] instead of copying when the user read faults.
+///
+/// # Safety
+///
+/// `userbuf` must be readable by the current user map for `cn` bytes and
+/// `kernelbuf` must be writable kernel memory for `cn` bytes.
+pub(crate) unsafe fn copyin(
+    userbuf: *const c_void,
+    kernelbuf: *mut c_void,
+    cn: usize,
+) -> Result<(), UserFault> {
+    if unsafe { copyin_asm(userbuf, kernelbuf, cn) } == 0 {
+        Ok(())
+    } else {
+        Err(UserFault)
+    }
+}
+
+/// The assembly body of [`copyin()`], returning 1 instead of copying when
+/// the user read faults.
 ///
 /// Each `rep` carries one `mach_recover` pair, both recovering to
 /// [`copyin_fail`], and a `userbuf` at or above `VM_MAX_USER_ADDRESS` is
@@ -88,10 +116,9 @@ unsafe extern "C" fn inst_fetch_fault() -> c_int {
 ///
 /// # Safety
 ///
-/// `userbuf` must be readable by the current user map for `cn` bytes and
-/// `kernelbuf` must be writable kernel memory for `cn` bytes.
+/// As [`copyin()`].
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn copyin(
+unsafe extern "C" fn copyin_asm(
     userbuf: *const c_void,
     kernelbuf: *mut c_void,
     cn: usize,
@@ -127,11 +154,11 @@ pub(crate) unsafe extern "C" fn copyin(
     );
 }
 
-/// The `copyin_fail` label of [`copyin`]: return 1.
+/// The `copyin_fail` label of [`copyin_asm`]: return 1.
 ///
 /// # Safety
 ///
-/// Entered only through the `mach_recover` pairs `copyin` emits and its
+/// Entered only through the `mach_recover` pairs `copyin_asm` emits and its
 /// bound-check branch; there is no frame to unwind, and it must not be
 /// called directly.
 #[unsafe(naked)]
@@ -140,18 +167,39 @@ unsafe extern "C" fn copyin_fail() -> c_int {
 }
 
 /// `copyout()` of `i386/i386/locore.S` and `x86_64/locore.S`: copy `cn`
-/// bytes from the kernel address `kernelbuf` to the user address `userbuf`,
-/// returning 1 instead of copying when the write faults.
+/// bytes from the kernel address `kernelbuf` to the user address `userbuf`.
+///
+/// # Errors
+///
+/// Returns [`UserFault`] instead of copying when the user write faults.
+///
+/// # Safety
+///
+/// `kernelbuf` must be readable by the kernel for `cn` bytes, and `userbuf`
+/// must be writable by the current user map for `cn` bytes.
+pub(crate) unsafe fn copyout(
+    kernelbuf: *const c_void,
+    userbuf: *mut c_void,
+    cn: usize,
+) -> Result<(), UserFault> {
+    if unsafe { copyout_asm(kernelbuf, userbuf, cn) } == 0 {
+        Ok(())
+    } else {
+        Err(UserFault)
+    }
+}
+
+/// The assembly body of [`copyout()`], returning 1 instead of copying when
+/// the user write faults.
 ///
 /// Every `rep` carries one `mach_recover` pair to [`copyout_fail`], and a
 /// `userbuf` at or above `VM_MAX_USER_ADDRESS` is rejected before copying.
 ///
 /// # Safety
 ///
-/// `kernelbuf` must be readable by the kernel for `cn` bytes, and `userbuf`
-/// must be writable by the current user map for `cn` bytes.
+/// As [`copyout()`].
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn copyout(
+unsafe extern "C" fn copyout_asm(
     kernelbuf: *const c_void,
     userbuf: *mut c_void,
     cn: usize,
@@ -188,11 +236,11 @@ pub(crate) unsafe extern "C" fn copyout(
     );
 }
 
-/// The `copyout_fail` label of [`copyout`]: return 1.
+/// The `copyout_fail` label of [`copyout_asm`]: return 1.
 ///
 /// # Safety
 ///
-/// Entered only through the `mach_recover` pairs `copyout()` emits and its
+/// Entered only through the `mach_recover` pairs `copyout_asm()` emits and its
 /// bound-check branch; there is no frame to unwind, and it must not be
 /// called directly.
 #[unsafe(naked)]

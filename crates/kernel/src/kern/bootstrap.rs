@@ -38,7 +38,7 @@ use crate::kern::thread::Thread;
 use crate::vm::types::{VmInherit, VmProt};
 use crate::vm::vm_map::{VmMap, round_page, trunc_page};
 use crate::vm::vm_user;
-use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
+use core::ffi::{CStr, c_char, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{
     self, NonNull, addr_of_mut, null_mut, with_exposed_provenance_mut,
@@ -212,10 +212,7 @@ impl Host for BootstrapHost {
         } {
             Ok(task) => task,
             Err(error) => {
-                kprint!(
-                    "boot script task creation failed with {:x}\n",
-                    c_int::from(error)
-                );
+                kprint!("boot script task creation failed with {:?}\n", error);
                 return Err(boot_script::Error::Host);
             }
         };
@@ -249,10 +246,7 @@ impl Host for BootstrapHost {
                 Ok(())
             }
             Err(error) => {
-                kprint!(
-                    "boot script task resume failed with {:x}\n",
-                    c_int::from(error)
-                );
+                kprint!("boot script task resume failed with {:?}\n", error);
                 Err(boot_script::Error::Host)
             }
         }
@@ -616,8 +610,8 @@ impl ModuleImage<'_> {
             if let Err(error) = result {
                 kpanic!(
                     "read_exec",
-                    "cannot allocate the bootstrap section: {:x}",
-                    error.as_kern_return()
+                    "cannot allocate the bootstrap section: {:?}",
+                    error
                 );
             }
         }
@@ -626,7 +620,7 @@ impl ModuleImage<'_> {
             // SAFETY: `image_at` covers `file_len` bytes, and the
             // user address is the segment just allocated above.
             unsafe {
-                user_access::copyout(
+                let _ = user_access::copyout(
                     source,
                     user_ptr(addr),
                     segment.file_len(),
@@ -650,8 +644,8 @@ impl ModuleImage<'_> {
             if let Err(error) = result {
                 kpanic!(
                     "read_exec",
-                    "cannot protect the bootstrap section: {:x}",
-                    error.as_kern_return()
+                    "cannot protect the bootstrap section: {:?}",
+                    error
                 );
             }
         }
@@ -710,7 +704,7 @@ struct EnvVar<'a> {
 /// `to` must be a writable user address of `size_of::<T>()` bytes.
 unsafe fn copyout_value<T>(value: &T, to: VmOffset) {
     unsafe {
-        user_access::copyout(
+        let _ = user_access::copyout(
             ptr::from_ref(value).cast(),
             user_ptr(to),
             size_of::<T>(),
@@ -725,7 +719,7 @@ unsafe fn copyout_value<T>(value: &T, to: VmOffset) {
 /// `from` must be readable for `len` bytes and `to` a writable user
 /// address of that many bytes.
 unsafe fn copyout_bytes(from: *const c_void, to: VmOffset, len: usize) {
-    unsafe { user_access::copyout(from, user_ptr(to), len) };
+    let _ = unsafe { user_access::copyout(from, user_ptr(to), len) };
 }
 
 /// Allocates the user stack and writes the argument and environment

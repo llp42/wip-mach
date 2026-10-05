@@ -9,9 +9,9 @@
 
 use crate::arch::types::VmOffset;
 use crate::arch::vm_param::VM_MAX_USER_ADDRESS;
+use crate::arch::x86_64::error::Error;
 use crate::arch::x86_64::pcb::{I386DebugState, Pcb};
 use crate::arch::x86_64::per_cpu;
-use crate::kern::types::KernError;
 use core::arch::asm;
 use core::ffi::c_ulong;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -102,7 +102,7 @@ pub(crate) unsafe fn get_debug_state(
 pub(crate) unsafe fn set_debug_state(
     pcb: *mut Pcb,
     state: *const I386DebugState,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let state = unsafe { &*state };
 
     for i in 0..=3 {
@@ -111,7 +111,7 @@ pub(crate) unsafe fn set_debug_state(
         // can bite.
         let addr = state.dr[i] as VmOffset;
         if addr >= VM_MAX_USER_ADDRESS {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
     }
     unsafe { (*pcb).ims.ids = *state };

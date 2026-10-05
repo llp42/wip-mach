@@ -19,11 +19,11 @@
 use crate::arch::types::{VmOffset, VmSize};
 use crate::ipc::mach_debug;
 use crate::ipc::{HashInfoBucket, IpcSpace};
+use crate::kern::error::Error;
 use crate::kern::host::Host;
 use crate::kern::processor::ProcessorSet;
 use crate::kern::slab::{self, CacheInfo};
-use crate::kern::types::KernError;
-use crate::vm::error::KERN_SUCCESS;
+use crate::mig::code::KERN_SUCCESS;
 use crate::vm::types::VmObject;
 use crate::vm::vm_debug::{
     self, VmObjectInfo, VmPageInfo, VmPagePhysInfo, VmRegionInfo,
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn host_virtual_physical_table_info(
         )
     } {
         Ok(()) => KERN_SUCCESS,
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -242,7 +242,7 @@ pub unsafe extern "C" fn mach_vm_region_info(
             }
             KERN_SUCCESS
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -268,7 +268,7 @@ pub unsafe extern "C" fn mach_vm_object_info(
             }
             KERN_SUCCESS
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -293,7 +293,7 @@ pub unsafe extern "C" fn mach_vm_object_pages(
         )
     } {
         Ok(()) => KERN_SUCCESS,
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -311,13 +311,13 @@ pub unsafe extern "C" fn host_slab_info(
     info_cnt: *mut c_uint,
 ) -> c_int {
     if host.is_null() {
-        return c_int::from(KernError::InvalidHost);
+        return c_int::from(Error::InvalidHost);
     }
 
     let (Some(info), Some(info_cnt)) =
         (NonNull::new(info), NonNull::new(info_cnt))
     else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     loop {
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn host_slab_info(
         // `kalloc` reports a zero-size request as failure, as the C's
         // `info == NULL` check does.
         let Some(base) = slab::kalloc(info_size) else {
-            return c_int::from(KernError::ResourceShortage);
+            return c_int::from(Error::ResourceShortage);
         };
 
         // SAFETY: the allocation holds `nr_caches` records.
@@ -365,7 +365,7 @@ pub unsafe extern "C" fn host_slab_info(
                 Err(error) => {
                     // SAFETY: `base` is the live allocation from above.
                     unsafe { slab::kfree(base, info_size) };
-                    return error.as_kern_return();
+                    return c_int::from(error);
                 }
             };
 
@@ -433,6 +433,6 @@ pub unsafe extern "C" fn mach_vm_object_pages_phys(
         )
     } {
         Ok(()) => KERN_SUCCESS,
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }

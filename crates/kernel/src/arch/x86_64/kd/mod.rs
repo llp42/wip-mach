@@ -172,13 +172,13 @@ pub struct ConsDev {
     /// during the single-threaded boot before any console user runs, with
     /// the entry's own address; the callee may write the entry's
     /// `cn_pri`, `cn_dev`, and other fields.
-    pub(crate) cn_probe: Option<unsafe fn(*mut Self) -> c_int>,
+    pub(crate) cn_probe: Option<unsafe fn(*mut Self)>,
     /// # Safety
     ///
     /// `device/cons.c`'s `cninit()` calls this once, during the
     /// single-threaded boot, for the table entry its matching `cn_probe`
     /// chose.
-    pub(crate) cn_init: Option<unsafe fn(*mut Self) -> c_int>,
+    pub(crate) cn_init: Option<unsafe fn(*mut Self)>,
     /// # Safety
     ///
     /// Called with the chosen entry's own `cn_dev`; the callee may busy
@@ -190,7 +190,7 @@ pub struct ConsDev {
     /// Called with the chosen entry's own `cn_dev`; the callee must be
     /// safe to call at any interrupt level, since the console is written
     /// from the panic path and from the pending-buffer flush at boot.
-    pub(crate) cn_putc: Option<unsafe fn(u16, c_int) -> c_int>,
+    pub(crate) cn_putc: Option<unsafe fn(u16, c_int)>,
     pub(crate) cn_dev: u16,
     pub(crate) cn_pri: c_short,
 }

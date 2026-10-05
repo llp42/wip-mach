@@ -11,6 +11,7 @@
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::ipc::ipc_init;
+use crate::kern::error::Error;
 use crate::kern::lock::SimpleLock;
 use crate::kern::slab::{kalloc, kfree};
 use crate::kern::task::Task;
@@ -19,12 +20,6 @@ use crate::vm::vm_map::{VmMapCopy, round_page};
 use core::ffi::c_int;
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
-
-/// `EML_BAD_TASK` of <`kern/syscall_emulation.h>`: the task is null.
-const EML_BAD_TASK: c_int = 0x8001;
-
-/// `KERN_RESOURCE_SHORTAGE` of <`mach/kern_return.h`>.
-const KERN_RESOURCE_SHORTAGE: c_int = 3;
 
 /// The `emulation_vector_t` of a task, as `task_get_emulation_vector()`
 /// returns one.
@@ -167,6 +162,11 @@ const fn merge_range(
 
 /// `task_set_emulation_vector_internal()` of `kern/syscall_emulation.c`.
 ///
+/// # Errors
+///
+/// Returns [`Error::NoEmulationTask`] when `task` is null, and
+/// [`Error::ResourceShortage`] when the larger table cannot be allocated.
+///
 /// # Safety
 ///
 /// `task` must be null or a live task, and `emulation_vector` must point at
@@ -176,9 +176,9 @@ pub(crate) unsafe fn set_vector_internal(
     vector_start: c_int,
     emulation_vector: *mut VmOffset,
     emulation_vector_count: u32,
-) -> c_int {
+) -> Result<(), Error> {
     if task.is_null() {
-        return EML_BAD_TASK;
+        return Err(Error::NoEmulationTask);
     }
 
     // The C added the unsigned count to the `int` start and kept the
@@ -265,7 +265,7 @@ pub(crate) unsafe fn set_vector_internal(
         // The C kalloc() returned zero here and then memset a null pointer;
         // an out-of-memory boot returns the error instead.
         let Some(buffer) = kalloc(new_size) else {
-            return KERN_RESOURCE_SHORTAGE;
+            return Err(Error::ResourceShortage);
         };
 
         // SAFETY: the buffer is a fresh allocation of `new_size` bytes; the
@@ -303,20 +303,26 @@ pub(crate) unsafe fn set_vector_internal(
         }
     }
 
-    0
+    Ok(())
 }
 
 /// `task_get_emulation_vector()` in C: copy a task's emulation vector into
 /// an out-of-line `vm_map_copy_t`.
+///
+/// # Errors
+///
+/// Returns [`Error::NoEmulationTask`] when `task` is null,
+/// [`Error::ResourceShortage`] when the staging buffer cannot be allocated,
+/// and [`Error::Vm`] when the copy cannot be made.
 ///
 /// # Safety
 ///
 /// `task` must be null or a live task.
 pub(crate) unsafe fn get_vector(
     task: *mut Task,
-) -> Result<EmulationVector, c_int> {
+) -> Result<EmulationVector, Error> {
     if task.is_null() {
-        return Err(EML_BAD_TASK);
+        return Err(Error::NoEmulationTask);
     }
 
     let map = ipc_init::ipc_kernel_map();
@@ -360,7 +366,7 @@ pub(crate) unsafe fn get_vector(
             size = size_needed;
             match kmem_alloc(NonNull::new_unchecked(map), size) {
                 Ok(allocated) => addr = allocated,
-                Err(_) => return Err(KERN_RESOURCE_SHORTAGE),
+                Err(_) => return Err(Error::ResourceShortage),
             }
         }
     }
@@ -397,7 +403,7 @@ pub(crate) unsafe fn get_vector(
         } else {
             match (&mut *map).copyin(addr, vector_size, true) {
                 Ok(copy) => copy.as_ptr(),
-                Err(error) => return Err(error.as_kern_return()),
+                Err(error) => return Err(Error::Vm(error)),
             }
         };
 
@@ -413,6 +419,11 @@ pub(crate) unsafe fn get_vector(
 /// the out-of-line vector into the kernel map, install it, and free the
 /// mapping.
 ///
+/// # Errors
+///
+/// Returns [`Error::NoEmulationTask`] when `task` is null, [`Error::Vm`]
+/// when the vector cannot be mapped, and the error of installing it.
+///
 /// # Safety
 ///
 /// `task` must be null or a live task, and `emulation_vector` a live
@@ -422,24 +433,21 @@ pub(crate) unsafe fn set_vector(
     vector_start: c_int,
     emulation_vector: *mut VmOffset,
     emulation_vector_count: u32,
-) -> c_int {
+) -> Result<(), Error> {
     if task.is_null() {
-        return EML_BAD_TASK;
+        return Err(Error::NoEmulationTask);
     }
 
     let map = ipc_init::ipc_kernel_map();
 
     let addr = match NonNull::new(emulation_vector.cast::<VmMapCopy>()) {
-        Some(copy) => match unsafe { (&mut *map).copyout(copy) } {
-            Ok(addr) => addr,
-            Err(error) => return error.as_kern_return(),
-        },
+        Some(copy) => unsafe { (&mut *map).copyout(copy) }?,
         None => 0,
     };
 
     // SAFETY: `addr` is where the copyout placed the caller's vector, which
     // has `emulation_vector_count` entries.
-    let kr = unsafe {
+    let installed = unsafe {
         set_vector_internal(
             task,
             vector_start,
@@ -458,5 +466,5 @@ pub(crate) unsafe fn set_vector(
         );
     }
 
-    kr
+    installed
 }

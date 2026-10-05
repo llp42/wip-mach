@@ -20,7 +20,7 @@ use crate::arch::x86_64::pmap::{
     pmap_change_wiring, pmap_clear_modify, pmap_enter, pmap_page_protect,
     pmap_pageable,
 };
-use crate::glue::{memory_object_data_request, memory_object_data_unlock};
+use crate::ipc::error::SendError;
 use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
 use crate::kern::sched_prim::{
@@ -30,11 +30,10 @@ use crate::kern::sched_prim::{
 use crate::kern::slab::{CacheInitFlags, KmemCache};
 use crate::kern::task::current_task;
 use crate::kern::thread::Continuation;
-use crate::vm::error::{
-    KERN_FAILURE, KERN_MEMORY_ERROR, KERN_SUCCESS, MACH_SEND_INTERRUPTED,
-};
+use crate::mig::{memory_object_data_request, memory_object_data_unlock};
+use crate::vm::error::Error;
 use crate::vm::types::{VmObject, VmPage, VmProt};
-use crate::vm::vm_external::{self, VM_EXTERNAL_STATE_ABSENT};
+use crate::vm::vm_external::{self, ExternalState};
 use crate::vm::vm_map::{VmMap, VmMapEntry, VmMapVersion};
 use crate::vm::vm_object::{
     self, deallocate, page_free, page_wakeup_done, paging_begin, paging_end,
@@ -51,13 +50,20 @@ use core::ptr::{self, NonNull, addr_of_mut};
 /// physical memory.
 const VM_PAGE_HIGHMEM: c_uint = 0x08;
 
-/// `VM_FAULT_*` of <`vm/vm_fault.h`>, the values `vm_fault_page()` returns.
-pub(crate) const VM_FAULT_SUCCESS: c_int = 0;
-const VM_FAULT_RETRY: c_int = 1;
-const VM_FAULT_INTERRUPTED: c_int = 2;
-const VM_FAULT_MEMORY_SHORTAGE: c_int = 3;
-const VM_FAULT_FICTITIOUS_SHORTAGE: c_int = 4;
-const VM_FAULT_MEMORY_ERROR: c_int = 5;
+/// Why [`fault_page`] produced no page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FaultError {
+    /// The page changed under the fault; run it again.
+    Retry,
+    /// A wait the fault had to make was interrupted.
+    Interrupted,
+    /// No free page could be had; wait for one and run the fault again.
+    MemoryShortage,
+    /// No fictitious page could be had; add some and run the fault again.
+    FictitiousShortage,
+    /// The page is in error, or its pager could not supply it.
+    MemoryError,
+}
 
 /// `vm_fault_state_t` of `vm/vm_fault.c`: the state [`fault`] saves on the
 /// current thread for a continuation.
@@ -74,7 +80,7 @@ struct VmFaultState {
     /// sleeps, and [`fault`] calls it with the final result once the state
     /// above it has been freed; like [`fault`]'s own `continuation`
     /// parameter, it must not return.
-    vmf_continuation: Option<unsafe fn(c_int)>,
+    vmf_continuation: Option<unsafe fn(Result<(), Error>)>,
     vmf_version: VmMapVersion,
     vmf_wired: c_int,
     vmf_object: *mut VmObject,
@@ -157,11 +163,11 @@ pub(crate) fn init_module() {
     }
 }
 
-/// What [`fault_page`] produced: the `VM_FAULT_*` result and the outputs the
-/// C signature carried in pointers.
+/// What [`fault_page`] produced: whether it found the page, and the outputs
+/// the C signature carried in pointers.
 pub(crate) struct Fault {
-    /// The `VM_FAULT_*` result the C returned.
-    pub(crate) result: c_int,
+    /// Whether the fault found the page, or why it did not.
+    pub(crate) result: Result<(), FaultError>,
     /// The protection for the mapping, modified in place as the C did.
     pub(crate) protection: VmProt,
     /// The busy result page, or null when the fault failed.
@@ -172,9 +178,9 @@ pub(crate) struct Fault {
 
 impl Fault {
     /// A failure result, which carries no pages.
-    const fn error(result: c_int, protection: VmProt) -> Self {
+    const fn error(error: FaultError, protection: VmProt) -> Self {
         Self {
-            result,
+            result: Err(error),
             protection,
             result_page: ptr::null_mut(),
             top_page: ptr::null_mut(),
@@ -199,12 +205,12 @@ unsafe fn fault_state() -> *mut VmFaultState {
 /// # Safety
 ///
 /// The current thread must have just returned from `thread_block()`.
-unsafe fn after_block_and_backoff() -> c_int {
+unsafe fn after_block_and_backoff() -> FaultError {
     // SAFETY: the block returned on the current thread.
     if unsafe { (*per_cpu::thread()).wait_result } == THREAD_AWAKENED {
-        VM_FAULT_RETRY
+        FaultError::Retry
     } else {
-        VM_FAULT_INTERRUPTED
+        FaultError::Interrupted
     }
 }
 
@@ -231,9 +237,9 @@ unsafe fn after_wait(
     unsafe { cleanup(object, NonNull::new(first_m)) };
     Some(Fault::error(
         if wait_result == THREAD_RESTART {
-            VM_FAULT_RETRY
+            FaultError::Retry
         } else {
-            VM_FAULT_INTERRUPTED
+            FaultError::Interrupted
         },
         protection,
     ))
@@ -312,15 +318,16 @@ pub(crate) unsafe fn wire(map: &VmMap, entry: NonNull<VmMapEntry>) {
     while va < end {
         // SAFETY: `map` and `entry` are live and read-locked by the caller,
         // and `va` is an address the entry covers.
-        let wired = unsafe { wire_fast(&*map, va, entry.as_ptr()) };
-        if wired != KERN_SUCCESS {
-            unsafe { fault(map, va, VmProt::NONE, true, false, None) };
+        if !unsafe { wire_fast(&*map, va, entry.as_ptr()) } {
+            // The C ignored the wiring fault's result.
+            let _ = unsafe { fault(map, va, VmProt::NONE, true, false, None) };
         }
         va = va.wrapping_add(PAGE_SIZE);
     }
 }
 
-/// `vm_fault_wire_fast()` of `vm/vm_fault.c`.
+/// `vm_fault_wire_fast()` of `vm/vm_fault.c`: whether the page was resident
+/// and usable, so the fast path could wire it without a fault.
 ///
 /// # Safety
 ///
@@ -331,14 +338,14 @@ pub(crate) unsafe fn wire_fast(
     map: &VmMap,
     va: VmOffset,
     entry: *mut VmMapEntry,
-) -> c_int {
+) -> bool {
     unsafe {
         VM_STAT.faults += 1;
         (*current_task()).faults += 1;
     }
 
     if unsafe { (*entry).is_sub_map() } {
-        return KERN_FAILURE;
+        return false;
     }
 
     let (object, offset, prot) = unsafe {
@@ -425,7 +432,7 @@ pub(crate) unsafe fn wire_fast(
         deallocate(object);
     }
 
-    KERN_SUCCESS
+    true
 }
 
 /// The `GIVE_UP` path of [`wire_fast`]: drop the object's paging reference
@@ -435,13 +442,13 @@ pub(crate) unsafe fn wire_fast(
 ///
 /// `object` must be live, its lock held, and its paging reference taken by
 /// [`wire_fast`].
-unsafe fn give_up(object: *mut VmObject) -> c_int {
+unsafe fn give_up(object: *mut VmObject) -> bool {
     unsafe {
         (*object).set_paging_in_progress((*object).paging_in_progress() - 1);
         (*object).lock.unlock();
         deallocate(object);
     }
-    KERN_FAILURE
+    false
 }
 
 /// `vm_fault_cleanup()` of `vm/vm_fault.c`.
@@ -579,7 +586,7 @@ impl FaultState {
                 cleanup(self.object, NonNull::new(self.first_m));
             }
             return SearchStep::Return(Fault::error(
-                VM_FAULT_MEMORY_ERROR,
+                FaultError::MemoryError,
                 self.protection,
             ));
         }
@@ -638,7 +645,7 @@ impl FaultState {
                 // SAFETY: the object and top page are the fault's.
                 unsafe { cleanup(self.object, NonNull::new(self.first_m)) };
                 return SearchStep::Return(Fault::error(
-                    VM_FAULT_MEMORY_SHORTAGE,
+                    FaultError::MemoryShortage,
                     self.protection,
                 ));
             };
@@ -765,7 +772,7 @@ impl FaultState {
 
             // SAFETY: the pager port and its request are live, and
             // the busy page holds the object's paging reference.
-            let rc = unsafe {
+            let sent = unsafe {
                 memory_object_data_unlock(
                     (*self.object).pager,
                     (*self.object).pager_request,
@@ -774,7 +781,7 @@ impl FaultState {
                     new_unlock_request,
                 )
             };
-            if rc != KERN_SUCCESS {
+            if let Err(error) = sent {
                 kprint!("vm_fault: memory_object_data_unlock failed\n");
                 // SAFETY: the object is live; its lock is taken
                 // back for the cleanup.
@@ -783,10 +790,10 @@ impl FaultState {
                     cleanup(self.object, NonNull::new(self.first_m));
                 }
                 return SearchStep::Return(Fault::error(
-                    if rc == MACH_SEND_INTERRUPTED {
-                        VM_FAULT_INTERRUPTED
+                    if error == SendError::Interrupted {
+                        FaultError::Interrupted
                     } else {
-                        VM_FAULT_MEMORY_ERROR
+                        FaultError::MemoryError
                     },
                     self.protection,
                 ));
@@ -829,7 +836,7 @@ impl FaultState {
                 && vm_external::state_get(
                     (*self.object).existence_info.cast(),
                     self.offset.wrapping_add((*self.object).paging_offset),
-                ) != VM_EXTERNAL_STATE_ABSENT
+                ) != ExternalState::Absent
         };
 
         if (look_for_page || self.object == self.first_object)
@@ -841,7 +848,7 @@ impl FaultState {
                 // SAFETY: the object and top page are the fault's.
                 unsafe { cleanup(self.object, NonNull::new(self.first_m)) };
                 return SearchStep::Return(Fault::error(
-                    VM_FAULT_FICTITIOUS_SHORTAGE,
+                    FaultError::FictitiousShortage,
                     self.protection,
                 ));
             };
@@ -913,7 +920,7 @@ impl FaultState {
                         cleanup(self.object, NonNull::new(self.first_m));
                     }
                     return SearchStep::Return(Fault::error(
-                        VM_FAULT_MEMORY_SHORTAGE,
+                        FaultError::MemoryShortage,
                         self.protection,
                     ));
                 };
@@ -957,7 +964,7 @@ impl FaultState {
         }
         // SAFETY: the pager port and its request are live, and the busy
         // page holds the object's paging reference.
-        let rc = unsafe {
+        let sent = unsafe {
             memory_object_data_request(
                 (*self.object).pager,
                 (*self.object).pager_request,
@@ -966,17 +973,17 @@ impl FaultState {
                 self.access_required,
             )
         };
-        if rc != KERN_SUCCESS {
+        if let Err(error) = sent {
             // SAFETY: the object is live and referenced by the busy
             // page.
             if !unsafe { (*self.object).pager }.is_null()
-                && rc != MACH_SEND_INTERRUPTED
+                && error != SendError::Interrupted
             {
                 // SAFETY: the pager and its request are read as the C's
                 // diagnostic did.
                 kprint!(
                     "memory_object_data_request({:p}, {:p}, 0x{:x}, \
-                         0x{:x}, 0x{:x}) failed, 0x{:x}\n",
+                         0x{:x}, 0x{:x}) failed, {:?}\n",
                     // SAFETY: the object is live and referenced by the
                     // busy page.
                     unsafe { (*self.object).pager },
@@ -990,7 +997,7 @@ impl FaultState {
                         .wrapping_add(unsafe { (*self.object).paging_offset }),
                     PAGE_SIZE,
                     self.access_required.bits(),
-                    rc
+                    error
                 );
             }
             // SAFETY: the object is live; its lock is taken back for
@@ -1010,10 +1017,10 @@ impl FaultState {
                 cleanup(self.object, NonNull::new(self.first_m));
             }
             return SearchStep::Return(Fault::error(
-                if rc == MACH_SEND_INTERRUPTED {
-                    VM_FAULT_INTERRUPTED
+                if error == SendError::Interrupted {
+                    FaultError::Interrupted
                 } else {
-                    VM_FAULT_MEMORY_ERROR
+                    FaultError::MemoryError
                 },
                 self.protection,
             ));
@@ -1072,7 +1079,7 @@ impl FaultState {
                         cleanup(self.object, None);
                     }
                     return SearchStep::Return(Fault::error(
-                        VM_FAULT_MEMORY_SHORTAGE,
+                        FaultError::MemoryShortage,
                         self.protection,
                     ));
                 };
@@ -1127,7 +1134,7 @@ impl FaultState {
                     cleanup(self.object, NonNull::new(self.first_m));
                 }
                 return Some(Fault::error(
-                    VM_FAULT_MEMORY_SHORTAGE,
+                    FaultError::MemoryShortage,
                     self.protection,
                 ));
             };
@@ -1218,7 +1225,7 @@ impl FaultState {
                 cleanup(self.object, NonNull::new(self.first_m));
             }
             return CopyStep::Return(Fault::error(
-                VM_FAULT_MEMORY_SHORTAGE,
+                FaultError::MemoryShortage,
                 self.protection,
             ));
         };
@@ -1395,7 +1402,7 @@ impl FaultState {
         }
 
         Fault {
-            result: VM_FAULT_SUCCESS,
+            result: Ok(()),
             protection: self.protection,
             result_page: self.m,
             top_page: self.first_m,
@@ -1561,8 +1568,9 @@ unsafe extern "C" fn vm_fault_continue() {
             (*state).vmf_continuation,
         )
     };
-    // SAFETY: the state named this map and continuation.
-    unsafe {
+    // SAFETY: the state named this map and continuation, which receives
+    // the result.
+    let _ = unsafe {
         fault(map, vaddr, fault_type, change_wiring, true, continuation)
     };
 }
@@ -1583,7 +1591,7 @@ unsafe fn fault_step(
     resumed: &mut Option<ResumeFault>,
     vaddr: VmOffset,
     change_wiring: bool,
-    continuation: Option<unsafe fn(c_int)>,
+    continuation: Option<unsafe fn(Result<(), Error>)>,
 ) -> FaultStep {
     let (object, offset, version, wired, fault) =
         if let Some((object, offset, prot, version, wired)) = resumed.take() {
@@ -1614,21 +1622,21 @@ unsafe fn fault_step(
                 )
             } {
                 Ok(found) => found,
-                Err(code) => return FaultStep::Break(code),
+                Err(error) => return FaultStep::Break(Err(error)),
             }
         };
 
     let result = fault.result;
-    if result != VM_FAULT_SUCCESS {
+    if result.is_err() {
         // SAFETY: the lookup's reference is the caller's, and no lock is
         // held here.
         unsafe { deallocate(object) };
     }
 
     match result {
-        VM_FAULT_RETRY => FaultStep::Retry,
-        VM_FAULT_INTERRUPTED => FaultStep::Break(KERN_SUCCESS),
-        VM_FAULT_MEMORY_SHORTAGE => {
+        Err(FaultError::Retry) => FaultStep::Retry,
+        Err(FaultError::Interrupted) => FaultStep::Break(Ok(())),
+        Err(FaultError::MemoryShortage) => {
             if continuation.is_some() {
                 // SAFETY: the state was allocated above.
                 let state = unsafe { fault_state() };
@@ -1649,13 +1657,15 @@ unsafe fn fault_step(
             }
             FaultStep::Retry
         }
-        VM_FAULT_FICTITIOUS_SHORTAGE => {
+        Err(FaultError::FictitiousShortage) => {
             // SAFETY: the slab package is up in this path.
             unsafe { vm_resident::more_fictitious() };
             FaultStep::Retry
         }
-        VM_FAULT_MEMORY_ERROR => FaultStep::Break(KERN_MEMORY_ERROR),
-        _ => FaultStep::Page(FaultPage {
+        Err(FaultError::MemoryError) => {
+            FaultStep::Break(Err(Error::MemoryError))
+        }
+        Ok(()) => FaultStep::Page(FaultPage {
             object,
             offset,
             version,
@@ -1679,8 +1689,8 @@ unsafe fn fault_run(
     resumed: &mut Option<ResumeFault>,
     vaddr: VmOffset,
     change_wiring: bool,
-    continuation: Option<unsafe fn(c_int)>,
-) -> c_int {
+    continuation: Option<unsafe fn(Result<(), Error>)>,
+) -> Result<(), Error> {
     loop {
         match unsafe {
             fault_step(
@@ -1693,14 +1703,14 @@ unsafe fn fault_run(
             )
         } {
             FaultStep::Retry => {}
-            FaultStep::Break(code) => return code,
+            FaultStep::Break(result) => return result,
             FaultStep::Page(page) => {
                 // SAFETY: the fault returned the live, busy result page.
                 match unsafe {
                     fault_success(map, vaddr, *fault_type, change_wiring, page)
                 } {
                     SuccessStep::Retry => {}
-                    SuccessStep::Break(code) => return code,
+                    SuccessStep::Break(result) => return result,
                 }
             }
         }
@@ -1723,8 +1733,8 @@ unsafe fn fault_lookup(
     vaddr: VmOffset,
     fault_type: &mut VmProt,
     change_wiring: bool,
-    continuation: Option<unsafe fn(c_int)>,
-) -> Result<FaultLookup, c_int> {
+    continuation: Option<unsafe fn(Result<(), Error>)>,
+) -> Result<FaultLookup, Error> {
     match VmMap::lookup(map, vaddr, *fault_type, false) {
         Ok(found) => {
             let object = found.object;
@@ -1785,7 +1795,7 @@ unsafe fn fault_lookup(
                 fault,
             ))
         }
-        Err(error) => Err(error.as_kern_return()),
+        Err(error) => Err(error),
     }
 }
 
@@ -1804,8 +1814,8 @@ struct FaultPage {
 enum FaultStep {
     /// Run the lookup and fault again.
     Retry,
-    /// Leave the loop with this `KERN_*` result.
-    Break(c_int),
+    /// Leave the loop with this result.
+    Break(Result<(), Error>),
     /// Install this successful fault.
     Page(FaultPage),
 }
@@ -1814,8 +1824,8 @@ enum FaultStep {
 enum SuccessStep {
     /// Run the lookup and fault again.
     Retry,
-    /// Leave the loop with this `KERN_*` result.
-    Break(c_int),
+    /// Leave the loop with this result.
+    Break(Result<(), Error>),
 }
 
 /// Re-check the map and install the fault's result page, as the C's success
@@ -1866,7 +1876,7 @@ unsafe fn fault_success(
                     cleanup((*result_page).object, NonNull::new(top_page));
                     deallocate(object);
                 }
-                return SuccessStep::Break(error.as_kern_return());
+                return SuccessStep::Break(Err(error));
             }
         };
 
@@ -1953,7 +1963,7 @@ unsafe fn fault_success(
         cleanup((*result_page).object, NonNull::new(top_page));
         deallocate(object);
     }
-    SuccessStep::Break(KERN_SUCCESS)
+    SuccessStep::Break(Ok(()))
 }
 
 /// `vm_fault()` of `vm/vm_fault.c`: handle a page fault, including the
@@ -1977,8 +1987,8 @@ pub(crate) unsafe fn fault(
     fault_type: VmProt,
     change_wiring: bool,
     resume: bool,
-    continuation: Option<unsafe fn(c_int)>,
-) -> c_int {
+    continuation: Option<unsafe fn(Result<(), Error>)>,
+) -> Result<(), Error> {
     let mut fault_type = fault_type;
     let mut map = unsafe { NonNull::new_unchecked(map) };
 
@@ -2012,7 +2022,7 @@ pub(crate) unsafe fn fault(
         }
     }
 
-    let kr = unsafe {
+    let result = unsafe {
         fault_run(
             &mut map,
             &mut fault_type,
@@ -2029,9 +2039,9 @@ pub(crate) unsafe fn fault(
         let state = unsafe { fault_state() };
         // SAFETY: the state is the dead allocation.
         unsafe { cache_free(NonNull::new_unchecked(state)) };
-        unsafe { continuation(kr) };
+        unsafe { continuation(result) };
     }
-    kr
+    result
 }
 
 /// `vm_fault_unwire()` of `vm/vm_fault.c`.
@@ -2062,7 +2072,8 @@ pub(crate) unsafe fn unwire(map: &VmMap, entry: NonNull<VmMapEntry>) {
         if object.is_null() {
             unsafe {
                 map.lock.set_recursive();
-                fault(map_ptr, va, VmProt::NONE, true, false, None);
+                // The C ignored the unwiring fault's result.
+                let _ = fault(map_ptr, va, VmProt::NONE, true, false, None);
                 map.lock.clear_recursive();
             }
         } else {
@@ -2086,11 +2097,11 @@ pub(crate) unsafe fn unwire(map: &VmMap, entry: NonNull<VmMapEntry>) {
                         None,
                     )
                 };
-                if fault.result != VM_FAULT_RETRY {
+                if fault.result != Err(FaultError::Retry) {
                     break fault;
                 }
             };
-            if fault.result != VM_FAULT_SUCCESS {
+            if fault.result.is_err() {
                 kpanic!("vm_fault_unwire", "vm_fault_unwire: failure");
             }
 
@@ -2122,7 +2133,7 @@ unsafe fn copy_source(
     src_object: *mut VmObject,
     src_offset: VmOffset,
     interruptible: bool,
-) -> Result<(*mut VmPage, *mut VmPage), c_int> {
+) -> Result<(*mut VmPage, *mut VmPage), Error> {
     let (page, top) = loop {
         // SAFETY: each attempt takes the source object's lock and paging
         // reference, which `fault_page()` consumes.
@@ -2141,18 +2152,18 @@ unsafe fn copy_source(
             )
         };
         match fault.result {
-            VM_FAULT_SUCCESS => break (fault.result_page, fault.top_page),
-            VM_FAULT_RETRY => (),
-            VM_FAULT_INTERRUPTED => return Err(MACH_SEND_INTERRUPTED),
-            VM_FAULT_MEMORY_SHORTAGE => {
+            Ok(()) => break (fault.result_page, fault.top_page),
+            Err(FaultError::Retry) => (),
+            Err(FaultError::Interrupted) => return Err(Error::Interrupted),
+            Err(FaultError::MemoryShortage) => {
                 // SAFETY: the page wait takes no continuation.
                 unsafe { vm_page::wait(None) };
             }
-            VM_FAULT_FICTITIOUS_SHORTAGE => {
+            Err(FaultError::FictitiousShortage) => {
                 // SAFETY: the slab package is up in this path.
                 unsafe { vm_resident::more_fictitious() };
             }
-            _ => return Err(KERN_MEMORY_ERROR),
+            Err(FaultError::MemoryError) => return Err(Error::MemoryError),
         }
     };
     // SAFETY: the fault left the result page's object locked.
@@ -2175,7 +2186,7 @@ unsafe fn copy_dest(
     src_top_page: *mut VmPage,
     src_size: &mut VmSize,
     amount_done: VmSize,
-) -> Result<(*mut VmPage, *mut VmPage), c_int> {
+) -> Result<(*mut VmPage, *mut VmPage), Error> {
     let (page, top) = loop {
         // SAFETY: each attempt takes the destination object's lock and
         // paging reference, which `fault_page()` consumes.
@@ -2194,30 +2205,30 @@ unsafe fn copy_dest(
             )
         };
         match fault.result {
-            VM_FAULT_SUCCESS => break (fault.result_page, fault.top_page),
-            VM_FAULT_RETRY => (),
-            VM_FAULT_INTERRUPTED => {
+            Ok(()) => break (fault.result_page, fault.top_page),
+            Err(FaultError::Retry) => (),
+            Err(FaultError::Interrupted) => {
                 if !src_page.is_null() {
                     // SAFETY: the source fault left the page and its
                     // top page for this call to release.
                     unsafe { copy_cleanup(src_page, src_top_page) };
                 }
                 *src_size = amount_done;
-                return Err(MACH_SEND_INTERRUPTED);
+                return Err(Error::Interrupted);
             }
-            VM_FAULT_MEMORY_SHORTAGE => {
+            Err(FaultError::MemoryShortage) => {
                 // SAFETY: the page wait takes no continuation.
                 unsafe { vm_page::wait(None) };
             }
-            VM_FAULT_FICTITIOUS_SHORTAGE => {
+            Err(FaultError::FictitiousShortage) => {
                 // SAFETY: the slab package is up in this path.
                 unsafe { vm_resident::more_fictitious() };
             }
-            _ => {
+            Err(FaultError::MemoryError) => {
                 if !src_page.is_null() {
                     unsafe { copy_cleanup(src_page, src_top_page) };
                 }
-                return Err(KERN_MEMORY_ERROR);
+                return Err(Error::MemoryError);
             }
         }
     };
@@ -2246,7 +2257,7 @@ pub(crate) unsafe fn copy(
     dst_map: NonNull<VmMap>,
     dst_version: &VmMapVersion,
     interruptible: bool,
-) -> c_int {
+) -> Result<(), Error> {
     let mut amount_done: VmSize = 0;
 
     loop {
@@ -2259,11 +2270,11 @@ pub(crate) unsafe fn copy(
                     copy_source(src_object.as_ptr(), src_offset, interruptible)
                 } {
                     Ok(pages) => pages,
-                    Err(code) => {
-                        if code == MACH_SEND_INTERRUPTED {
+                    Err(error) => {
+                        if error == Error::Interrupted {
                             *src_size = amount_done;
                         }
-                        return code;
+                        return Err(error);
                     }
                 }
             }
@@ -2271,7 +2282,7 @@ pub(crate) unsafe fn copy(
 
         // SAFETY: the destination object is live and the source pages
         // are the source fault's.
-        let (dst_page, dst_top_page) = match unsafe {
+        let (dst_page, dst_top_page) = unsafe {
             copy_dest(
                 dst_object,
                 dst_offset,
@@ -2280,10 +2291,7 @@ pub(crate) unsafe fn copy(
                 src_size,
                 amount_done,
             )
-        } {
-            Ok(pages) => pages,
-            Err(code) => return code,
-        };
+        }?;
 
         // SAFETY: the destination object is live and was left locked.
         let old_copy_object = unsafe { (*(*dst_page).object).copy };
@@ -2356,7 +2364,7 @@ pub(crate) unsafe fn copy(
     }
 
     *src_size = amount_done;
-    KERN_SUCCESS
+    Ok(())
 }
 
 /// `vm_fault_copy_cleanup()` of `vm/vm_fault.c`: release the busy page a

@@ -10,9 +10,10 @@
 
 use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
-use crate::arch::x86_64::user_access;
+use crate::arch::x86_64::user_access::{self, UserFault};
 use crate::config::MAX_NCPUS;
 use crate::ipc::copy_user;
+use crate::ipc::error::{Error, ReceiveError, SendError, Shortage};
 use crate::ipc::ipc_entry;
 use crate::ipc::ipc_marequest;
 use crate::ipc::ipc_notify;
@@ -29,12 +30,11 @@ use crate::kern::debug::soft_debugger;
 use crate::kern::slab;
 use crate::kern::task;
 use crate::kern::thread::IpcKmsgQueue;
-use crate::kern::types::KernError;
+use crate::vm::error::Error as VmError;
 use crate::vm::vm_map::{VmMap, VmMapCopy};
 use crate::vm::vm_user;
 use core::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
 use core::mem::{size_of, size_of_val};
-use core::ops::{BitOr, BitOrAssign};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::sync::atomic::Ordering;
 
@@ -117,8 +117,6 @@ const IKOT_PAGING_REQUEST: c_uint = 9;
 const IKOT_DEVICE: c_uint = 10;
 /// `IKOT_USER_DEVICE` of <`kern/ipc_kobject.h`>.
 const IKOT_USER_DEVICE: c_uint = 28;
-/// `KERN_FAILURE` of <`mach/kern_return.h`>.
-const KERN_FAILURE: c_int = 5;
 /// `IO_DEAD` of <`ipc/ipc_object.h>`: the one non-null pointer `IO_VALID()`
 /// rejects.
 const IO_DEAD: *mut c_void = usize::MAX as *mut c_void;
@@ -214,107 +212,6 @@ const fn kobject_vm_page_list(ikot: c_uint) -> bool {
 /// `ipc_kobject_vm_page_steal()` of <`kern/ipc_kobject.h`>.
 const fn kobject_vm_page_steal(ikot: c_uint) -> bool {
     ikot == IKOT_PAGING_REQUEST
-}
-
-/// `mach_msg_return_t` of <mach/message.h>: a result code, or a set of
-/// special bits the copyout functions accumulate.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MsgReturn(c_int);
-
-impl MsgReturn {
-    /// `MACH_MSG_SUCCESS`.
-    pub(crate) const SUCCESS: Self = Self(0);
-    /// `MACH_SEND_IN_PROGRESS`.
-    pub(crate) const SEND_IN_PROGRESS: Self = Self(0x1000_0001);
-    /// `MACH_SEND_INVALID_DATA`.
-    pub(crate) const SEND_INVALID_DATA: Self = Self(0x1000_0002);
-    /// `MACH_SEND_INVALID_DEST`.
-    pub(crate) const SEND_INVALID_DEST: Self = Self(0x1000_0003);
-    /// `MACH_SEND_TIMED_OUT`.
-    pub(crate) const SEND_TIMED_OUT: Self = Self(0x1000_0004);
-    /// `MACH_SEND_WILL_NOTIFY`.
-    pub(crate) const SEND_WILL_NOTIFY: Self = Self(0x1000_0005);
-    /// `MACH_SEND_NOTIFY_IN_PROGRESS`.
-    pub(crate) const SEND_NOTIFY_IN_PROGRESS: Self = Self(0x1000_0006);
-    /// `MACH_SEND_INTERRUPTED`.
-    pub(crate) const SEND_INTERRUPTED: Self = Self(0x1000_0007);
-    /// `MACH_SEND_MSG_TOO_SMALL`.
-    pub(crate) const SEND_MSG_TOO_SMALL: Self = Self(0x1000_0008);
-    /// `MACH_SEND_INVALID_REPLY`.
-    pub(crate) const SEND_INVALID_REPLY: Self = Self(0x1000_0009);
-    /// `MACH_SEND_INVALID_RIGHT`.
-    pub(crate) const SEND_INVALID_RIGHT: Self = Self(0x1000_000a);
-    /// `MACH_SEND_INVALID_NOTIFY`.
-    pub(crate) const SEND_INVALID_NOTIFY: Self = Self(0x1000_000b);
-    /// `MACH_SEND_INVALID_MEMORY`.
-    pub(crate) const SEND_INVALID_MEMORY: Self = Self(0x1000_000c);
-    /// `MACH_SEND_NO_BUFFER`.
-    pub(crate) const SEND_NO_BUFFER: Self = Self(0x1000_000d);
-    /// `MACH_SEND_NO_NOTIFY`.
-    pub(crate) const SEND_NO_NOTIFY: Self = Self(0x1000_000e);
-    /// `MACH_SEND_INVALID_TYPE`.
-    pub(crate) const SEND_INVALID_TYPE: Self = Self(0x1000_000f);
-    /// `MACH_SEND_INVALID_HEADER`.
-    pub(crate) const SEND_INVALID_HEADER: Self = Self(0x1000_0010);
-    /// `MACH_RCV_IN_PROGRESS`.
-    pub(crate) const RCV_IN_PROGRESS: Self = Self(0x1000_4001);
-    /// `MACH_RCV_INVALID_NAME`.
-    pub(crate) const RCV_INVALID_NAME: Self = Self(0x1000_4002);
-    /// `MACH_RCV_TIMED_OUT`.
-    pub(crate) const RCV_TIMED_OUT: Self = Self(0x1000_4003);
-    /// `MACH_RCV_TOO_LARGE`.
-    pub(crate) const RCV_TOO_LARGE: Self = Self(0x1000_4004);
-    /// `MACH_RCV_INTERRUPTED`.
-    pub(crate) const RCV_INTERRUPTED: Self = Self(0x1000_4005);
-    /// `MACH_RCV_PORT_CHANGED`.
-    pub(crate) const RCV_PORT_CHANGED: Self = Self(0x1000_4006);
-    /// `MACH_RCV_INVALID_NOTIFY`.
-    pub(crate) const RCV_INVALID_NOTIFY: Self = Self(0x1000_4007);
-    /// `MACH_RCV_INVALID_DATA`.
-    pub(crate) const RCV_INVALID_DATA: Self = Self(0x1000_4008);
-    /// `MACH_RCV_PORT_DIED`.
-    pub(crate) const RCV_PORT_DIED: Self = Self(0x1000_4009);
-    /// `MACH_RCV_IN_SET`.
-    pub(crate) const RCV_IN_SET: Self = Self(0x1000_400a);
-    /// `MACH_RCV_HEADER_ERROR`.
-    pub(crate) const RCV_HEADER_ERROR: Self = Self(0x1000_400b);
-    /// `MACH_RCV_BODY_ERROR`.
-    pub(crate) const RCV_BODY_ERROR: Self = Self(0x1000_400c);
-    /// `MACH_MSG_IPC_SPACE`: no room in the space for the right.
-    pub(crate) const MSG_IPC_SPACE: Self = Self(0x0000_2000);
-    /// `MACH_MSG_VM_SPACE`: no room in the map for the memory.
-    pub(crate) const MSG_VM_SPACE: Self = Self(0x0000_1000);
-    /// `MACH_MSG_IPC_KERNEL`: a kernel resource shortage handling the
-    /// right.
-    pub(crate) const MSG_IPC_KERNEL: Self = Self(0x0000_0800);
-    /// `MACH_MSG_VM_KERNEL`: a kernel resource shortage handling the
-    /// memory.
-    pub(crate) const MSG_VM_KERNEL: Self = Self(0x0000_0400);
-
-    /// The `mach_msg_return_t` a C caller sees.
-    pub(crate) const fn raw(self) -> c_int {
-        self.0
-    }
-
-    /// The code a C `mach_msg_return_t` stands for.
-    pub(crate) const fn from_raw(code: c_int) -> Self {
-        Self(code)
-    }
-}
-
-impl BitOr for MsgReturn {
-    type Output = Self;
-
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-
-impl BitOrAssign for MsgReturn {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0 |= other.0;
-    }
 }
 
 /// `sizeof(mach_msg_type_t)` of <mach/message.h>.
@@ -1277,20 +1174,19 @@ pub(crate) unsafe fn cache_free_try(kmsg: Kmsg) -> bool {
 pub(crate) unsafe fn get(
     user: *const c_void,
     size: c_uint,
-) -> Result<Kmsg, MsgReturn> {
+) -> Result<Kmsg, SendError> {
     let ksize = size.wrapping_mul(IKM_EXPAND_FACTOR);
 
     if as_index(size) < MACH_MSG_HEADER_SIZE
         || user_is_misaligned(as_index(size))
     {
-        return Err(MsgReturn::SEND_MSG_TOO_SMALL);
+        return Err(SendError::MsgTooSmall);
     }
 
     let kmsg = if as_index(ksize) <= IKM_SAVED_MSG_SIZE {
-        cache_alloc().ok_or(MsgReturn::SEND_NO_BUFFER)?
+        cache_alloc().ok_or(SendError::NoBuffer)?
     } else {
-        let kmsg =
-            ikm_alloc(as_index(ksize)).ok_or(MsgReturn::SEND_NO_BUFFER)?;
+        let kmsg = ikm_alloc(as_index(ksize)).ok_or(SendError::NoBuffer)?;
         // SAFETY: the message is fresh and owned by this call.
         unsafe { ikm_init(kmsg, as_index(ksize)) };
         kmsg
@@ -1303,7 +1199,7 @@ pub(crate) unsafe fn get(
     if failed {
         // SAFETY: this call owns the fresh message.
         unsafe { ikm_free(kmsg) };
-        return Err(MsgReturn::SEND_INVALID_DATA);
+        return Err(SendError::InvalidData);
     }
 
     Ok(kmsg)
@@ -1318,8 +1214,8 @@ pub(crate) unsafe fn get(
 pub(crate) unsafe fn get_from_kernel(
     msg: *const c_void,
     size: c_uint,
-) -> Result<Kmsg, MsgReturn> {
-    let kmsg = ikm_alloc(as_index(size)).ok_or(MsgReturn::SEND_NO_BUFFER)?;
+) -> Result<Kmsg, SendError> {
+    let kmsg = ikm_alloc(as_index(size)).ok_or(SendError::NoBuffer)?;
     // SAFETY: the message is fresh and owned by this call.
     unsafe { ikm_init(kmsg, as_index(size)) };
 
@@ -1347,41 +1243,15 @@ pub(crate) unsafe fn put(
     user: *mut c_void,
     kmsg: Kmsg,
     size: c_uint,
-) -> MsgReturn {
-    let mr = if unsafe {
+) -> Result<(), ReceiveError> {
+    let copied = unsafe {
         user_access::copyout(kmsg.header().cast(), user, as_index(size))
-    } != 0
-    {
-        MsgReturn::RCV_INVALID_DATA
-    } else {
-        MsgReturn::SUCCESS
-    };
+    }
+    .map_err(|_| ReceiveError::InvalidData);
 
     unsafe { cache_free(kmsg) };
 
-    mr
-}
-
-/// `ipc_kmsg_put_to_kernel()` in C.
-///
-/// # Safety
-///
-/// `msg` must name a writable kernel message of `size` bytes, and `kmsg` a
-/// live message whose clean header this call owns.
-pub(crate) unsafe fn put_to_kernel(
-    msg: *mut c_void,
-    kmsg: Kmsg,
-    size: c_uint,
-) {
-    unsafe {
-        ptr::copy_nonoverlapping(
-            kmsg.header().cast::<c_void>(),
-            msg,
-            as_index(size),
-        );
-    };
-
-    unsafe { ikm_free(kmsg) };
+    copied
 }
 
 /// `MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0)`: an asynchronous send.
@@ -1403,7 +1273,7 @@ pub(crate) unsafe fn copyin_header(
     header: *mut MachMsgHeader,
     space: IpcSpace,
     notify: c_uint,
-) -> Result<(), MsgReturn> {
+) -> Result<(), SendError> {
     let mbits = unsafe { (*header).bits() } & !MACH_MSGH_BITS_CIRCULAR;
     // The C truncates the pointer-wide union fields into names; the 64-bit
     // user message already carries only the low half.
@@ -1788,9 +1658,9 @@ unsafe fn copyin_header_notify(
     reply_name: c_uint,
     dest_type: u32,
     reply_type: u32,
-) -> Result<*mut c_void, MsgReturn> {
+) -> Result<*mut c_void, SendError> {
     if !mach_msg_type_port_any_send(dest_type) {
-        return Err(MsgReturn::SEND_INVALID_HEADER);
+        return Err(SendError::InvalidHeader);
     }
 
     if if reply_type == 0 {
@@ -1798,7 +1668,7 @@ unsafe fn copyin_header_notify(
     } else {
         !mach_msg_type_port_any_send(reply_type)
     } {
-        return Err(MsgReturn::SEND_INVALID_HEADER);
+        return Err(SendError::InvalidHeader);
     }
 
     // SAFETY: the space is live and nothing is locked.
@@ -1807,7 +1677,7 @@ unsafe fn copyin_header_notify(
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_DEST);
+        return Err(SendError::InvalidDest);
     }
 
     let mut notify_port: *mut c_void = ptr::null_mut();
@@ -1827,13 +1697,13 @@ unsafe fn copyin_header_notify(
             Some(_) => {
                 // SAFETY: the space lock is held.
                 unsafe { space.lock_done() };
-                return Err(MsgReturn::SEND_INVALID_NOTIFY);
+                return Err(SendError::InvalidNotify);
             }
             None => {
                 unsafe { entry_lookup_failed(header, notify) };
                 // SAFETY: the space lock is held.
                 unsafe { space.lock_done() };
-                return Err(MsgReturn::SEND_INVALID_NOTIFY);
+                return Err(SendError::InvalidNotify);
             }
         }
     }
@@ -1856,7 +1726,7 @@ unsafe fn copyin_header_same_name(
     name: c_uint,
     dest_type: u32,
     reply_type: u32,
-) -> Result<HeaderRights, MsgReturn> {
+) -> Result<HeaderRights, SendError> {
     let mut rights = HeaderRights::none();
 
     // SAFETY: the space is live, active, and write-locked.
@@ -1864,14 +1734,14 @@ unsafe fn copyin_header_same_name(
         unsafe { entry_lookup_failed(header, name) };
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_DEST);
+        return Err(SendError::InvalidDest);
     };
 
     // SAFETY: the entry is live.
     if !unsafe { ipc_right::copyin_check(entry, reply_type) } {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_REPLY);
+        return Err(SendError::InvalidReply);
     }
 
     if dest_type == MACH_MSG_TYPE_PORT_SEND_ONCE
@@ -1879,7 +1749,7 @@ unsafe fn copyin_header_same_name(
     {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_DEST);
+        return Err(SendError::InvalidDest);
     } else if dest_type == MACH_MSG_TYPE_MAKE_SEND
         || dest_type == MACH_MSG_TYPE_MAKE_SEND_ONCE
         || reply_type == MACH_MSG_TYPE_MAKE_SEND
@@ -1891,7 +1761,7 @@ unsafe fn copyin_header_same_name(
         }) else {
             // SAFETY: the space lock is held.
             unsafe { space.lock_done() };
-            return Err(MsgReturn::SEND_INVALID_DEST);
+            return Err(SendError::InvalidDest);
         };
         rights.dest_port = object;
         rights.dest_soright = soright;
@@ -1914,7 +1784,7 @@ unsafe fn copyin_header_same_name(
         }) else {
             // SAFETY: the space lock is held.
             unsafe { space.lock_done() };
-            return Err(MsgReturn::SEND_INVALID_DEST);
+            return Err(SendError::InvalidDest);
         };
         rights.dest_port = object;
         rights.dest_soright = soright;
@@ -1931,7 +1801,7 @@ unsafe fn copyin_header_same_name(
         else {
             // SAFETY: the space lock is held.
             unsafe { space.lock_done() };
-            return Err(MsgReturn::SEND_INVALID_DEST);
+            return Err(SendError::InvalidDest);
         };
         rights.dest_port = object;
         rights.dest_soright = soright;
@@ -1968,7 +1838,7 @@ unsafe fn copyin_header_same_mixed(
     name: c_uint,
     entry: *mut IpcEntry,
     dest_type: u32,
-) -> Result<HeaderRights, MsgReturn> {
+) -> Result<HeaderRights, SendError> {
     let mut rights = HeaderRights::none();
 
     // SAFETY: the space is write-locked and the entry is live.
@@ -1977,7 +1847,7 @@ unsafe fn copyin_header_same_mixed(
     }) else {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_DEST);
+        return Err(SendError::InvalidDest);
     };
     rights.dest_port = object;
 
@@ -2016,7 +1886,7 @@ unsafe fn copyin_header_bad_reply(
     dest_name: c_uint,
     reply_name: c_uint,
     dest_type: u32,
-) -> Result<HeaderRights, MsgReturn> {
+) -> Result<HeaderRights, SendError> {
     let mut rights = HeaderRights::none();
 
     // SAFETY: the space is live, active, and write-locked.
@@ -2024,7 +1894,7 @@ unsafe fn copyin_header_bad_reply(
         unsafe { entry_lookup_failed(header, dest_name) };
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_DEST);
+        return Err(SendError::InvalidDest);
     };
 
     // SAFETY: the space is write-locked and the entry is live.
@@ -2033,7 +1903,7 @@ unsafe fn copyin_header_bad_reply(
     }) else {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_DEST);
+        return Err(SendError::InvalidDest);
     };
     rights.dest_port = object;
     rights.dest_soright = soright;
@@ -2067,7 +1937,7 @@ unsafe fn copyin_header_distinct(
     reply_name: c_uint,
     dest_type: u32,
     reply_type: u32,
-) -> Result<HeaderRights, MsgReturn> {
+) -> Result<HeaderRights, SendError> {
     let mut rights = HeaderRights::none();
 
     // SAFETY: the space is live, active, and write-locked.
@@ -2075,7 +1945,7 @@ unsafe fn copyin_header_distinct(
         unsafe { entry_lookup_failed(header, dest_name) };
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_DEST);
+        return Err(SendError::InvalidDest);
     };
 
     // SAFETY: the space is live, active, and write-locked.
@@ -2083,14 +1953,14 @@ unsafe fn copyin_header_distinct(
         unsafe { entry_lookup_failed(header, reply_name) };
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_REPLY);
+        return Err(SendError::InvalidReply);
     };
 
     // SAFETY: the entry is live.
     if !unsafe { ipc_right::copyin_check(reply_entry, reply_type) } {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_REPLY);
+        return Err(SendError::InvalidReply);
     }
 
     // SAFETY: the space is write-locked and the entry is live.
@@ -2099,7 +1969,7 @@ unsafe fn copyin_header_distinct(
     }) else {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::SEND_INVALID_DEST);
+        return Err(SendError::InvalidDest);
     };
     rights.dest_port = object;
     rights.dest_soright = soright;
@@ -2171,7 +2041,7 @@ unsafe fn copyin_header_distinct(
                 }
                 ipc_object::release(saved_reply);
             }
-            return Err(MsgReturn::SEND_INVALID_DEST);
+            return Err(SendError::InvalidDest);
         }
     }
 
@@ -2201,20 +2071,17 @@ const _: () = assert!(!kernel_is_misaligned(size_of::<MachMsgHeader>()));
 /// # Safety
 ///
 /// `src` must name a readable user name and `dst` a writable kernel port.
-unsafe fn copyin_port(src: usize, dst: usize) -> c_int {
+unsafe fn copyin_port(src: usize, dst: usize) -> Result<(), UserFault> {
     let mut name: u32 = 0;
-    if unsafe {
+    unsafe {
         user_access::copyin(
             ptr_at(src),
             ptr::from_mut(&mut name).cast::<c_void>(),
             size_of::<u32>(),
         )
-    } != 0
-    {
-        return 1;
-    }
+    }?;
     unsafe { ptr_at::<usize>(dst).write_unaligned(as_index(name)) };
-    0
+    Ok(())
 }
 
 /// `copyout_port()` of <`ipc/copy_user.h>`: copy one kernel port into a user
@@ -2223,7 +2090,7 @@ unsafe fn copyin_port(src: usize, dst: usize) -> c_int {
 /// # Safety
 ///
 /// `src` must name a readable kernel port and `dst` a writable user name.
-unsafe fn copyout_port(src: usize, dst: usize) -> c_int {
+unsafe fn copyout_port(src: usize, dst: usize) -> Result<(), UserFault> {
     let name = unsafe { ptr_at::<usize>(src).read_unaligned() };
     // The C truncates the pointer-wide kernel port into the user name.
     let name = name as u32;
@@ -2252,7 +2119,7 @@ unsafe fn copyin_body_payload(
     type_: MsgType,
     use_page_lists: bool,
     steal_pages: bool,
-) -> Result<*mut c_void, MsgReturn> {
+) -> Result<*mut c_void, SendError> {
     let length = type_.data_length_wide();
     let is_port = mach_msg_type_port_any(type_.name);
     let deallocate = type_.deallocate;
@@ -2274,7 +2141,7 @@ unsafe fn copyin_body_payload(
         } else {
             let Some(buf) = slab::kalloc(kernel_length) else {
                 unsafe { clean_partial(kmsg, taddr, false, 0) };
-                return Err(MsgReturn::SEND_INVALID_MEMORY);
+                return Err(SendError::InvalidMemory);
             };
             data = buf.as_ptr().cast::<c_void>();
 
@@ -2289,7 +2156,8 @@ unsafe fn copyin_body_payload(
                             addr + offset * size_of::<c_uint>(),
                             data.addr() + offset * size_of::<usize>(),
                         )
-                    } != 0
+                    }
+                    .is_err()
                     {
                         copy_failed = true;
                         break;
@@ -2303,7 +2171,8 @@ unsafe fn copyin_body_payload(
                     data.cast::<c_char>(),
                     kernel_length as c_int,
                 )
-            } != 0
+            }
+            .is_err()
             {
                 copy_failed = true;
             }
@@ -2319,7 +2188,7 @@ unsafe fn copyin_body_payload(
                 // SAFETY: the fresh buffer is owned by this call.
                 unsafe { kfree_addr(data.addr(), kernel_length) };
                 unsafe { clean_partial(kmsg, taddr, false, 0) };
-                return Err(MsgReturn::SEND_INVALID_MEMORY);
+                return Err(SendError::InvalidMemory);
             }
         }
     } else if length == 0 {
@@ -2341,7 +2210,7 @@ unsafe fn copyin_body_payload(
             data = copy;
         } else {
             unsafe { clean_partial(kmsg, taddr, false, 0) };
-            return Err(MsgReturn::SEND_INVALID_MEMORY);
+            return Err(SendError::InvalidMemory);
         }
     }
 
@@ -2363,7 +2232,7 @@ unsafe fn copyin_body_ports(
     type_: MsgType,
     taddr: usize,
     dest: *mut c_void,
-) -> Result<(), MsgReturn> {
+) -> Result<(), SendError> {
     let newname = ipc_object::copyin_type(type_.name);
     // SAFETY: the descriptor is writable.
     unsafe { write_type_name(taddr, type_.longform, newname) };
@@ -2405,7 +2274,7 @@ unsafe fn copyin_body_ports(
             // SAFETY: the failing right index bounds the rights copied in
             // so far.
             unsafe { clean_partial(kmsg, taddr, true, i) };
-            return Err(MsgReturn::SEND_INVALID_RIGHT);
+            return Err(SendError::InvalidRight);
         }
     }
 
@@ -2423,7 +2292,7 @@ unsafe fn copyin_body(
     kmsg: Kmsg,
     space: IpcSpace,
     map: &mut VmMap,
-) -> Result<(), MsgReturn> {
+) -> Result<(), SendError> {
     let header = unsafe { kmsg.header() };
     let dest = ptr_at::<c_void>(unsafe { (*header).remote() });
     let dest_port = unsafe { IpcPort::from_raw(dest) };
@@ -2440,14 +2309,14 @@ unsafe fn copyin_body(
 
         if remaining < MSG_TYPE_SIZE {
             unsafe { clean_partial(kmsg, taddr, false, 0) };
-            return Err(MsgReturn::SEND_MSG_TOO_SMALL);
+            return Err(SendError::MsgTooSmall);
         }
 
         // SAFETY: the descriptor's first word is readable.
         let word = unsafe { ptr_at::<u32>(taddr).read_unaligned() };
         if word & MSGT_LONGFORM != 0 && remaining < MSG_TYPE_LONG_SIZE {
             unsafe { clean_partial(kmsg, taddr, false, 0) };
-            return Err(MsgReturn::SEND_MSG_TOO_SMALL);
+            return Err(SendError::MsgTooSmall);
         }
 
         // SAFETY: the descriptor is readable in full.
@@ -2463,7 +2332,7 @@ unsafe fn copyin_body(
             || (deallocate && type_.is_inline)
         {
             unsafe { clean_partial(kmsg, taddr, false, 0) };
-            return Err(MsgReturn::SEND_INVALID_TYPE);
+            return Err(SendError::InvalidType);
         }
 
         let length = type_.data_length_wide();
@@ -2477,7 +2346,7 @@ unsafe fn copyin_body(
         if type_.is_inline {
             if eaddr.wrapping_sub(saddr) < length {
                 unsafe { clean_partial(kmsg, taddr, false, 0) };
-                return Err(MsgReturn::SEND_MSG_TOO_SMALL);
+                return Err(SendError::MsgTooSmall);
             }
 
             data = ptr_at(saddr);
@@ -2485,7 +2354,7 @@ unsafe fn copyin_body(
         } else {
             if eaddr.wrapping_sub(saddr) < size_of::<usize>() {
                 unsafe { clean_partial(kmsg, taddr, false, 0) };
-                return Err(MsgReturn::SEND_MSG_TOO_SMALL);
+                return Err(SendError::MsgTooSmall);
             }
 
             // SAFETY: the descriptor's out-of-line pointer is readable.
@@ -2543,7 +2412,7 @@ pub(crate) unsafe fn copyin(
     space: IpcSpace,
     map: &mut VmMap,
     notify: c_uint,
-) -> Result<(), MsgReturn> {
+) -> Result<(), SendError> {
     let header = unsafe { kmsg.header() };
 
     unsafe { copyin_header(header, space, notify) }?;
@@ -2658,9 +2527,6 @@ pub(crate) unsafe fn copyin_from_kernel(kmsg: Kmsg) {
     }
 }
 
-/// `KERN_RESOURCE_SHORTAGE` of <`mach/kern_return.h`>.
-const KERN_RESOURCE_SHORTAGE: c_int = 6;
-
 /// The `optimized ipc_object_copyout_dest` of `ipc_kmsg_copyout_header()`:
 /// consume the destination send right and return its name and the port's
 /// protected payload.
@@ -2710,7 +2576,7 @@ pub(crate) unsafe fn copyout_header(
     header: *mut MachMsgHeader,
     space: IpcSpace,
     notify: c_uint,
-) -> Result<(), MsgReturn> {
+) -> Result<(), ReceiveError> {
     let mbits = unsafe { (*header).bits() };
     let dest = ptr_at::<c_void>(unsafe { (*header).remote() });
 
@@ -3062,13 +2928,13 @@ unsafe fn copyout_header_loop(
     reply_type: u32,
     notify: c_uint,
     mut state: CopyoutHeaderState,
-) -> Result<CopyoutHeaderState, MsgReturn> {
+) -> Result<CopyoutHeaderState, ReceiveError> {
     loop {
         // SAFETY: the space lock is held.
         if !unsafe { space.is_active() } {
             // SAFETY: the space lock is held.
             unsafe { space.lock_done() };
-            return Err(MsgReturn::RCV_HEADER_ERROR | MsgReturn::MSG_IPC_SPACE);
+            return Err(ReceiveError::Header(Shortage::IPC_SPACE));
         }
 
         state.notify_port = if notify == MACH_PORT_NAME_NULL {
@@ -3083,7 +2949,7 @@ unsafe fn copyout_header_loop(
             } else {
                 // SAFETY: the space lock is held.
                 unsafe { space.lock_done() };
-                return Err(MsgReturn::RCV_INVALID_NOTIFY);
+                return Err(ReceiveError::InvalidNotify);
             }
         };
 
@@ -3148,7 +3014,7 @@ unsafe fn copyout_header_entry(
     space: IpcSpace,
     reply_port: IpcPort,
     state: &mut CopyoutHeaderState,
-) -> Result<bool, MsgReturn> {
+) -> Result<bool, ReceiveError> {
     // SAFETY: the space is live, active, and write-locked.
     let (name, allocated) = match unsafe { ipc_entry::alloc(space) } {
         Ok(found) => found,
@@ -3161,10 +3027,10 @@ unsafe fn copyout_header_entry(
                 }
                 space.lock_done();
             }
-            return Err(if error == KernError::ResourceShortage {
-                MsgReturn::RCV_HEADER_ERROR | MsgReturn::MSG_IPC_KERNEL
+            return Err(if error == Error::ResourceShortage {
+                ReceiveError::Header(Shortage::IPC_KERNEL)
             } else {
-                MsgReturn::RCV_HEADER_ERROR | MsgReturn::MSG_IPC_SPACE
+                ReceiveError::Header(Shortage::IPC_SPACE)
             });
         }
     };
@@ -3215,7 +3081,7 @@ unsafe fn copyout_header_entry(
 
     // SAFETY: the reply port is live and locked; the call unlocks it.
     if unsafe { ipc_port::dngrow(reply_port) }.is_err() {
-        return Err(MsgReturn::RCV_HEADER_ERROR | MsgReturn::MSG_IPC_KERNEL);
+        return Err(ReceiveError::Header(Shortage::IPC_KERNEL));
     }
 
     // SAFETY: the space is live and nothing else is locked.
@@ -3277,14 +3143,14 @@ unsafe fn copyout_header_bad_reply(
     notify: c_uint,
     reply: *mut c_void,
     dest_port: IpcPort,
-) -> Result<c_uint, MsgReturn> {
+) -> Result<c_uint, ReceiveError> {
     // SAFETY: the space is live and nothing is locked.
     unsafe { space.lock_read() };
     // SAFETY: the space lock is held.
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::RCV_HEADER_ERROR | MsgReturn::MSG_IPC_SPACE);
+        return Err(ReceiveError::Header(Shortage::IPC_SPACE));
     }
 
     if notify != MACH_PORT_NAME_NULL {
@@ -3301,7 +3167,7 @@ unsafe fn copyout_header_bad_reply(
             }
             // SAFETY: the space lock is held.
             unsafe { space.lock_done() };
-            return Err(MsgReturn::RCV_INVALID_NOTIFY);
+            return Err(ReceiveError::InvalidNotify);
         }
     }
 
@@ -3399,7 +3265,8 @@ unsafe fn copyout_header_finish(
 }
 
 /// `ipc_kmsg_copyout_object()` in C: copy out a port right, always returning
-/// a name, and consuming the supplied object.
+/// a name, and consuming the supplied object; a right the receiver had no
+/// room for comes back as the [`Shortage`] that destroyed it.
 ///
 /// # Safety
 ///
@@ -3409,10 +3276,10 @@ pub(crate) unsafe fn copyout_object(
     space: IpcSpace,
     object: *mut c_void,
     msgt_name: c_uint,
-) -> (MsgReturn, c_uint) {
+) -> (Shortage, c_uint) {
     if !io_valid(object) {
         // SAFETY: the object is null or dead, the only tags the C accepts.
-        return (MsgReturn::SUCCESS, unsafe {
+        return (Shortage::NONE, unsafe {
             ipc_port::invalid_port_to_name(object)
         });
     }
@@ -3459,7 +3326,7 @@ pub(crate) unsafe fn copyout_object(
         }
 
         if fast {
-            return (MsgReturn::SUCCESS, name);
+            return (Shortage::NONE, name);
         }
 
         // SAFETY: the space lock is held.
@@ -3467,17 +3334,17 @@ pub(crate) unsafe fn copyout_object(
     }
 
     match unsafe { ipc_object::copyout(space, object, msgt_name, true) } {
-        Ok(name) => (MsgReturn::SUCCESS, name),
+        Ok(name) => (Shortage::NONE, name),
         Err(error) => {
             // SAFETY: the failed copyout leaves the right to this call.
             unsafe { ipc_object::destroy_object(object, msgt_name) };
 
-            if error == KernError::InvalidCapability {
-                (MsgReturn::SUCCESS, MACH_PORT_NAME_DEAD)
-            } else if error == KernError::ResourceShortage {
-                (MsgReturn::MSG_IPC_KERNEL, MACH_PORT_NAME_NULL)
+            if error == Error::InvalidCapability {
+                (Shortage::NONE, MACH_PORT_NAME_DEAD)
+            } else if error == Error::ResourceShortage {
+                (Shortage::IPC_KERNEL, MACH_PORT_NAME_NULL)
             } else {
-                (MsgReturn::MSG_IPC_SPACE, MACH_PORT_NAME_NULL)
+                (Shortage::IPC_SPACE, MACH_PORT_NAME_NULL)
             }
         }
     }
@@ -3486,8 +3353,8 @@ pub(crate) unsafe fn copyout_object(
 /// Allocate the user buffer for one out-of-line port array of
 /// [`copyout_body()`].
 ///
-/// On failure the body before `saddr` is cleaned and the kernel return the
-/// caller must report is returned.
+/// On failure the body before `saddr` is cleaned and the allocation's error
+/// is returned.
 ///
 /// # Safety
 ///
@@ -3499,7 +3366,7 @@ unsafe fn copyout_body_alloc(
     type_: MsgType,
     taddr: usize,
     saddr: usize,
-) -> Result<usize, c_int> {
+) -> Result<usize, VmError> {
     let mut addr: usize = 0;
     let length = type_.data_length_wide();
     if length != 0 {
@@ -3513,7 +3380,7 @@ unsafe fn copyout_body_alloc(
             vm_user::allocate(map, &mut addr, user_length, true)
         {
             unsafe { clean_body(taddr, saddr) };
-            return Err(error.as_kern_return());
+            return Err(error);
         }
     }
 
@@ -3538,7 +3405,7 @@ unsafe fn copyout_body_objects(
     space: IpcSpace,
     type_: MsgType,
     saddr: usize,
-) -> MsgReturn {
+) -> Shortage {
     let objects = if type_.is_inline {
         ptr_at::<*mut c_void>(saddr)
     } else {
@@ -3548,30 +3415,31 @@ unsafe fn copyout_body_objects(
         })
     };
 
-    let mut mr = MsgReturn::SUCCESS;
+    let mut lost = Shortage::NONE;
     for i in 0..type_.number {
         let index = as_index(i);
         // SAFETY: the array holds `number` readable objects.
         let object = unsafe { objects.add(index).read() };
-        let (object_mr, name) =
+        let (object_lost, name) =
             unsafe { copyout_object(space, object, type_.name) };
-        mr |= object_mr;
+        lost |= object_lost;
         // SAFETY: the slot is writable.
         unsafe { objects.add(index).write(ptr_at(as_index(name))) };
     }
-    mr
+    lost
 }
 
-/// The `MsgReturn` bits a failed [`copyout_body()`] descriptor reports.
-const fn copyout_body_failure_mr(failure_kr: c_int) -> MsgReturn {
-    if failure_kr == KERN_RESOURCE_SHORTAGE {
-        MsgReturn::MSG_VM_KERNEL
+/// The [`Shortage`] that destroyed the memory of a [`copyout_body()`]
+/// descriptor whose mapping failed with `error`.
+fn memory_shortage(error: VmError) -> Shortage {
+    if error == VmError::ResourceShortage {
+        Shortage::VM_KERNEL
     } else {
-        MsgReturn::MSG_VM_SPACE
+        Shortage::VM_SPACE
     }
 }
 
-/// `ipc_kmsg_copyout_body()` in C.
+/// `ipc_kmsg_copyout_body()` in C: returns what the copyout had to destroy.
 ///
 /// # Safety
 ///
@@ -3582,11 +3450,11 @@ pub(crate) unsafe fn copyout_body(
     kmsg: Kmsg,
     space: IpcSpace,
     map: &mut VmMap,
-) -> MsgReturn {
+) -> Shortage {
     let header = unsafe { kmsg.header() };
     let mut saddr = header.addr() + size_of::<MachMsgHeader>();
     let eaddr = header.addr() + as_index(unsafe { (*header).size() });
-    let mut mr = MsgReturn::SUCCESS;
+    let mut lost = Shortage::NONE;
 
     while saddr < eaddr {
         let taddr = saddr;
@@ -3600,21 +3468,17 @@ pub(crate) unsafe fn copyout_body(
         }
 
         let mut addr: usize = 0;
-        let mut failed = false;
-        let mut failure_kr: c_int = 0;
+        let mut failure = None;
 
         if is_port && !type_.is_inline {
             match unsafe { copyout_body_alloc(map, type_, taddr, saddr) } {
                 Ok(allocated) => addr = allocated,
-                Err(kr) => {
-                    failed = true;
-                    failure_kr = kr;
-                }
+                Err(error) => failure = Some(memory_shortage(error)),
             }
         }
 
-        if is_port && !failed {
-            mr |= unsafe { copyout_body_objects(space, type_, saddr) };
+        if is_port && failure.is_none() {
+            lost |= unsafe { copyout_body_objects(space, type_, saddr) };
         }
 
         if type_.is_inline {
@@ -3628,7 +3492,7 @@ pub(crate) unsafe fn copyout_body(
             if length == 0 {
                 addr = 0;
             } else if is_port {
-                if !failed {
+                if failure.is_none() {
                     if size_of::<c_uint>() == size_of::<usize>() {
                         let _ = unsafe {
                             crate::vm::vm_kern::copyoutmap(
@@ -3649,22 +3513,22 @@ pub(crate) unsafe fn copyout_body(
                                     data + offset * size_of::<usize>(),
                                     addr + offset * size_of::<c_uint>(),
                                 )
-                            } != 0
+                            }
+                            .is_err()
                             {
                                 copy_failed = true;
                                 break;
                             }
                         }
                         if copy_failed {
-                            failed = true;
-                            failure_kr = KERN_FAILURE;
+                            failure = Some(Shortage::VM_SPACE);
                         }
                     }
 
                     // SAFETY: the port data came from `kalloc()`.
                     unsafe { kfree_addr(data, length) };
                 }
-            } else if !failed {
+            } else if failure.is_none() {
                 if let Some(copy) = NonNull::new(ptr_at::<VmMapCopy>(data)) {
                     // SAFETY: the map is live and unlocked, and the copy
                     // came from the sender.
@@ -3674,21 +3538,19 @@ pub(crate) unsafe fn copyout_body(
                             // SAFETY: the failed copyout leaves the copy
                             // to this call.
                             unsafe { VmMapCopy::discard(copy) };
-                            failed = true;
-                            failure_kr = error.as_kern_return();
+                            failure = Some(memory_shortage(error));
                         }
                     }
                 } else {
-                    failed = true;
-                    failure_kr = KERN_FAILURE;
+                    failure = Some(Shortage::VM_SPACE);
                 }
             }
 
-            if failed {
+            if let Some(shortage) = failure {
                 addr = 0;
                 // SAFETY: the descriptor is writable.
                 unsafe { write_type_size(taddr, type_.longform, 0) };
-                mr |= copyout_body_failure_mr(failure_kr);
+                lost |= shortage;
             }
 
             // SAFETY: the descriptor is writable.
@@ -3701,7 +3563,7 @@ pub(crate) unsafe fn copyout_body(
         saddr = kernel_align(saddr);
     }
 
-    mr
+    lost
 }
 
 /// `ipc_kmsg_copyout()` in C.
@@ -3717,27 +3579,25 @@ pub(crate) unsafe fn copyout(
     space: IpcSpace,
     map: &mut VmMap,
     notify: c_uint,
-) -> MsgReturn {
+) -> Result<(), ReceiveError> {
     let header = unsafe { kmsg.header() };
     let mbits = unsafe { (*header).bits() };
 
-    if let Err(error) = unsafe { copyout_header(header, space, notify) } {
-        return error;
-    }
+    unsafe { copyout_header(header, space, notify) }?;
 
-    let mut mr = MsgReturn::SUCCESS;
     if mbits & MACH_MSGH_BITS_COMPLEX != 0 {
         // SAFETY: the header copied out, so the body belongs to this call.
-        mr = unsafe { copyout_body(kmsg, space, map) };
-        if mr != MsgReturn::SUCCESS {
-            mr |= MsgReturn::RCV_BODY_ERROR;
+        let lost = unsafe { copyout_body(kmsg, space, map) };
+        if !lost.is_none() {
+            return Err(ReceiveError::Body(lost));
         }
     }
 
-    mr
+    Ok(())
 }
 
-/// `ipc_kmsg_copyout_pseudo()` in C.
+/// `ipc_kmsg_copyout_pseudo()` in C: returns what the copyout had to
+/// destroy.
 ///
 /// # Safety
 ///
@@ -3748,7 +3608,7 @@ pub(crate) unsafe fn copyout_pseudo(
     kmsg: Kmsg,
     space: IpcSpace,
     map: &mut VmMap,
-) -> MsgReturn {
+) -> Shortage {
     let header = unsafe { kmsg.header() };
     let mbits = unsafe { (*header).bits() };
     let dest = ptr_at::<c_void>(unsafe { (*header).remote() });
@@ -3757,11 +3617,11 @@ pub(crate) unsafe fn copyout_pseudo(
     let reply_type = mach_msg_bits_local(mbits);
 
     // Both calls always run; both names are wanted.
-    let (dest_mr, dest_name) =
+    let (dest_lost, dest_name) =
         unsafe { copyout_object(space, dest, dest_type) };
-    let (reply_mr, reply_name) =
+    let (reply_lost, reply_name) =
         unsafe { copyout_object(space, reply, reply_type) };
-    let mut mr = dest_mr | reply_mr;
+    let mut lost = dest_lost | reply_lost;
 
     // SAFETY: the header is live and owned by this call.
     unsafe {
@@ -3772,10 +3632,10 @@ pub(crate) unsafe fn copyout_pseudo(
 
     if mbits & MACH_MSGH_BITS_COMPLEX != 0 {
         // SAFETY: the header copied out, so the body belongs to this call.
-        mr |= unsafe { copyout_body(kmsg, space, map) };
+        lost |= unsafe { copyout_body(kmsg, space, map) };
     }
 
-    mr
+    lost
 }
 
 /// `ipc_kmsg_copyout_dest()` in C.

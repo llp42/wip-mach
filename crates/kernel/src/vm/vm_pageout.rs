@@ -12,7 +12,6 @@ use crate::arch::types::VmOffset;
 use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::pmap::pmap_clear_modify;
-use crate::glue::{memory_object_data_initialize, memory_object_data_return};
 use crate::kern::machine::CLOCK_HZ;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, thread_block, thread_set_timeout,
@@ -21,8 +20,8 @@ use crate::kern::sched_prim::{
 use crate::kern::slab::slab_collect;
 use crate::kern::task;
 use crate::kern::thread::Thread;
+use crate::mig::{memory_object_data_initialize, memory_object_data_return};
 use crate::utils::cell::SyncCell;
-use crate::vm::error::KERN_SUCCESS;
 use crate::vm::memory_object::default_manager;
 use crate::vm::types::{VmObject, VmPage, VmProt};
 use crate::vm::vm_external::{
@@ -302,7 +301,7 @@ pub(crate) unsafe fn page(m: NonNull<VmPage>, initial: bool, flush: bool) {
     // stable while the paging reference is held.
     let pager = unsafe { (*old_object).pager };
     let pager_request = unsafe { (*old_object).pager_request };
-    let rc = if initial {
+    let sent = if initial {
         // SAFETY: the pager ports are the live ones the object holds, and the
         // copy stands in for the page's data.
         unsafe {
@@ -332,7 +331,7 @@ pub(crate) unsafe fn page(m: NonNull<VmPage>, initial: bool, flush: bool) {
         }
     };
 
-    if rc != KERN_SUCCESS {
+    if sent.is_err() {
         unsafe { VmMapCopy::discard(copy) };
     }
 

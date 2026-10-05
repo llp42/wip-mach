@@ -59,24 +59,23 @@ const fn from_u32(value: u32) -> usize {
     value as usize
 }
 
-/// The `ACPI_RETURN` codes of <`i386at/acpi_parse_apic.h`> this parser returns.
+/// Why the ACPI tables gave no usable APIC description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i8)]
-enum AcpiError {
-    BadChecksum = -1,
-    NoRsdp = -3,
-    NoRsdt = -4,
-    NoApic = -6,
-    NoLapic = -7,
-    ApicFailure = -8,
-    FitFailure = -9,
-}
-
-impl AcpiError {
-    /// The `int` the C entry point returns.
-    const fn code(self) -> c_int {
-        self as c_int
-    }
+pub(crate) enum AcpiError {
+    /// A table's checksum does not add up.
+    BadChecksum,
+    /// No RSDP was found in the BIOS areas.
+    NoRsdp,
+    /// The RSDP names no valid RSDT or XSDT.
+    NoRsdt,
+    /// The tables hold no MADT.
+    NoApic,
+    /// The MADT names no local APIC.
+    NoLapic,
+    /// An APIC entry of the MADT could not be recorded.
+    ApicFailure,
+    /// The MADT does not fit the table it claims.
+    FitFailure,
 }
 
 /// `struct acpi_rsdp` of <`i386at/acpi_parse_apic.h`>.
@@ -733,7 +732,11 @@ fn setup(apic: NonNull<AcpiApic>) -> Result<(), AcpiError> {
 
 /// `acpi_apic_init()` in C: find the MADT in the ACPI tables and build the
 /// APIC tables.
-fn init() -> Result<(), AcpiError> {
+///
+/// # Errors
+///
+/// Returns the [`AcpiError`] that stopped the parse.
+pub(crate) fn init() -> Result<(), AcpiError> {
     let Some((is_64bit, rsdp)) = get_rsdp() else {
         return Err(AcpiError::NoRsdp);
     };
@@ -811,12 +814,4 @@ fn print_info(rsdp: VmOffset, rsdt_table: *mut c_void, acpi_rsdt_n: c_int) {
         rsdt_table.expose_provenance(),
         acpi_rsdt_n,
     );
-}
-
-/// The ACPI MADT parser, which `acpi_apic_init()` in C ran at boot.
-pub(crate) fn acpi_apic_init() -> c_int {
-    match init() {
-        Ok(()) => 0,
-        Err(error) => error.code(),
-    }
 }

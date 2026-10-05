@@ -7,11 +7,11 @@
 //! The kernel mutex, which `kern/kmutex.c` used to define.
 
 use crate::arch::x86_64::per_cpu;
+use crate::kern::error::Error;
 use crate::kern::lock::SimpleLock;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, thread_sleep, thread_wakeup_prim,
 };
-use crate::kern::types::KernError;
 use core::ffi::{c_int, c_void};
 use core::mem::offset_of;
 use core::ptr;
@@ -70,8 +70,8 @@ impl KMutex {
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::Failure`] when the mutex is already held.
-    pub fn try_lock(&self) -> Result<(), KernError> {
+    /// Returns [`Error::Failure`] when the mutex is already held.
+    pub fn try_lock(&self) -> Result<(), Error> {
         if self
             .state
             .compare_exchange(
@@ -84,7 +84,7 @@ impl KMutex {
         {
             Ok(())
         } else {
-            Err(KernError::Failure)
+            Err(Error::Failure)
         }
     }
 
@@ -92,10 +92,10 @@ impl KMutex {
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::Interrupted`] when `interruptible` is set and the
+    /// Returns [`Error::Interrupted`] when `interruptible` is set and the
     /// sleep ends early; the mutex then belongs to its owner, which sets the
     /// state.
-    pub fn lock(&self, interruptible: bool) -> Result<(), KernError> {
+    pub fn lock(&self, interruptible: bool) -> Result<(), Error> {
         if self.try_lock().is_ok() {
             return Ok(());
         }
@@ -128,7 +128,7 @@ impl KMutex {
         if wait_result == THREAD_AWAKENED {
             Ok(())
         } else {
-            Err(KernError::Interrupted)
+            Err(Error::Interrupted)
         }
     }
 
@@ -161,7 +161,7 @@ impl KMutex {
             )
         };
 
-        if woke == 0 {
+        if !woke {
             // Every sleeper was interrupted and left; reset the state.
             self.state.store(State::Avail.as_u32(), Ordering::Relaxed);
         }

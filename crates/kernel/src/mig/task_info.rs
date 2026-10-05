@@ -10,10 +10,10 @@
 
 use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::spl;
-use crate::glue::time_value::{RpcTimeValue, TimeValue, TimeValue64};
 use crate::kern::host_time::read_time_stamp;
 use crate::kern::task::{Task, add_time64, kernel_task, resident_count};
 use crate::kern::timer::read_times;
+use crate::mig::time_value::{RpcTimeValue, TimeValue, TimeValue64};
 use crate::vm::vm_kern::KERNEL_MAP;
 use crate::vm::vm_map::VmMap;
 use core::ffi::{c_int, c_uint, c_ulong};

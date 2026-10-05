@@ -9,3 +9,5 @@ pub mod types;
 
 #[path = "../../../../crates/kernel/src/arch/vm_param.rs"]
 pub mod vm_param;
+
+pub mod x86_64;

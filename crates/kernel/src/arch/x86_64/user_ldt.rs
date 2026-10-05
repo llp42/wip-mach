@@ -7,9 +7,10 @@
 //! to define and `i386/i386/user_ldt.h` and the MIG `mach_i386` interface
 //! declare.
 //!
-//! The `extern "C"` edge is in [`user_ldt_ffi`].
+//! The MIG server entries are in [`crate::mig::mach_i386`].
 
 use crate::arch::types::{VmOffset, VmSize};
+use crate::arch::x86_64::error::Error;
 use crate::arch::x86_64::ldt;
 use crate::arch::x86_64::pcb::{self, RealDescriptor, UserLdt};
 use crate::arch::x86_64::per_cpu;
@@ -17,10 +18,7 @@ use crate::arch::x86_64::seg;
 use crate::ipc::ipc_init;
 use crate::kern::slab::{kalloc, kfree};
 use crate::kern::thread::Thread;
-use crate::vm::error::{
-    Error as VmError, KERN_INVALID_ARGUMENT, KERN_NO_SPACE,
-    KERN_RESOURCE_SHORTAGE,
-};
+use crate::vm::error::Error as VmError;
 use crate::vm::types::VmProt;
 use crate::vm::vm_kern;
 use crate::vm::vm_map::{self, VmMapCopy};
@@ -68,31 +66,6 @@ const _: () = {
 /// `sel_idx()` of <i386/seg.h> on a signed selector.
 const fn sel_idx(selector: c_int) -> c_int {
     selector >> 3
-}
-
-/// The failures `i386_set_ldt()` and `i386_get_ldt()` report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
-    /// `KERN_INVALID_ARGUMENT`.
-    InvalidArgument,
-    /// `KERN_NO_SPACE`.
-    NoSpace,
-    /// `KERN_RESOURCE_SHORTAGE`.
-    ResourceShortage,
-    /// A failure of the VM map operations.
-    Vm(VmError),
-}
-
-impl Error {
-    /// The `kern_return_t` the C caller sees.
-    pub(crate) const fn as_kern_return(self) -> c_int {
-        match self {
-            Self::InvalidArgument => KERN_INVALID_ARGUMENT,
-            Self::NoSpace => KERN_NO_SPACE,
-            Self::ResourceShortage => KERN_RESOURCE_SHORTAGE,
-            Self::Vm(error) => error.as_kern_return(),
-        }
-    }
 }
 
 /// The `Error` a VM failure stands for.

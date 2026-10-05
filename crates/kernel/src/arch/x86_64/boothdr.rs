@@ -11,6 +11,7 @@ mod x86_64 {
         APIC_MSR, APIC_MSR_BSP, APIC_MSR_ENABLE, APIC_MSR_X2APIC,
     };
     use crate::arch::x86_64::fpu::{CR0_PG, CR0_WP, CR4_PAE};
+    use crate::arch::x86_64::model_dep::c_boot_entry;
     use crate::arch::x86_64::mp_desc::INTSTACK_SIZE;
     use crate::arch::x86_64::pcb::{
         MSR_REG_EFER, MSR_REG_EFER_LONG_MODE_EN, MSR_REG_GSBASE,
@@ -190,7 +191,7 @@ mod x86_64 {
         "jmp iplt_cont",
         "iplt_done:",
         "movq %r8,%rdi",
-        "call c_boot_entry",
+        "call {c_boot_entry}",
         "nop",
         ".code32",
         ".section .boot.data,\"ax\",@progbits",
@@ -249,6 +250,7 @@ mod x86_64 {
         boot_gdt64_code = const BOOT_GDT64_CODE,
         boot_gdt64_data = const BOOT_GDT64_DATA,
         gdt64_limit = const GDT64_LIMIT,
+        c_boot_entry = sym c_boot_entry,
         options(att_syntax),
     );
 }

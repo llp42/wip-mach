@@ -6,6 +6,7 @@
 //! The capability-manipulation routines, which `ipc/ipc_right.c` used to
 //! define and `ipc/ipc_right.h` declares.
 
+use crate::ipc::error::Error;
 use crate::ipc::ipc_entry;
 use crate::ipc::ipc_marequest;
 use crate::ipc::ipc_notify;
@@ -16,7 +17,6 @@ use crate::ipc::{
     IE_BITS_TYPE_MASK, IO_DEAD, IpcEntry, IpcPort, IpcSpace, IpcTarget,
 };
 use crate::kern::debug::kpanic;
-use crate::kern::types::KernError;
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::{self, NonNull};
 
@@ -120,18 +120,18 @@ const fn urefs_underflow(urefs: u32, delta: c_int) -> bool {
 pub(crate) unsafe fn lookup_write(
     space: IpcSpace,
     name: c_uint,
-) -> Result<*mut IpcEntry, KernError> {
+) -> Result<*mut IpcEntry, Error> {
     unsafe { space.lock_write() };
 
     if !unsafe { space.is_active() } {
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     }
 
     // SAFETY: the space is live and write-locked.
     let Some(entry) = (unsafe { space.entry_lookup(name) }) else {
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidName);
+        return Err(Error::InvalidName);
     };
 
     Ok(entry)
@@ -190,7 +190,7 @@ pub(crate) unsafe fn dnrequest(
     name: c_uint,
     immediate: bool,
     notify: Option<NonNull<c_void>>,
-) -> Result<*mut c_void, KernError> {
+) -> Result<*mut c_void, Error> {
     loop {
         let entry = unsafe { lookup_write(space, name) }?;
         // SAFETY: the lookup returned a live entry.
@@ -252,7 +252,7 @@ pub(crate) unsafe fn dnrequest(
             if urefs_overflow(bits & IE_BITS_UREFS_MASK, 1) {
                 // SAFETY: the space lock is held.
                 unsafe { space.lock_done() };
-                return Err(KernError::UrefsOverflow);
+                return Err(Error::UrefsOverflow);
             }
 
             // SAFETY: the entry is live and the space lock is held.
@@ -268,9 +268,9 @@ pub(crate) unsafe fn dnrequest(
         unsafe { space.lock_done() };
 
         return if bits & MACH_PORT_TYPE_PORT_OR_DEAD != 0 {
-            Err(KernError::InvalidArgument)
+            Err(Error::InvalidArgument)
         } else {
-            Err(KernError::InvalidRight)
+            Err(Error::InvalidRight)
         };
     }
 }
@@ -668,7 +668,7 @@ pub(crate) unsafe fn dealloc(
     space: IpcSpace,
     name: c_uint,
     entry: *mut IpcEntry,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let mut bits = unsafe { (*entry).bits() };
     let type_ = bits & IE_BITS_TYPE_MASK;
 
@@ -809,7 +809,7 @@ pub(crate) unsafe fn dealloc(
         _ => {
             // SAFETY: the space lock is held.
             unsafe { space.lock_done() };
-            Err(KernError::InvalidRight)
+            Err(Error::InvalidRight)
         }
     }
 }
@@ -874,7 +874,7 @@ pub(crate) unsafe fn delta(
     entry: *mut IpcEntry,
     right: c_uint,
     delta: c_int,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let mut bits = unsafe { (*entry).bits() };
 
     match right {
@@ -882,7 +882,7 @@ pub(crate) unsafe fn delta(
             if bits & MACH_PORT_TYPE_PORT_SET == 0 {
                 // SAFETY: the space lock is held.
                 unsafe { space.lock_done() };
-                return Err(KernError::InvalidRight);
+                return Err(Error::InvalidRight);
             }
 
             if delta == 0 {
@@ -894,7 +894,7 @@ pub(crate) unsafe fn delta(
             if delta != -1 {
                 // SAFETY: the space lock is held.
                 unsafe { space.lock_done() };
-                return Err(KernError::InvalidValue);
+                return Err(Error::InvalidValue);
             }
 
             // SAFETY: a typed port-set entry names a live port set.
@@ -924,7 +924,7 @@ pub(crate) unsafe fn delta(
             if bits & MACH_PORT_TYPE_RECEIVE == 0 {
                 // SAFETY: the space lock is held.
                 unsafe { space.lock_done() };
-                return Err(KernError::InvalidRight);
+                return Err(Error::InvalidRight);
             }
 
             if delta == 0 {
@@ -936,7 +936,7 @@ pub(crate) unsafe fn delta(
             if delta != -1 {
                 // SAFETY: the space lock is held.
                 unsafe { space.lock_done() };
-                return Err(KernError::InvalidValue);
+                return Err(Error::InvalidValue);
             }
 
             if bits & IE_BITS_MAREQUEST != 0 {
@@ -1027,11 +1027,11 @@ unsafe fn delta_send(
     entry: *mut IpcEntry,
     bits: u32,
     delta: c_int,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if bits & MACH_PORT_TYPE_SEND == 0 {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // The maximum user-reference count for a send right is one short of
@@ -1040,13 +1040,13 @@ unsafe fn delta_send(
     if urefs_underflow(urefs, delta) {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
 
     if urefs_overflow(urefs.wrapping_add(1), delta) {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::UrefsOverflow);
+        return Err(Error::UrefsOverflow);
     }
 
     // SAFETY: a send entry names a live port.
@@ -1056,7 +1056,7 @@ unsafe fn delta_send(
     if unsafe { check(space, port, name, entry) } {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // The port is locked and active.
@@ -1140,17 +1140,17 @@ unsafe fn delta_send_once(
     entry: *mut IpcEntry,
     bits: u32,
     delta: c_int,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if bits & MACH_PORT_TYPE_SEND_ONCE == 0 {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     if !(-1..=0).contains(&delta) {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
     // SAFETY: a send-once entry names a live port.
     let port = unsafe { IpcPort::from_raw((*entry).object()) };
@@ -1159,7 +1159,7 @@ unsafe fn delta_send_once(
     if unsafe { check(space, port, name, entry) } {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // The port is locked and active.
@@ -1208,7 +1208,7 @@ unsafe fn delta_dead_name(
     entry: *mut IpcEntry,
     mut bits: u32,
     delta: c_int,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if bits & MACH_PORT_TYPE_SEND_RIGHTS != 0 {
         // SAFETY: a send-rights entry names a live port.
         let port = unsafe { IpcPort::from_raw((*entry).object()) };
@@ -1219,7 +1219,7 @@ unsafe fn delta_dead_name(
             unsafe { port.unlock() };
             // SAFETY: the space lock is held.
             unsafe { space.lock_done() };
-            return Err(KernError::InvalidRight);
+            return Err(Error::InvalidRight);
         }
 
         // SAFETY: the check converted the entry to a dead name.
@@ -1227,7 +1227,7 @@ unsafe fn delta_dead_name(
     } else if bits & MACH_PORT_TYPE_DEAD_NAME == 0 {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     let urefs = bits & IE_BITS_UREFS_MASK;
@@ -1235,13 +1235,13 @@ unsafe fn delta_dead_name(
     if urefs_underflow(urefs, delta) {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
 
     if urefs_overflow(urefs, delta) {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::UrefsOverflow);
+        return Err(Error::UrefsOverflow);
     }
 
     if urefs.wrapping_add(delta as u32) == 0 {
@@ -1352,11 +1352,9 @@ pub(crate) unsafe fn copyin_check(
 }
 
 /// The `copy_dead:` label of the C `ipc_right_copyin()`.
-const fn copy_dead(
-    deadok: bool,
-) -> Result<(*mut c_void, *mut c_void), KernError> {
+const fn copy_dead(deadok: bool) -> Result<(*mut c_void, *mut c_void), Error> {
     if !deadok {
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     Ok((IO_DEAD, ptr::null_mut()))
@@ -1372,9 +1370,9 @@ unsafe fn move_dead(
     entry: *mut IpcEntry,
     bits: u32,
     deadok: bool,
-) -> Result<(*mut c_void, *mut c_void), KernError> {
+) -> Result<(*mut c_void, *mut c_void), Error> {
     if !deadok {
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     let bits = if bits & IE_BITS_UREFS_MASK == 1 {
@@ -1401,13 +1399,13 @@ pub(crate) unsafe fn copyin(
     entry: *mut IpcEntry,
     msgt_name: c_uint,
     deadok: bool,
-) -> Result<(*mut c_void, *mut c_void), KernError> {
+) -> Result<(*mut c_void, *mut c_void), Error> {
     let bits = unsafe { (*entry).bits() };
 
     match msgt_name {
         MACH_MSG_TYPE_MAKE_SEND => {
             if bits & MACH_PORT_TYPE_RECEIVE == 0 {
-                return Err(KernError::InvalidRight);
+                return Err(Error::InvalidRight);
             }
 
             // SAFETY: a receive entry names a live port.
@@ -1427,7 +1425,7 @@ pub(crate) unsafe fn copyin(
 
         MACH_MSG_TYPE_MAKE_SEND_ONCE => {
             if bits & MACH_PORT_TYPE_RECEIVE == 0 {
-                return Err(KernError::InvalidRight);
+                return Err(Error::InvalidRight);
             }
 
             // SAFETY: a receive entry names a live port.
@@ -1446,7 +1444,7 @@ pub(crate) unsafe fn copyin(
 
         MACH_MSG_TYPE_MOVE_RECEIVE => {
             if bits & MACH_PORT_TYPE_RECEIVE == 0 {
-                return Err(KernError::InvalidRight);
+                return Err(Error::InvalidRight);
             }
 
             // SAFETY: a receive entry names a live port.
@@ -1515,7 +1513,7 @@ unsafe fn copyin_send_rights(
     mut bits: u32,
     msgt_name: c_uint,
     deadok: bool,
-) -> Result<(*mut c_void, *mut c_void), KernError> {
+) -> Result<(*mut c_void, *mut c_void), Error> {
     let copy = msgt_name == MACH_MSG_TYPE_COPY_SEND;
 
     if bits & MACH_PORT_TYPE_DEAD_NAME != 0 {
@@ -1528,7 +1526,7 @@ unsafe fn copyin_send_rights(
 
     // Allow for dead send-once rights.
     if bits & MACH_PORT_TYPE_SEND_RIGHTS == 0 {
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // SAFETY: a send-rights entry names a live port.
@@ -1553,7 +1551,7 @@ unsafe fn copyin_send_rights(
         if bits & MACH_PORT_TYPE_SEND == 0 {
             // SAFETY: the port lock is held.
             unsafe { port.unlock() };
-            return Err(KernError::InvalidRight);
+            return Err(Error::InvalidRight);
         }
 
         // SAFETY: the port is live and locked.
@@ -1570,7 +1568,7 @@ unsafe fn copyin_send_rights(
         if bits & MACH_PORT_TYPE_SEND == 0 {
             // SAFETY: the port lock is held.
             unsafe { port.unlock() };
-            return Err(KernError::InvalidRight);
+            return Err(Error::InvalidRight);
         }
 
         let dnrequest;
@@ -1617,7 +1615,7 @@ unsafe fn copyin_send_rights(
     if bits & MACH_PORT_TYPE_SEND_ONCE == 0 {
         // SAFETY: the port lock is held.
         unsafe { port.unlock() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // SAFETY: the port is live and locked.
@@ -1693,16 +1691,16 @@ pub(crate) unsafe fn copyin_two(
     space: IpcSpace,
     name: c_uint,
     entry: *mut IpcEntry,
-) -> Result<(*mut c_void, *mut c_void), KernError> {
+) -> Result<(*mut c_void, *mut c_void), Error> {
     let bits = unsafe { (*entry).bits() };
 
     if bits & MACH_PORT_TYPE_SEND == 0 {
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     let urefs = bits & IE_BITS_UREFS_MASK;
     if urefs < 2 {
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // SAFETY: a send entry names a live port.
@@ -1710,7 +1708,7 @@ pub(crate) unsafe fn copyin_two(
 
     // SAFETY: the space is write-locked and the entry is live.
     if unsafe { check(space, port, name, entry) } {
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // The port is locked and active.
@@ -1780,7 +1778,7 @@ pub(crate) unsafe fn copyout(
     msgt_name: c_uint,
     overflow: bool,
     object: *mut c_void,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let bits = unsafe { (*entry).bits() };
     let port = unsafe { IpcPort::from_raw(object) };
 
@@ -1813,7 +1811,7 @@ pub(crate) unsafe fn copyout(
 
                     // SAFETY: the port lock is held.
                     unsafe { port.unlock() };
-                    return Err(KernError::UrefsOverflow);
+                    return Err(Error::UrefsOverflow);
                 }
 
                 // SAFETY: the port is live and locked.

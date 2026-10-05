@@ -10,10 +10,8 @@
 //!
 //! The `ds_device_*` entry points, the emulation dispatch, the device
 //! open/close/read/write paths, the request completion callbacks and the
-//! io-done thread all live here; [`ds_routines_ffi`] keeps only the
-//! `device_deallocate` export the generated C names.
-//!
-//! [`ds_routines_ffi`]: crate::device::ds_routines_ffi
+//! io-done thread all live here; the MIG server entries are in
+//! [`crate::mig::device`].
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
@@ -25,9 +23,9 @@ use crate::arch::x86_64::spl;
 use crate::arch::x86_64::user_access;
 use crate::config::NINTR;
 use crate::device::dev_lookup;
-use crate::device::r#return::{DeviceError, IoResultExt};
-use crate::glue;
-use crate::ipc::ipc_port_ffi;
+use crate::device::r#return::{
+    DeviceError, DeviceSuccess, IoResult, Reply, ReplyResult,
+};
 use crate::ipc::{IpcPort, MachMsgHeader, ipc_object, ipc_port, ipc_space};
 use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
@@ -42,6 +40,7 @@ use crate::kern::slab::{
     KmemCache, kmem_cache_alloc, kmem_cache_free, kmem_cache_init,
 };
 use crate::kern::thread::Thread;
+use crate::mig;
 use crate::utils::cell::SyncCell;
 use crate::vm::types::VmProt;
 use crate::vm::vm_kern::{self, KERNEL_MAP};
@@ -89,22 +88,6 @@ const IO_INBAND: c_int = 0x0000_4000;
 /// `IO_LOANED`.
 const IO_LOANED: c_int = 0x0001_0000;
 
-/// `D_SUCCESS` of <`device/device_types.h`>.
-const D_SUCCESS: c_int = 0;
-/// `D_IO_QUEUED` of <`device/device_types.h`>.
-const D_IO_QUEUED: c_int = -1;
-/// `MIG_NO_REPLY` of <`mach/mig_errors.h`>.
-pub(crate) const MIG_NO_REPLY: c_int = -305;
-/// `KERN_SUCCESS`.
-pub(crate) const KERN_SUCCESS: c_int = 0;
-/// `KERN_INVALID_ARGUMENT`.
-const KERN_INVALID_ARGUMENT: c_int = 4;
-/// `KERN_FAILURE`.
-const KERN_FAILURE: c_int = 5;
-/// `KERN_RESOURCE_SHORTAGE`.
-const KERN_RESOURCE_SHORTAGE: c_int = 6;
-/// `KERN_INVALID_VALUE`.
-const KERN_INVALID_VALUE: c_int = 18;
 /// `D_INFO_BLOCK_SIZE` of <device/conf.h>.
 const D_INFO_BLOCK_SIZE: c_int = 1;
 /// `IO_INBAND_MAX` of <`device/device_types.h`>.
@@ -197,8 +180,13 @@ const _: () = assert!(size_of::<list::Link>() == 16);
 /// `filter_count` entries; the driver must not assume any device lock
 /// is held and may notify `receive_port` from interrupt context
 /// whenever matching input later arrives.
-type DevAsyncIn =
-    unsafe fn(DevT, *mut c_void, c_int, *mut c_ushort, c_uint) -> c_int;
+type DevAsyncIn = unsafe fn(
+    DevT,
+    *mut c_void,
+    c_int,
+    *mut c_ushort,
+    c_uint,
+) -> Result<(), DeviceError>;
 /// The signature of a driver's `d_getstat` hook: read one status
 /// flavor.
 ///
@@ -206,14 +194,24 @@ type DevAsyncIn =
 /// `status` writable for the words the caller reserved and
 /// `status_count` writable for the count the driver actually fills in;
 /// the driver must not assume any device lock is held.
-type DevGetstat = unsafe fn(DevT, c_uint, *mut c_int, *mut c_uint) -> c_int;
+type DevGetstat = unsafe fn(
+    DevT,
+    c_uint,
+    *mut c_int,
+    *mut c_uint,
+) -> Result<(), DeviceError>;
 /// The signature of a driver's `d_setstat` hook: write one status
 /// flavor.
 ///
 /// [`device_set_status()`] invokes it for an open device, with `status`
 /// readable for `status_count` words; the driver must not assume any
 /// device lock is held.
-type DevSetstat = unsafe fn(DevT, c_uint, *mut c_int, c_uint) -> c_int;
+type DevSetstat =
+    unsafe fn(DevT, c_uint, *mut c_int, c_uint) -> Result<(), DeviceError>;
+
+/// The signature of a driver's `d_dev_info` hook; see [`DevOps::d_dev_info`].
+type DevDevInfo =
+    unsafe fn(DevT, c_int, *mut c_int) -> Result<(), DeviceError>;
 
 /// `struct dev_ops` of <device/conf.h>: one driver's entry points.
 ///
@@ -230,9 +228,9 @@ pub struct DevOps {
     /// [`DEV_STATE_OPENING`] and no device lock held, and `ior` a
     /// freshly built request whose `done` is [`ds_open_done()`]. The
     /// driver may finish the open synchronously in the return value, or
-    /// return `D_IO_QUEUED` and call `(*ior).done` itself once the open
-    /// completes, from any context.
-    pub d_open: Option<unsafe fn(DevT, c_int, *mut IoReq) -> c_int>,
+    /// return [`DeviceSuccess::IoQueued`] and call `(*ior).done` itself
+    /// once the open completes, from any context.
+    pub d_open: Option<unsafe fn(DevT, c_int, *mut IoReq) -> IoResult>,
     /// Closes the device.
     ///
     /// [`device_close()`] invokes it once the last open reference drops,
@@ -246,9 +244,9 @@ pub struct DevOps {
     /// open device, with no device lock held and `ior` a freshly built
     /// request whose `done` is [`ds_read_done()`]. The driver may
     /// complete synchronously in the return value, or return
-    /// `D_IO_QUEUED` and call `(*ior).done` itself once the data is
-    /// ready, from any context.
-    pub d_read: Option<unsafe fn(DevT, *mut IoReq) -> c_int>,
+    /// [`DeviceSuccess::IoQueued`] and call `(*ior).done` itself once the
+    /// data is ready, from any context.
+    pub d_read: Option<unsafe fn(DevT, *mut IoReq) -> IoResult>,
     /// Writes to the device.
     ///
     /// [`device_write()`] and [`device_write_inband()`] invoke it for an
@@ -256,9 +254,9 @@ pub struct DevOps {
     /// `done` is [`ds_write_done()`]; [`ds_write_done()`] itself calls
     /// back in to retry a request the driver had queued. The driver may
     /// complete synchronously in the return value, or return
-    /// `D_IO_QUEUED` and call `(*ior).done` itself once the write
-    /// completes, from any context.
-    pub d_write: Option<unsafe fn(DevT, *mut IoReq) -> c_int>,
+    /// [`DeviceSuccess::IoQueued`] and call `(*ior).done` itself once the
+    /// write completes, from any context.
+    pub d_write: Option<unsafe fn(DevT, *mut IoReq) -> IoResult>,
     pub d_getstat: Option<DevGetstat>,
     pub d_setstat: Option<DevSetstat>,
     /// Translates an mmap offset into the device to a physical page
@@ -275,14 +273,14 @@ pub struct DevOps {
     ///
     /// Called with no device lock held and no live request to signal
     /// completion through; the driver must finish synchronously.
-    pub d_reset: Option<unsafe fn(DevT) -> c_int>,
+    pub d_reset: Option<unsafe fn(DevT) -> Result<(), DeviceError>>,
     /// Notifies the driver that a port tied to one of its requests
     /// (an open reply port, or a `d_async_in` receive port) has died.
     ///
     /// `port` is that dead port, cast to a [`VmOffset`]; the driver
     /// drops whatever it associated with it, such as queued requests
-    /// waiting to reply through it.
-    pub d_port_death: Option<unsafe fn(DevT, VmOffset) -> c_int>,
+    /// waiting to reply through it, and returns whether it found any.
+    pub d_port_death: Option<unsafe fn(DevT, VmOffset) -> bool>,
     pub d_subdev: c_int,
     /// Reads one `D_INFO_*` info flavor into `*data`.
     ///
@@ -290,7 +288,7 @@ pub struct DevOps {
     /// [`D_INFO_BLOCK_SIZE`] to recover the device's block size when a
     /// write continuation needs to advance `recnum`; called with no
     /// device lock held.
-    pub d_dev_info: Option<unsafe fn(DevT, c_int, *mut c_int) -> c_int>,
+    pub d_dev_info: Option<DevDevInfo>,
 }
 
 const _: () = {
@@ -322,7 +320,7 @@ type EmulOpen = unsafe fn(
     c_uint,
     *const c_char,
     *mut *mut c_void,
-) -> c_int;
+) -> ReplyResult;
 /// The signature of a `device_emulation_ops::write` hook.
 ///
 /// [`ds_device_write()`] invokes it with the emulation data, the reply
@@ -338,7 +336,7 @@ type EmulWrite = unsafe fn(
     *mut c_char,
     c_uint,
     *mut c_int,
-) -> c_int;
+) -> ReplyResult;
 /// The signature of a `device_emulation_ops::write_inband` hook.
 ///
 /// [`ds_device_write_inband()`] invokes it the same way as
@@ -353,7 +351,7 @@ type EmulWriteInband = unsafe fn(
     *const c_char,
     c_uint,
     *mut c_int,
-) -> c_int;
+) -> ReplyResult;
 /// The signature of a `device_emulation_ops::read` hook.
 ///
 /// [`ds_device_read()`] invokes it with the emulation data, the reply
@@ -369,7 +367,7 @@ type EmulRead = unsafe fn(
     c_int,
     *mut *mut c_char,
     *mut c_uint,
-) -> c_int;
+) -> ReplyResult;
 /// The signature of a `device_emulation_ops::read_inband` hook.
 ///
 /// [`ds_device_read_inband()`] invokes it the same way as [`EmulRead`],
@@ -384,28 +382,41 @@ type EmulReadInband = unsafe fn(
     c_int,
     *mut c_char,
     *mut c_uint,
-) -> c_int;
+) -> ReplyResult;
 /// The signature of a `device_emulation_ops::set_status` hook.
 ///
 /// [`ds_device_set_status()`] invokes it with the emulation data, the
 /// status flavor, and `status` readable for `status_count` words.
-type EmulSetStatus =
-    unsafe fn(*mut c_void, c_uint, *mut c_int, c_uint) -> c_int;
+type EmulSetStatus = unsafe fn(
+    *mut c_void,
+    c_uint,
+    *mut c_int,
+    c_uint,
+) -> Result<(), DeviceError>;
 /// The signature of a `device_emulation_ops::get_status` hook.
 ///
 /// [`ds_device_get_status()`] invokes it with the emulation data, the
 /// status flavor, `status` writable for the words the caller reserved,
 /// and a writable out-param for the count the callee actually filled
 /// in.
-type EmulGetStatus =
-    unsafe fn(*mut c_void, c_uint, *mut c_int, *mut c_uint) -> c_int;
+type EmulGetStatus = unsafe fn(
+    *mut c_void,
+    c_uint,
+    *mut c_int,
+    *mut c_uint,
+) -> Result<(), DeviceError>;
 /// The signature of a `device_emulation_ops::set_filter` hook.
 ///
 /// [`ds_device_set_filter()`] invokes it with the emulation data, a
 /// valid `receive_port`, the filter priority, and `filter` readable for
 /// `filter_count` entries.
-type EmulSetFilter =
-    unsafe fn(*mut c_void, *mut c_void, c_int, *mut c_ushort, c_uint) -> c_int;
+type EmulSetFilter = unsafe fn(
+    *mut c_void,
+    *mut c_void,
+    c_int,
+    *mut c_ushort,
+    c_uint,
+) -> Result<(), DeviceError>;
 /// The signature of a `device_emulation_ops::map` hook.
 ///
 /// [`ds_device_map()`] invokes it with the emulation data, the requested
@@ -418,7 +429,7 @@ type EmulMap = unsafe fn(
     VmSize,
     *mut *mut c_void,
     c_int,
-) -> c_int;
+) -> Result<(), DeviceError>;
 /// The signature of a `device_emulation_ops::write_trap` hook.
 ///
 /// [`ds_device_write_trap()`] invokes it with the emulation data, the
@@ -427,7 +438,7 @@ type EmulMap = unsafe fn(
 /// registers; the callee must validate them itself before touching user
 /// memory.
 type EmulWriteTrap =
-    unsafe fn(*mut c_void, c_uint, c_ulong, c_ulong, c_ulong) -> c_int;
+    unsafe fn(*mut c_void, c_uint, c_ulong, c_ulong, c_ulong) -> ReplyResult;
 /// The signature of a `device_emulation_ops::writev_trap` hook.
 ///
 /// [`ds_device_writev_trap()`] invokes it with the emulation data, the
@@ -441,7 +452,11 @@ type EmulWritevTrap = unsafe fn(
     c_ulong,
     *mut RpcIoBufVec,
     c_ulong,
-) -> c_int;
+) -> ReplyResult;
+
+/// The signature of a `device_emulation_ops::close` hook; see
+/// [`DeviceEmulationOps::close`].
+type EmulClose = unsafe fn(*mut c_void) -> Result<(), DeviceError>;
 
 /// `struct device_emulation_ops` of <`device/device_emul.h>`: the operations
 /// one emulation layer provides.
@@ -474,7 +489,7 @@ pub struct DeviceEmulationOps {
     /// [`ds_device_close()`] invokes it with `emul_data`; this need not
     /// be the underlying device's last close, so the callee tears down
     /// only what this open reference set up.
-    pub close: Option<unsafe fn(*mut c_void) -> c_int>,
+    pub close: Option<EmulClose>,
     pub write: Option<EmulWrite>,
     pub write_inband: Option<EmulWriteInband>,
     pub read: Option<EmulRead>,
@@ -677,16 +692,16 @@ pub(crate) unsafe fn ds_device_open(
     mode: c_uint,
     name: *const c_char,
     devp: *mut *mut c_void,
-) -> c_int {
+) -> ReplyResult {
     if open_port != crate::device::device_init::master_device_port() {
-        return Err(DeviceError::InvalidOperation).as_io_return();
+        return Err(DeviceError::InvalidOperation);
     }
 
     if IpcPort::valid(reply_port).is_none() {
         kprint!("ds_* invalid reply port\n");
         // SAFETY: the literal argument is NUL-terminated.
         unsafe { soft_debugger(c"ds_* reply_port".as_ptr()) };
-        return MIG_NO_REPLY;
+        return Ok(Reply::Withheld);
     }
 
     // SAFETY: the list is this module's one-entry static, and its entry is the
@@ -695,7 +710,7 @@ pub(crate) unsafe fn ds_device_open(
         *ptr::addr_of!(EMULATION_LIST).cast::<*mut DeviceEmulationOps>()
     };
     // SAFETY: the emulation registered a real open with the C signature.
-    unsafe { (*ops).open }.map_or(D_SUCCESS, |open| unsafe {
+    unsafe { (*ops).open }.map_or(Ok(Reply::Now), |open| unsafe {
         open(reply_port, reply_port_type, mode, name, devp)
     })
 }
@@ -705,13 +720,13 @@ pub(crate) unsafe fn ds_device_open(
 /// # Safety
 ///
 /// `dev` must be a live `struct device`.
-pub(crate) unsafe fn ds_device_close(dev: NonNull<c_void>) -> c_int {
+pub(crate) unsafe fn ds_device_close(
+    dev: NonNull<c_void>,
+) -> Result<(), DeviceError> {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
-        (*ops)
-            .close
-            .map_or(D_SUCCESS, |close| close((*dev).emul_data))
+        (*ops).close.map_or(Ok(()), |close| close((*dev).emul_data))
     }
 }
 
@@ -731,12 +746,12 @@ pub(crate) unsafe fn ds_device_write(
     data: NonNull<c_char>,
     count: c_uint,
     bytes_written: *mut c_int,
-) -> c_int {
+) -> ReplyResult {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).write.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |write| {
                 write(
                     (*dev).emul_data,
@@ -769,12 +784,12 @@ pub(crate) unsafe fn ds_device_write_inband(
     data: NonNull<c_char>,
     count: c_uint,
     bytes_written: *mut c_int,
-) -> c_int {
+) -> ReplyResult {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).write_inband.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |write| {
                 write(
                     (*dev).emul_data,
@@ -807,12 +822,12 @@ pub(crate) unsafe fn ds_device_read(
     count: c_int,
     data: *mut *mut c_char,
     bytes_read: *mut c_uint,
-) -> c_int {
+) -> ReplyResult {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).read.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |read| {
                 read(
                     (*dev).emul_data,
@@ -845,12 +860,12 @@ pub(crate) unsafe fn ds_device_read_inband(
     count: c_int,
     data: *mut c_char,
     bytes_read: *mut c_uint,
-) -> c_int {
+) -> ReplyResult {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).read_inband.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |read| {
                 read(
                     (*dev).emul_data,
@@ -878,12 +893,12 @@ pub(crate) unsafe fn ds_device_set_status(
     flavor: c_uint,
     status: *mut c_int,
     status_count: c_uint,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).set_status.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |set_status| {
                 set_status((*dev).emul_data, flavor, status, status_count)
             },
@@ -902,12 +917,12 @@ pub(crate) unsafe fn ds_device_get_status(
     flavor: c_uint,
     status: *mut c_int,
     status_count: *mut c_uint,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).get_status.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |get_status| {
                 get_status((*dev).emul_data, flavor, status, status_count)
             },
@@ -927,12 +942,12 @@ pub(crate) unsafe fn ds_device_set_filter(
     priority: c_int,
     filter: *mut c_ushort,
     filter_count: c_uint,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).set_filter.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |set_filter| {
                 set_filter(
                     (*dev).emul_data,
@@ -958,12 +973,12 @@ pub(crate) unsafe fn ds_device_map(
     size: VmSize,
     pager: *mut *mut c_void,
     unmap: c_int,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).map.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |map| {
                 map((*dev).emul_data, protection, offset, size, pager, unmap)
             },
@@ -982,12 +997,12 @@ pub(crate) unsafe fn ds_device_intr_register(
     id: c_int,
     flags: c_int,
     receive_port: *mut c_void,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let dev = dev.as_ptr().cast::<Device>();
     let mdev = unsafe { (*dev).emul_data.cast::<MachDevice>() };
 
     if flags != 0 {
-        return Err(DeviceError::InvalidOperation).as_io_return();
+        return Err(DeviceError::InvalidOperation);
     }
 
     let same_name = unsafe {
@@ -998,15 +1013,15 @@ pub(crate) unsafe fn ds_device_intr_register(
         )
     };
     if !same_name {
-        return Err(DeviceError::InvalidOperation).as_io_return();
+        return Err(DeviceError::InvalidOperation);
     }
 
     if id < 0 {
-        return Err(DeviceError::InvalidOperation).as_io_return();
+        return Err(DeviceError::InvalidOperation);
     }
     // The C compared the non-negative id against the NINTR-sized table.
     if id as usize >= NINTR {
-        return Err(DeviceError::InvalidOperation).as_io_return();
+        return Err(DeviceError::InvalidOperation);
     }
 
     // SAFETY: `irqtab` is the live interrupt table, and the id is inside its
@@ -1018,7 +1033,7 @@ pub(crate) unsafe fn ds_device_intr_register(
             receive_port,
         )
     }) else {
-        return Err(DeviceError::NoMemory).as_io_return();
+        return Err(DeviceError::NoMemory);
     };
 
     // SAFETY: the entry belongs to the table, which serializes its use.
@@ -1034,9 +1049,9 @@ pub(crate) unsafe fn ds_device_intr_register(
             // SAFETY: the handler holds a reference to the live port from
             // here on, as the C's `ip_reference()` recorded.
             unsafe { ipc_object::reference(receive_port) };
-            D_SUCCESS
+            Ok(())
         }
-        Err(error) => Err(error).as_io_return(),
+        Err(error) => Err(error),
     }
 }
 
@@ -1049,7 +1064,7 @@ pub(crate) unsafe fn ds_device_intr_register(
 pub(crate) unsafe fn ds_device_intr_ack(
     dev: NonNull<c_void>,
     receive_port: *mut c_void,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let dev = dev.as_ptr().cast::<Device>();
     let mdev = unsafe { (*dev).emul_data.cast::<MachDevice>() };
 
@@ -1061,7 +1076,7 @@ pub(crate) unsafe fn ds_device_intr_ack(
         )
     };
     if !same_name {
-        return Err(DeviceError::InvalidOperation).as_io_return();
+        return Err(DeviceError::InvalidOperation);
     }
 
     match unsafe { crate::device::intr::irq_acknowledge(receive_port) } {
@@ -1069,10 +1084,10 @@ pub(crate) unsafe fn ds_device_intr_ack(
             crate::device::intr::enable_line(id);
             // SAFETY: the acknowledge consumed the send right the
             // registration held.
-            unsafe { ipc_port_ffi::ipc_port_release_send(receive_port) };
-            D_SUCCESS
+            unsafe { ipc_port::release_send(IpcPort::from_raw(receive_port)) };
+            Ok(())
         }
-        Err(code) => code,
+        Err(error) => Err(error),
     }
 }
 
@@ -1082,7 +1097,7 @@ pub(crate) unsafe fn ds_device_intr_ack(
 ///
 /// `msg` must be a live message whose header and no-senders body are
 /// readable.
-pub(crate) unsafe fn ds_notify(msg: *mut c_void) -> c_int {
+pub(crate) unsafe fn ds_notify(msg: *mut c_void) -> bool {
     let msg = msg.cast::<NoSendersNotification>();
     unsafe {
         let header = ptr::addr_of!((*msg).header);
@@ -1094,12 +1109,12 @@ pub(crate) unsafe fn ds_notify(msg: *mut c_void) -> c_int {
             if let Some(no_senders) = (*ops).no_senders {
                 no_senders(msg.cast::<c_void>());
             }
-            return c_int::from(true);
+            return true;
         }
 
         kprint!("ds_notify: strange notification {}\n", (*header).id());
     }
-    c_int::from(false)
+    false
 }
 
 /// `ds_device_write_trap()` of `device/ds_routines.c`.
@@ -1113,12 +1128,12 @@ pub(crate) unsafe fn ds_device_write_trap(
     recnum: c_ulong,
     data: c_ulong,
     count: c_ulong,
-) -> c_int {
+) -> ReplyResult {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).write_trap.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |write_trap| {
                 write_trap((*dev).emul_data, mode, recnum, data, count)
             },
@@ -1138,12 +1153,12 @@ pub(crate) unsafe fn ds_device_writev_trap(
     recnum: c_ulong,
     iovec: *mut RpcIoBufVec,
     count: c_ulong,
-) -> c_int {
+) -> ReplyResult {
     let dev = dev.as_ptr().cast::<Device>();
     unsafe {
         let ops = (*dev).emul_ops;
         (*ops).writev_trap.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |writev_trap| {
                 writev_trap((*dev).emul_data, mode, recnum, iovec, count)
             },
@@ -1218,9 +1233,9 @@ unsafe fn device_open(
     mode: c_uint,
     name: *const c_char,
     device_p: *mut *mut c_void,
-) -> c_int {
+) -> ReplyResult {
     let Some(device) = (unsafe { dev_lookup::lookup(name) }) else {
-        return Err(DeviceError::NoSuchDevice).as_io_return();
+        return Err(DeviceError::NoSuchDevice);
     };
     let device = device.as_ptr();
 
@@ -1243,7 +1258,7 @@ unsafe fn device_open(
     let Some(ior) = io_req_alloc(request) else {
         // SAFETY: the reference is the one `lookup()` took.
         unsafe { dev_lookup::deallocate(device) };
-        return Err(DeviceError::NoMemory).as_io_return();
+        return Err(DeviceError::NoMemory);
     };
 
     // SAFETY: a live mach device owns its lock, and the caller promises the
@@ -1266,13 +1281,13 @@ unsafe fn device_open(
             if (*device).flag & D_EXCL_OPEN != 0 {
                 (*device).lock.unlock();
                 dev_lookup::deallocate(device);
-                return Err(DeviceError::AlreadyOpen).as_io_return();
+                return Err(DeviceError::AlreadyOpen);
             }
 
             (*device).open_count += 1;
             (*device).lock.unlock();
             device_p.write(ptr::addr_of_mut!((*device).dev).cast::<c_void>());
-            return D_SUCCESS;
+            return Ok(Reply::Now);
         }
 
         (*device).state = DEV_STATE_OPENING;
@@ -1294,7 +1309,7 @@ unsafe fn device_open(
             }
             (*device).lock.unlock();
             dev_lookup::deallocate(device);
-            return KERN_RESOURCE_SHORTAGE;
+            return Err(DeviceError::ResourceShortage);
         }
 
         dev_lookup::port_enter(device);
@@ -1306,19 +1321,20 @@ unsafe fn device_open(
 
         let ior = KBox::into_raw(ior);
         let d_open = (*(*device).dev_ops).d_open;
-        let result = d_open.map_or(D_SUCCESS, |d_open| {
+        let result = d_open.map_or(Ok(DeviceSuccess::Success), |d_open| {
             d_open(driver_unit((*device).dev_number), mode as c_int, ior)
         });
-        if result == D_IO_QUEUED {
-            return MIG_NO_REPLY;
-        }
-
-        (*ior).error = result;
-        ds_open_done(ior);
+        (*ior).error = match result {
+            Ok(DeviceSuccess::IoQueued) => return Ok(Reply::Withheld),
+            Ok(DeviceSuccess::Success) => Ok(()),
+            Err(error) => Err(error),
+        };
+        // The completion sends the reply.
+        let _ = ds_open_done(ior);
         io_req_free(ior);
     }
 
-    MIG_NO_REPLY
+    Ok(Reply::Withheld)
 }
 
 /// `ds_open_done()` of `device/ds_routines.c`.
@@ -1326,12 +1342,12 @@ unsafe fn device_open(
 /// # Safety
 ///
 /// `ior` must be the live open request [`device_open()`] built.
-pub(crate) unsafe fn ds_open_done(ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn ds_open_done(ior: *mut IoReq) -> bool {
     unsafe {
         let mut device = (*ior).device.cast::<MachDevice>();
         let result = (*ior).error;
 
-        if result == D_SUCCESS {
+        if result.is_ok() {
             (*device).lock.lock();
             (*device).state = DEV_STATE_OPEN;
             (*device).open_count = 1;
@@ -1366,7 +1382,7 @@ pub(crate) unsafe fn ds_open_done(ior: *mut IoReq) -> c_int {
         }
 
         if IpcPort::valid((*ior).reply_port).is_some() {
-            glue::ds_device_open_reply(
+            let _ = mig::ds_device_open_reply(
                 (*ior).reply_port,
                 (*ior).reply_port_type,
                 result,
@@ -1377,7 +1393,7 @@ pub(crate) unsafe fn ds_open_done(ior: *mut IoReq) -> c_int {
         }
     }
 
-    c_int::from(true)
+    true
 }
 
 /// `device_close()` of `device/ds_routines.c`.
@@ -1385,7 +1401,11 @@ pub(crate) unsafe fn ds_open_done(ior: *mut IoReq) -> c_int {
 /// # Safety
 ///
 /// `dev` must be the emulation data of a live mach device.
-unsafe fn device_close(dev: *mut c_void) -> c_int {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the emulation's close entry has this signature"
+)]
+unsafe fn device_close(dev: *mut c_void) -> Result<(), DeviceError> {
     let device = dev.cast::<MachDevice>();
     unsafe {
         (*device).lock.lock();
@@ -1393,12 +1413,12 @@ unsafe fn device_close(dev: *mut c_void) -> c_int {
         (*device).open_count -= 1;
         if (*device).open_count > 0 {
             (*device).lock.unlock();
-            return D_SUCCESS;
+            return Ok(());
         }
 
         if (*device).state == DEV_STATE_CLOSING {
             (*device).lock.unlock();
-            return D_SUCCESS;
+            return Ok(());
         }
 
         (*device).state = DEV_STATE_CLOSING;
@@ -1420,7 +1440,7 @@ unsafe fn device_close(dev: *mut c_void) -> c_int {
         (*device).lock.unlock();
     }
 
-    D_SUCCESS
+    Ok(())
 }
 
 /// `device_write()` of `device/ds_routines.c`.
@@ -1439,11 +1459,11 @@ unsafe fn device_write(
     data: *mut c_char,
     data_count: c_uint,
     bytes_written: *mut c_int,
-) -> c_int {
+) -> ReplyResult {
     let device = dev.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         let Some(ior) = io_req_alloc(IoReq {
@@ -1461,22 +1481,23 @@ unsafe fn device_write(
             ..IoReq::new()
         })
         .map(KBox::into_raw) else {
-            return Err(DeviceError::NoMemory).as_io_return();
+            return Err(DeviceError::NoMemory);
         };
 
         dev_lookup::reference(device);
 
         let result = loop {
             let d_write = (*(*device).dev_ops).d_write;
-            let result = d_write.map_or(D_SUCCESS, |d_write| {
-                d_write(driver_unit((*device).dev_number), ior)
-            });
+            let result = d_write
+                .map_or(Ok(DeviceSuccess::Success), |d_write| {
+                    d_write(driver_unit((*device).dev_number), ior)
+                });
 
-            if result == D_IO_QUEUED {
-                return MIG_NO_REPLY;
+            if result == Ok(DeviceSuccess::IoQueued) {
+                return Ok(Reply::Withheld);
             }
 
-            if device_write_dealloc(ior) != 0 {
+            if device_write_dealloc(ior) {
                 break result;
             }
         };
@@ -1486,7 +1507,7 @@ unsafe fn device_write(
         dev_lookup::deallocate(device);
 
         io_req_free(ior);
-        result
+        result.map(|_| Reply::Now)
     }
 }
 
@@ -1506,11 +1527,11 @@ unsafe fn device_write_inband(
     data: *const c_char,
     data_count: c_uint,
     bytes_written: *mut c_int,
-) -> c_int {
+) -> ReplyResult {
     let device = dev.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         let Some(ior) = io_req_alloc(IoReq {
@@ -1528,18 +1549,18 @@ unsafe fn device_write_inband(
             ..IoReq::new()
         })
         .map(KBox::into_raw) else {
-            return Err(DeviceError::NoMemory).as_io_return();
+            return Err(DeviceError::NoMemory);
         };
 
         dev_lookup::reference(device);
 
         let d_write = (*(*device).dev_ops).d_write;
-        let result = d_write.map_or(D_SUCCESS, |d_write| {
+        let result = d_write.map_or(Ok(DeviceSuccess::Success), |d_write| {
             d_write(driver_unit((*device).dev_number), ior)
         });
 
-        if result == D_IO_QUEUED {
-            return MIG_NO_REPLY;
+        if result == Ok(DeviceSuccess::IoQueued) {
+            return Ok(Reply::Withheld);
         }
 
         bytes_written.write(((*ior).total - (*ior).residual) as c_int);
@@ -1547,7 +1568,7 @@ unsafe fn device_write_inband(
         dev_lookup::deallocate(device);
 
         io_req_free(ior);
-        result
+        result.map(|_| Reply::Now)
     }
 }
 
@@ -1556,10 +1577,10 @@ unsafe fn device_write_inband(
 /// # Safety
 ///
 /// `ior` must be a live request from [`io_req_alloc()`].
-pub(crate) unsafe fn device_write_dealloc(ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn device_write_dealloc(ior: *mut IoReq) -> bool {
     unsafe {
         if (*ior).alloc_size == 0 {
-            return c_int::from(true);
+            return true;
         }
 
         if (*ior).op & IO_INBAND != 0 {
@@ -1567,12 +1588,12 @@ pub(crate) unsafe fn device_write_dealloc(ior: *mut IoReq) -> c_int {
                 ptr::addr_of_mut!(IO_INBAND_CACHE),
                 (*ior).data.addr(),
             );
-            return c_int::from(true);
+            return true;
         }
 
         let io_copy = (*ior).copy;
         if io_copy.is_null() {
-            return c_int::from(true);
+            return true;
         }
 
         vm_kern::kmem_io_map_deallocate(
@@ -1585,32 +1606,31 @@ pub(crate) unsafe fn device_write_dealloc(ior: *mut IoReq) -> c_int {
         if VmMapCopy::has_cont(NonNull::new_unchecked(io_copy)) {
             let size_to_do =
                 (*io_copy).size.wrapping_sub((*ior).count as VmSize);
-            let result;
-            if (*ior).error == 0 {
-                let invoked =
+            let continued = if (*ior).error.is_ok() {
+                let (result, next) =
                     VmMapCopy::invoke_cont(NonNull::new_unchecked(io_copy));
-                result = invoked.0;
-                new_copy = invoked.1;
+                new_copy = next;
+                result.is_ok()
             } else {
                 VmMapCopy::abort_cont(NonNull::new_unchecked(io_copy));
-                result = KERN_FAILURE;
-            }
+                false
+            };
 
-            if result == KERN_SUCCESS && !new_copy.is_null() {
+            if continued && !new_copy.is_null() {
                 (*ior).op &= !IO_DONE;
                 (*ior).op |= IO_CALL;
 
                 let device = (*ior).device.cast::<MachDevice>();
                 let mut bsize: c_int = 0;
                 let d_dev_info = (*(*device).dev_ops).d_dev_info;
-                let res = d_dev_info.map_or(KERN_FAILURE, |d_dev_info| {
+                let res = d_dev_info.map(|d_dev_info| {
                     d_dev_info(
                         driver_unit((*device).dev_number),
                         D_INFO_BLOCK_SIZE,
                         &raw mut bsize,
                     )
                 });
-                if res != D_SUCCESS {
+                if res != Some(Ok(())) {
                     kpanic!(
                         "device_write_dealloc",
                         "device_write_dealloc: No block size"
@@ -1631,7 +1651,7 @@ pub(crate) unsafe fn device_write_dealloc(ior: *mut IoReq) -> c_int {
         (*ior).copy = ptr::null_mut();
         (*ior).data = new_copy.cast::<c_char>();
 
-        c_int::from(new_copy.is_null())
+        new_copy.is_null()
     }
 }
 
@@ -1640,35 +1660,36 @@ pub(crate) unsafe fn device_write_dealloc(ior: *mut IoReq) -> c_int {
 /// # Safety
 ///
 /// `ior` must be the live write request [`device_write()`] queued.
-pub(crate) unsafe fn ds_write_done(ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn ds_write_done(ior: *mut IoReq) -> bool {
     unsafe {
         loop {
-            if device_write_dealloc(ior) != 0 {
+            if device_write_dealloc(ior) {
                 break;
             }
 
             let device = (*ior).device.cast::<MachDevice>();
             let d_write = (*(*device).dev_ops).d_write;
-            let result = d_write.map_or(D_SUCCESS, |d_write| {
-                d_write(driver_unit((*device).dev_number), ior)
-            });
+            let result = d_write
+                .map_or(Ok(DeviceSuccess::Success), |d_write| {
+                    d_write(driver_unit((*device).dev_number), ior)
+                });
 
-            if result == D_IO_QUEUED {
-                return c_int::from(false);
+            if result == Ok(DeviceSuccess::IoQueued) {
+                return false;
             }
         }
 
         if IpcPort::valid((*ior).reply_port).is_some() {
             let bytes = ((*ior).total - (*ior).residual) as c_int;
             if (*ior).op & IO_INBAND != 0 {
-                glue::ds_device_write_reply_inband(
+                let _ = mig::ds_device_write_reply_inband(
                     (*ior).reply_port,
                     (*ior).reply_port_type,
                     (*ior).error,
                     bytes,
                 );
             } else {
-                glue::ds_device_write_reply(
+                let _ = mig::ds_device_write_reply(
                     (*ior).reply_port,
                     (*ior).reply_port_type,
                     (*ior).error,
@@ -1679,7 +1700,7 @@ pub(crate) unsafe fn ds_write_done(ior: *mut IoReq) -> c_int {
         dev_lookup::deallocate((*ior).device.cast::<MachDevice>());
     }
 
-    c_int::from(true)
+    true
 }
 
 /// `device_read()` of `device/ds_routines.c`.
@@ -1698,17 +1719,17 @@ unsafe fn device_read(
     bytes_wanted: c_int,
     _data: *mut *mut c_char,
     _data_count: *mut c_uint,
-) -> c_int {
+) -> ReplyResult {
     let device = dev.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         if IpcPort::valid(reply_port).is_none() {
             kprint!("ds_* invalid reply port\n");
             soft_debugger(c"ds_* reply_port".as_ptr());
-            return MIG_NO_REPLY;
+            return Ok(Reply::Withheld);
         }
 
         let Some(ior) = io_req_alloc(IoReq {
@@ -1724,26 +1745,27 @@ unsafe fn device_read(
             ..IoReq::new()
         })
         .map(KBox::into_raw) else {
-            return Err(DeviceError::NoMemory).as_io_return();
+            return Err(DeviceError::NoMemory);
         };
 
         dev_lookup::reference(device);
 
         let d_read = (*(*device).dev_ops).d_read;
-        let result = d_read.map_or(D_SUCCESS, |d_read| {
+        let result = d_read.map_or(Ok(DeviceSuccess::Success), |d_read| {
             d_read(driver_unit((*device).dev_number), ior)
         });
 
-        if result == D_IO_QUEUED {
-            return MIG_NO_REPLY;
-        }
-
-        (*ior).error = result;
-        ds_read_done(ior);
+        (*ior).error = match result {
+            Ok(DeviceSuccess::IoQueued) => return Ok(Reply::Withheld),
+            Ok(DeviceSuccess::Success) => Ok(()),
+            Err(error) => Err(error),
+        };
+        // The completion sends the reply.
+        let _ = ds_read_done(ior);
         io_req_free(ior);
     }
 
-    MIG_NO_REPLY
+    Ok(Reply::Withheld)
 }
 
 /// `device_read_inband()` of `device/ds_routines.c`.
@@ -1762,17 +1784,17 @@ unsafe fn device_read_inband(
     bytes_wanted: c_int,
     _data: *mut c_char,
     _data_count: *mut c_uint,
-) -> c_int {
+) -> ReplyResult {
     let device = dev.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         if IpcPort::valid(reply_port).is_none() {
             kprint!("ds_* invalid reply port\n");
             soft_debugger(c"ds_* reply_port".as_ptr());
-            return MIG_NO_REPLY;
+            return Ok(Reply::Withheld);
         }
 
         // The C compared the int against the `size_t` array bound, so a
@@ -1796,26 +1818,27 @@ unsafe fn device_read_inband(
             ..IoReq::new()
         })
         .map(KBox::into_raw) else {
-            return Err(DeviceError::NoMemory).as_io_return();
+            return Err(DeviceError::NoMemory);
         };
 
         dev_lookup::reference(device);
 
         let d_read = (*(*device).dev_ops).d_read;
-        let result = d_read.map_or(D_SUCCESS, |d_read| {
+        let result = d_read.map_or(Ok(DeviceSuccess::Success), |d_read| {
             d_read(driver_unit((*device).dev_number), ior)
         });
 
-        if result == D_IO_QUEUED {
-            return MIG_NO_REPLY;
-        }
-
-        (*ior).error = result;
-        ds_read_done(ior);
+        (*ior).error = match result {
+            Ok(DeviceSuccess::IoQueued) => return Ok(Reply::Withheld),
+            Ok(DeviceSuccess::Success) => Ok(()),
+            Err(error) => Err(error),
+        };
+        // The completion sends the reply.
+        let _ = ds_read_done(ior);
         io_req_free(ior);
     }
 
-    MIG_NO_REPLY
+    Ok(Reply::Withheld)
 }
 
 /// `device_read_alloc()` of `device/ds_routines.c`.
@@ -1826,10 +1849,10 @@ unsafe fn device_read_inband(
 pub(crate) unsafe fn device_read_alloc(
     ior: *mut IoReq,
     size: VmSize,
-) -> c_int {
+) -> Result<(), DeviceError> {
     unsafe {
         if (*ior).count == 0 {
-            return KERN_SUCCESS;
+            return Ok(());
         }
 
         if (*ior).op & IO_INBAND != 0 {
@@ -1840,16 +1863,14 @@ pub(crate) unsafe fn device_read_alloc(
             let size = round_page(size);
             // SAFETY: the kernel map is live.
             let map = NonNull::new_unchecked(KERNEL_MAP.cast::<VmMap>());
-            let addr = match vm_kern::kmem_alloc(map, size) {
-                Ok(addr) => addr,
-                Err(error) => return error.as_kern_return(),
-            };
+            let addr =
+                vm_kern::kmem_alloc(map, size).map_err(DeviceError::Vm)?;
 
             (*ior).data = ptr::with_exposed_provenance_mut::<c_char>(addr);
             (*ior).alloc_size = size;
         }
 
-        KERN_SUCCESS
+        Ok(())
     }
 }
 
@@ -1859,10 +1880,10 @@ pub(crate) unsafe fn device_read_alloc(
 ///
 /// `ior` must be the live read request [`device_read()`] or
 /// [`device_read_inband()`] queued.
-pub(crate) unsafe fn ds_read_done(ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn ds_read_done(ior: *mut IoReq) -> bool {
     unsafe {
         let inband = (*ior).op & IO_INBAND != 0;
-        let size_read = if (*ior).error != 0 {
+        let size_read = if (*ior).error.is_err() {
             0
         } else {
             (*ior).count.wrapping_sub((*ior).residual) as VmSize
@@ -1900,7 +1921,7 @@ pub(crate) unsafe fn ds_read_done(ior: *mut IoReq) -> c_int {
         }
 
         if inband {
-            glue::ds_device_read_reply_inband(
+            let _ = mig::ds_device_read_reply_inband(
                 (*ior).reply_port,
                 (*ior).reply_port_type,
                 (*ior).error,
@@ -1908,24 +1929,19 @@ pub(crate) unsafe fn ds_read_done(ior: *mut IoReq) -> c_int {
                 size_read as c_uint,
             );
         } else {
-            let mut copy: *mut VmMapCopy = ptr::null_mut();
-            let kr = crate::vm::vm_map::vm_map_copyin_page_list(
-                KERNEL_MAP.cast::<VmMap>(),
-                start_data,
-                size_read,
-                1,
-                1,
-                &raw mut copy,
-                0,
-            );
-            if kr != KERN_SUCCESS {
-                kpanic!(
-                    "ds_read_done",
-                    "read_done: vm_map_copyin_page_list failed"
+            let copy = (*KERNEL_MAP.cast::<VmMap>())
+                .copyin_page_list(start_data, size_read, true, true, false)
+                .map_or_else(
+                    |_| {
+                        kpanic!(
+                            "ds_read_done",
+                            "read_done: vm_map_copyin_page_list failed"
+                        )
+                    },
+                    |copy| copy.map_or(ptr::null_mut(), NonNull::as_ptr),
                 );
-            }
 
-            glue::ds_device_read_reply(
+            let _ = mig::ds_device_read_reply(
                 (*ior).reply_port,
                 (*ior).reply_port_type,
                 (*ior).error,
@@ -1960,7 +1976,7 @@ pub(crate) unsafe fn ds_read_done(ior: *mut IoReq) -> c_int {
         dev_lookup::deallocate((*ior).device.cast::<MachDevice>());
     }
 
-    c_int::from(true)
+    true
 }
 
 /// `device_set_status()` of `device/ds_routines.c`.
@@ -1973,16 +1989,16 @@ unsafe fn device_set_status(
     flavor: c_uint,
     status: *mut c_int,
     status_count: c_uint,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let device = dev.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         let d_setstat = (*(*device).dev_ops).d_setstat;
         d_setstat.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |d_setstat| {
                 d_setstat(
                     driver_unit((*device).dev_number),
@@ -2005,16 +2021,16 @@ unsafe fn mach_device_get_status(
     flavor: c_uint,
     status: *mut c_int,
     status_count: *mut c_uint,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let device = dev.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         let d_getstat = (*(*device).dev_ops).d_getstat;
         d_getstat.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |d_getstat| {
                 d_getstat(
                     driver_unit((*device).dev_number),
@@ -2039,20 +2055,20 @@ unsafe fn device_set_filter(
     priority: c_int,
     filter: *mut c_ushort,
     filter_count: c_uint,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let device = dev.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         if IpcPort::valid(receive_port).is_none() {
-            return Err(DeviceError::InvalidOperation).as_io_return();
+            return Err(DeviceError::InvalidOperation);
         }
 
         let d_async_in = (*(*device).dev_ops).d_async_in;
         d_async_in.map_or_else(
-            || Err(DeviceError::InvalidOperation).as_io_return(),
+            || Err(DeviceError::InvalidOperation),
             |d_async_in| {
                 d_async_in(
                     driver_unit((*device).dev_number),
@@ -2081,24 +2097,21 @@ unsafe fn device_map(
     _size: VmSize,
     pager: *mut *mut c_void,
     _unmap: c_int,
-) -> c_int {
+) -> Result<(), DeviceError> {
     let device = dev.cast::<MachDevice>();
     unsafe {
         if protection & !VmProt::ALL.bits() != 0 {
-            return KERN_INVALID_ARGUMENT;
+            return Err(DeviceError::InvalidArgument);
         }
 
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
-        match crate::device::dev_pager::setup(device, protection, offset) {
-            Ok(port) => {
-                *pager = port.as_ptr();
-                KERN_SUCCESS
-            }
-            Err(error) => error.code(),
-        }
+        let port =
+            crate::device::dev_pager::setup(device, protection, offset)?;
+        *pager = port.as_ptr();
+        Ok(())
     }
 }
 
@@ -2179,13 +2192,9 @@ unsafe extern "C" fn io_done_thread_continue() {
                     unsafe { spl::splx(s) };
                     let ior = ptr::from_mut(entry);
                     // SAFETY: every list entry is a live request.
-                    let finished = unsafe {
-                        (*ior).done.map_or_else(
-                            || c_int::from(true),
-                            |done| done(ior),
-                        )
-                    };
-                    if finished != 0 {
+                    let finished =
+                        unsafe { (*ior).done.is_none_or(|done| done(ior)) };
+                    if finished {
                         // SAFETY: the completion released the request.
                         unsafe { io_req_free(ior) };
                     }
@@ -2289,7 +2298,7 @@ unsafe fn ds_trap_req_alloc(
 /// # Safety
 ///
 /// `ior` must be the live trap request [`device_write_trap()`] built.
-unsafe fn ds_trap_write_done(ior: *mut IoReq) -> c_int {
+unsafe fn ds_trap_write_done(ior: *mut IoReq) -> bool {
     unsafe {
         let dev = (*ior).device;
 
@@ -2297,7 +2306,7 @@ unsafe fn ds_trap_write_done(ior: *mut IoReq) -> c_int {
         dev_lookup::deallocate(dev.cast::<MachDevice>());
     }
 
-    c_int::from(true)
+    true
 }
 
 /// `device_write_trap()` of `device/ds_routines.c`.
@@ -2312,20 +2321,20 @@ unsafe fn device_write_trap(
     recnum: c_ulong,
     data: c_ulong,
     data_count: c_ulong,
-) -> c_int {
+) -> ReplyResult {
     let device = device.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         if data_count > IOTRAP_DATA_MAX as c_ulong {
-            return Err(DeviceError::InvalidSize).as_io_return();
+            return Err(DeviceError::InvalidSize);
         }
 
         let ior = ds_trap_req_alloc(device, data_count as VmSize);
         if ior.is_null() {
-            return Err(DeviceError::NoMemory).as_io_return();
+            return Err(DeviceError::NoMemory);
         }
         ior.write(IoReq {
             device: device.cast::<c_void>(),
@@ -2341,7 +2350,7 @@ unsafe fn device_write_trap(
         });
 
         if data_count > 0 {
-            user_access::copyin(
+            let _ = user_access::copyin(
                 ptr::with_exposed_provenance::<c_void>(data as usize),
                 (*ior).data.cast::<c_void>(),
                 data_count as usize,
@@ -2351,18 +2360,18 @@ unsafe fn device_write_trap(
         dev_lookup::reference(device);
 
         let d_write = (*(*device).dev_ops).d_write;
-        let result = d_write.map_or(D_SUCCESS, |d_write| {
+        let result = d_write.map_or(Ok(DeviceSuccess::Success), |d_write| {
             d_write(driver_unit((*device).dev_number), ior)
         });
 
-        if result == D_IO_QUEUED {
-            return MIG_NO_REPLY;
+        if result == Ok(DeviceSuccess::IoQueued) {
+            return Ok(Reply::Withheld);
         }
 
         dev_lookup::deallocate(device);
 
         kmem_cache_free(ptr::addr_of_mut!(IO_TRAP_CACHE), ior.addr());
-        result
+        result.map(|_| Reply::Now)
     }
 }
 
@@ -2378,15 +2387,15 @@ unsafe fn device_writev_trap(
     recnum: c_ulong,
     iovec: *mut RpcIoBufVec,
     iocount: c_ulong,
-) -> c_int {
+) -> ReplyResult {
     let device = device.cast::<MachDevice>();
     unsafe {
         if (*device).state != DEV_STATE_OPEN {
-            return Err(DeviceError::NoSuchDevice).as_io_return();
+            return Err(DeviceError::NoSuchDevice);
         }
 
         if iocount > MAX_IOVECS as c_ulong {
-            return KERN_INVALID_VALUE;
+            return Err(DeviceError::InvalidValue);
         }
         let iocount = iocount as usize;
 
@@ -2399,8 +2408,8 @@ unsafe fn device_writev_trap(
                 ptr::addr_of_mut!(riov).cast::<c_void>(),
                 size_of::<RpcIoBufVec>(),
             );
-            if kr != 0 {
-                return KERN_INVALID_ARGUMENT;
+            if kr.is_err() {
+                return Err(DeviceError::InvalidArgument);
             }
             *slot = IoBufVec {
                 data: riov.data as VmOffset,
@@ -2408,13 +2417,13 @@ unsafe fn device_writev_trap(
             };
             data_count = match data_count.checked_add(slot.count) {
                 Some(total) if total <= IOTRAP_DATA_MAX => total,
-                _ => return Err(DeviceError::InvalidSize).as_io_return(),
+                _ => return Err(DeviceError::InvalidSize),
             };
         }
 
         let ior = ds_trap_req_alloc(device, data_count);
         if ior.is_null() {
-            return Err(DeviceError::NoMemory).as_io_return();
+            return Err(DeviceError::NoMemory);
         }
         ior.write(IoReq {
             device: device.cast::<c_void>(),
@@ -2432,7 +2441,7 @@ unsafe fn device_writev_trap(
         if data_count > 0 {
             let mut p = (*ior).data;
             for iovec in stack_iovec.iter().take(iocount) {
-                user_access::copyin(
+                let _ = user_access::copyin(
                     ptr::with_exposed_provenance::<c_void>(iovec.data),
                     p.cast::<c_void>(),
                     iovec.count,
@@ -2444,17 +2453,17 @@ unsafe fn device_writev_trap(
         dev_lookup::reference(device);
 
         let d_write = (*(*device).dev_ops).d_write;
-        let result = d_write.map_or(D_SUCCESS, |d_write| {
+        let result = d_write.map_or(Ok(DeviceSuccess::Success), |d_write| {
             d_write(driver_unit((*device).dev_number), ior)
         });
 
-        if result == D_IO_QUEUED {
-            return MIG_NO_REPLY;
+        if result == Ok(DeviceSuccess::IoQueued) {
+            return Ok(Reply::Withheld);
         }
 
         dev_lookup::deallocate(device);
 
         kmem_cache_free(ptr::addr_of_mut!(IO_TRAP_CACHE), ior.addr());
-        result
+        result.map(|_| Reply::Now)
     }
 }

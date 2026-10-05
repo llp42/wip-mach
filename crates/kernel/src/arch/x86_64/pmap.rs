@@ -18,7 +18,7 @@ use crate::arch::types::{AtomicVmOffset, VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
 use crate::arch::x86_64::biosmem;
 use crate::arch::x86_64::locore;
-use crate::arch::x86_64::model_dep::init_alloc_aligned;
+use crate::arch::x86_64::model_dep::alloc_aligned;
 use crate::arch::x86_64::model_dep::pmap_grab_page;
 use crate::arch::x86_64::mp_desc::interrupt_processor;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
@@ -26,7 +26,6 @@ use crate::arch::x86_64::phys::kvtophys;
 use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::spl;
 use crate::config::MAX_NCPUS;
-use crate::glue;
 use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
 use crate::kern::lock::{LockData, SimpleLock};
@@ -34,6 +33,7 @@ use crate::kern::machine::slot as machine_slot;
 use crate::kern::slab::{CacheInitFlags, KmemCache};
 use crate::kern::smp::CpuId;
 use crate::kern::thread::Thread;
+use crate::mig;
 use crate::utils::cell::SyncCell;
 use crate::vm::types::VmProt;
 use crate::vm::vm_kern::{self, KERNEL_MAP, VM_MIN_KERNEL_ADDRESS};
@@ -1053,10 +1053,8 @@ fn bootstrap_pae() {
     // SAFETY: the freshly grabbed page is the kernel's to clear.
     unsafe { ptr::write_bytes(l4.cast::<u8>(), 0, PAGE_SIZE) };
 
-    let mut addr: VmOffset = 0;
-    // SAFETY: `init_alloc_aligned()` either fills `addr` or halts the boot,
-    // and this runs single-threaded with mapping off.
-    unsafe { init_alloc_aligned(PDPNUM_KERNEL * PAGE_SIZE, &raw mut addr) };
+    // The C carried on with address zero when the boot allocator was empty.
+    let addr = alloc_aligned(PDPNUM_KERNEL * PAGE_SIZE).unwrap_or(0);
     let page_dir = with_exposed_provenance_mut::<VmOffset>(phystokv(addr));
     KERNEL_PAGE_DIR.store(page_dir, Ordering::Relaxed);
     // SAFETY: the boot allocator returned this page for the kernel directory;
@@ -1119,8 +1117,8 @@ pub(crate) fn pmap_bootstrap() {
     } else {
         0
     };
-    let image_start = ptr::addr_of!(glue::_start).addr();
-    let image_end = ptr::addr_of!(glue::etext).addr();
+    let image_start = ptr::addr_of!(mig::_start).addr();
+    let image_end = ptr::addr_of!(mig::etext).addr();
     let directmap_end = phystokv(biosmem::directmap_end());
     // SAFETY: the kernel directory is live from `bootstrap_pae()` above, and
     // the physical memory it maps is the machine's RAM.
@@ -2621,8 +2619,8 @@ pub(crate) unsafe fn pmap_clear_modify(phys: VmOffset) {
 ///
 /// `phys` must be a physical address the kernel may map, as the C's callers
 /// guaranteed.
-pub(crate) unsafe fn pmap_is_modified(phys: VmOffset) -> c_int {
-    c_int::from(unsafe { attribute_test(phys, c_int::from(PHYS_MODIFIED)) })
+pub(crate) unsafe fn pmap_is_modified(phys: VmOffset) -> bool {
+    unsafe { attribute_test(phys, c_int::from(PHYS_MODIFIED)) }
 }
 
 /// `pmap_clear_reference()` of <vm/pmap.h>: clear the reference bits of a
@@ -2642,8 +2640,8 @@ pub(crate) unsafe fn pmap_clear_reference(phys: VmOffset) {
 ///
 /// `phys` must be a physical address the kernel may map, as the C's callers
 /// guaranteed.
-pub(crate) unsafe fn pmap_is_referenced(phys: VmOffset) -> c_int {
-    c_int::from(unsafe { attribute_test(phys, c_int::from(PHYS_REFERENCED)) })
+pub(crate) unsafe fn pmap_is_referenced(phys: VmOffset) -> bool {
+    unsafe { attribute_test(phys, c_int::from(PHYS_REFERENCED)) }
 }
 
 /// `__builtin_ffs()`: the one-based index of the lowest set bit, or zero.

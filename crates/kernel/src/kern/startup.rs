@@ -110,7 +110,7 @@ pub(crate) unsafe fn setup_main() {
             Thread::create(kernel_task()).unwrap_or(ptr::null_mut());
         let _ = Thread::set_name(startup_thread, c"startup".as_ptr());
         (*startup_thread).start(Some(start_kernel_threads));
-        thread_swap::thread_doswapin(startup_thread);
+        thread_swap::doswapin(startup_thread);
 
         (*startup_thread).set_state((*startup_thread).state() | TH_RUN);
         let _ = Thread::resume(startup_thread);
@@ -143,7 +143,7 @@ pub(crate) unsafe extern "C" fn start_kernel_threads() {
             let _ = Thread::set_name(th, name.as_ptr());
             sched_prim::thread_bind(th, processor_at(cpu).as_ptr());
             (*th).start(Some(sched_prim::idle_thread_entry));
-            thread_swap::thread_doswapin(th);
+            thread_swap::doswapin(th);
             let _ = Thread::resume(th);
         }
     }
@@ -210,9 +210,7 @@ pub(crate) unsafe extern "C" fn start_kernel_threads() {
 ///
 /// Runs on a CPU that is taking its first thread, with no thread of its own
 /// yet.
-pub(crate) unsafe extern "C" fn cpu_launch_first_thread(
-    mut th: *mut Thread,
-) -> ! {
+pub(crate) unsafe fn cpu_launch_first_thread(mut th: *mut Thread) -> ! {
     let mycpu = cpu_id();
     // The C `machine` and `pmap` routines take the CPU number as an `int`.
     let cpu = mycpu.bits() as c_int;

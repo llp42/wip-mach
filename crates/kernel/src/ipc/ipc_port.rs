@@ -8,14 +8,15 @@
 //! The port manipulation routines, which `ipc/ipc_port.c` used to define and
 //! `ipc/ipc_port.h` declares.
 
-use crate::ipc::ipc_kmsg::{self, MsgReturn};
+use crate::ipc::error::Error;
+use crate::ipc::ipc_kmsg;
 use crate::ipc::ipc_mqueue;
 use crate::ipc::ipc_notify;
 use crate::ipc::ipc_object;
 use crate::ipc::ipc_pset;
 use crate::ipc::ipc_table::{self, IPC_PORT_REQUEST_SIZE, IpcTableSize};
 use crate::ipc::ipc_target;
-use crate::ipc::ipc_thread;
+use crate::ipc::ipc_thread::{self, IpcWait};
 use crate::ipc::{
     IOT_PORT, IpcMqueue, IpcPort, IpcPortRequest, IpcSpace, IpcTarget,
 };
@@ -23,8 +24,7 @@ use crate::kern::debug::kpanic;
 use crate::kern::ipc_sched;
 use crate::kern::lock::SimpleLock;
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
-use core::ffi::{c_int, c_uint, c_void};
+use core::ffi::{c_uint, c_void};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -59,8 +59,6 @@ const MACH_PORT_NAME_DEAD: c_uint = c_uint::MAX;
 /// `MACH_MSG_TYPE_PORT_SEND` of <mach/message.h>, an alias of
 /// `MACH_MSG_TYPE_MOVE_SEND`.
 const MACH_MSG_TYPE_PORT_SEND: c_uint = 17;
-/// `MACH_MSG_SUCCESS` of <mach/message.h>.
-const MACH_MSG_SUCCESS: c_int = 0;
 /// `IKOT_NONE` of <`kern/ipc_kobject.h>`: the type of a port bound to no kernel
 /// object.
 const IKOT_NONE: c_uint = 0;
@@ -87,7 +85,7 @@ pub(crate) fn init_static_locks() {
 }
 
 /// `ipc_port_alloc()` in C.
-pub(crate) fn alloc(space: IpcSpace) -> Result<(c_uint, IpcPort), KernError> {
+pub(crate) fn alloc(space: IpcSpace) -> Result<(c_uint, IpcPort), Error> {
     // SAFETY: the caller promises a live space; a successful allocation
     // returns the object locked, which `init` needs and keeps.
     let (name, port) = unsafe {
@@ -108,7 +106,7 @@ pub(crate) fn alloc(space: IpcSpace) -> Result<(c_uint, IpcPort), KernError> {
 pub(crate) fn alloc_name(
     space: IpcSpace,
     name: c_uint,
-) -> Result<IpcPort, KernError> {
+) -> Result<IpcPort, Error> {
     // SAFETY: the caller promises a live space; a successful allocation
     // returns the object locked, which `init` needs and keeps.
     let port = unsafe {
@@ -163,17 +161,17 @@ pub(crate) unsafe fn dnrequest(
     port: IpcPort,
     name: c_uint,
     soright: NonNull<c_void>,
-) -> Result<c_uint, KernError> {
+) -> Result<c_uint, Error> {
     let table = unsafe { port.dnrequests() };
     let Some(table) = NonNull::new(table) else {
-        return Err(KernError::NoSpace);
+        return Err(Error::NoSpace);
     };
 
     // SAFETY: a non-null dnrequests table is live, and element zero holds its
     // free-list head.
     let index = unsafe { (*table.as_ptr()).next() };
     if index == 0 {
-        return Err(KernError::NoSpace);
+        return Err(Error::NoSpace);
     }
 
     // SAFETY: the free list only names free elements of the table, so `index`
@@ -194,7 +192,7 @@ pub(crate) unsafe fn dnrequest(
 ///
 /// `port` must be live and locked on entry and unlocked on return, and the
 /// caller must hold a reference.
-pub(crate) unsafe fn dngrow(port: IpcPort) -> Result<(), KernError> {
+pub(crate) unsafe fn dngrow(port: IpcPort) -> Result<(), Error> {
     let old = unsafe { port.dnrequests() };
     // SAFETY: `ipc_table_dnrequests` is the table `ipc_table_init()` built,
     // whose last entry is the zero terminator.  `ipr_size + 1` is the next
@@ -217,11 +215,11 @@ pub(crate) unsafe fn dngrow(port: IpcPort) -> Result<(), KernError> {
         // SAFETY: the port is live and unlocked; this consumes the reference
         // taken above.
         unsafe { port.release() };
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     }
     let Some(new) = dnrequests_alloc(its) else {
         unsafe { port.release() };
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     unsafe {
@@ -396,7 +394,7 @@ pub(crate) unsafe fn set_qlimit(port: IpcPort, qlimit: c_uint) {
             let sender = sender.cast::<Thread>();
             // SAFETY: the queue holds live threads.
             unsafe {
-                (*sender).ith_state = MACH_MSG_SUCCESS;
+                (*sender).ith_state = IpcWait::Done;
             }
             // SAFETY: the sender is live and not locked.
             unsafe { ipc_sched::thread_go(sender) };
@@ -499,7 +497,7 @@ pub(crate) unsafe fn clear_receiver(port: IpcPort) {
         let mqueue = unsafe { port.messages() };
         unsafe {
             (*mqueue).lock();
-            ipc_mqueue::changed(mqueue, MsgReturn::RCV_PORT_DIED);
+            ipc_mqueue::changed(mqueue, IpcWait::PortDied);
             (*mqueue).unlock();
         }
     } else {
@@ -589,7 +587,7 @@ pub(crate) unsafe fn destroy(port: IpcPort) {
 
             let sender = sender.cast::<Thread>();
             // SAFETY: the queue holds live threads.
-            (*sender).ith_state = MACH_MSG_SUCCESS;
+            (*sender).ith_state = IpcWait::Done;
             // SAFETY: the sender is live and not locked.
             ipc_sched::thread_go(sender);
         }
@@ -852,7 +850,7 @@ pub(crate) unsafe fn copyout_send(
                     // right, which it released.
                     unsafe { release_send(sright) };
 
-                    if error == KernError::InvalidCapability {
+                    if error == Error::InvalidCapability {
                         MACH_PORT_NAME_DEAD
                     } else {
                         MACH_PORT_NULL

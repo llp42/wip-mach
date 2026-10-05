@@ -653,7 +653,8 @@ pub(crate) unsafe fn clear_wait(
     unsafe { spl::splx(s) };
 }
 
-/// `thread_wakeup_prim()` of `kern/sched_prim.c`.
+/// `thread_wakeup_prim()` of `kern/sched_prim.c`: wake the threads waiting
+/// on `event`, and return whether there was one.
 ///
 /// # Safety
 ///
@@ -664,7 +665,7 @@ pub(crate) unsafe fn thread_wakeup_prim(
     event: *mut c_void,
     one_thread: c_int,
     result: c_int,
-) -> c_int {
+) -> bool {
     let index = wait_hash(event);
     let q = wait_queue(index);
     // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>;
@@ -725,7 +726,7 @@ pub(crate) unsafe fn thread_wakeup_prim(
     }
     // SAFETY: `s` is the level `splsched()` returned.
     unsafe { spl::splx(s) };
-    c_int::from(woke)
+    woke
 }
 
 /// `thread_sleep()` of `kern/sched_prim.c`.

@@ -30,6 +30,7 @@ mod x86_64 {
         CR0_AM, CR0_CD, CR0_EM, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG,
         CR0_TS, CR0_WP, CR4_PAE,
     };
+    use crate::arch::x86_64::mp_desc::cpu_ap_main;
     use crate::arch::x86_64::pcb::{
         MSR_REG_EFER, MSR_REG_EFER_LONG_MODE_EN, MSR_REG_GSBASE,
         MSR_REG_KGSBASE,
@@ -261,7 +262,7 @@ mod x86_64 {
         "andq $-16, %rsp",
         "pushq $0",
         "popfq",
-        "call cpu_ap_main - {kernel_base}",
+        "call {cpu_ap_main} - {kernel_base}",
         "3:",
         "hlt",
         "jmp 3b",
@@ -356,6 +357,7 @@ mod x86_64 {
         gdt64_descr_limit = const GDT64_DESCR_LIMIT,
         boot_gdt64_code = const BOOT_GDT64_CODE,
         boot_gdt64_data = const BOOT_GDT64_DATA,
+        cpu_ap_main = sym cpu_ap_main,
         options(att_syntax),
     );
 }

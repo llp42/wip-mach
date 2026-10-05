@@ -14,6 +14,7 @@ use core::ptr::{self, NonNull};
 use kmem::RadixTree;
 
 pub mod copy_user;
+pub mod error;
 pub mod ipc_entry;
 pub mod ipc_init;
 pub mod ipc_kmsg;
@@ -22,7 +23,6 @@ pub mod ipc_mqueue;
 pub mod ipc_notify;
 pub mod ipc_object;
 pub mod ipc_port;
-pub mod ipc_port_ffi;
 pub mod ipc_pset;
 pub mod ipc_right;
 pub mod ipc_space;

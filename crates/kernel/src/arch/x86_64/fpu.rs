@@ -18,6 +18,7 @@
 
 use crate::arch::types::VmSize;
 use crate::arch::x86_64::ast::I386_FP;
+use crate::arch::x86_64::error::Error;
 use crate::arch::x86_64::locore;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::arch::x86_64::spl;
@@ -27,7 +28,6 @@ use crate::kern::debug::kpanic;
 use crate::kern::machine;
 use crate::kern::slab::{CacheInitFlags, KmemCache};
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
 use core::ffi::{c_int, c_long, c_uint, c_ushort, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
@@ -1092,9 +1092,9 @@ pub(crate) unsafe fn fpu_set_state(
     thread: *mut Thread,
     state: *mut c_void,
     flavor: c_int,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if fp_kind() == FpKind::No {
-        return Err(KernError::Failure);
+        return Err(Error::NoFpu);
     }
 
     let xfstate = state.cast::<I386XfloatState>();
@@ -1103,7 +1103,7 @@ pub(crate) unsafe fn fpu_set_state(
         && unsafe { FpSaveKind::from_int((*xfstate).fp_save_kind) }
             != Some(save_kind())
     {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let fstate = state.cast::<I386FloatState>();
@@ -1442,12 +1442,12 @@ pub(crate) unsafe fn fpu_get_state(
     thread: *mut Thread,
     state: *mut c_void,
     flavor: c_int,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if fp_kind() == FpKind::No {
-        return Err(KernError::Failure);
+        return Err(Error::NoFpu);
     }
     if flavor != I386_FLOAT_STATE && save_kind() == FpSaveKind::FnSave {
-        return Err(KernError::Failure);
+        return Err(Error::NoFpu);
     }
 
     let pcb = unsafe { (*thread).pcb };

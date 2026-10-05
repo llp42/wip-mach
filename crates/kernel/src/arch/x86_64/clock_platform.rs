@@ -6,8 +6,8 @@
 
 use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::{apic, rtc, spl};
-use crate::glue::time_value::{MappedTimeValue, TimeValue64};
 use crate::kern::debug::kpanic;
+use crate::mig::time_value::{MappedTimeValue, TimeValue64};
 use crate::vm::vm_kern::{self, KERNEL_MAP};
 use clock::{
     Calendar, Clock, HashedWheel, Instant, Locking, Ticks, TimeCounter,
@@ -34,8 +34,8 @@ impl TimeCounter for MachPlatform {
 
 impl Calendar for MachPlatform {
     fn set_rtc(&self, seconds: i64) {
-        // SAFETY: `writetodc_seconds` takes the epoch count the RTC wants.
-        let _ = unsafe { rtc::writetodc_seconds(seconds) };
+        // A clock that cannot keep the time keeps the old one.
+        let _ = rtc::write_todc(seconds);
     }
 }
 

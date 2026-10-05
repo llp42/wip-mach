@@ -7,13 +7,13 @@
 //! `mach_debug/mach_debug.defs` declares.
 
 use crate::arch::types::VmOffset;
+use crate::ipc::error::Error;
 use crate::ipc::ipc_init;
 use crate::ipc::ipc_marequest;
 use crate::ipc::ipc_object;
 use crate::ipc::ipc_right;
 use crate::ipc::{HashInfoBucket, IpcPort, IpcSpace};
 use crate::kern::host::Host;
-use crate::kern::types::KernError;
 use crate::vm::vm_kern::{kmem_alloc_pageable, kmem_free};
 use crate::vm::vm_map::round_page;
 use core::ffi::c_uint;
@@ -41,9 +41,9 @@ const fn as_index(count: c_uint) -> usize {
 pub(crate) unsafe fn get_srights(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<c_uint, KernError> {
+) -> Result<c_uint, Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let port = unsafe {
@@ -72,9 +72,9 @@ pub(crate) unsafe fn marequest_info(
     maxp: *mut c_uint,
     infop: *mut *mut HashInfoBucket,
     countp: *mut c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if host.is_none() {
-        return Err(KernError::InvalidHost);
+        return Err(Error::InvalidHost);
     }
 
     let initial = unsafe { *infop };
@@ -101,7 +101,7 @@ pub(crate) unsafe fn marequest_info(
         // permits an allocation.
         match unsafe { kmem_alloc_pageable(&mut *kernel_map, size) } {
             Ok(allocated) => addr = allocated,
-            Err(_) => return Err(KernError::ResourceShortage),
+            Err(_) => return Err(Error::ResourceShortage),
         }
         info = with_exposed_provenance_mut(addr);
         // The C divided the same `vm_size_t` and assigned to an
@@ -150,9 +150,9 @@ pub(crate) unsafe fn marequest_info(
 pub(crate) unsafe fn dnrequest_info(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<(c_uint, c_uint), KernError> {
+) -> Result<(c_uint, c_uint), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let port = unsafe {
@@ -196,9 +196,9 @@ pub(crate) unsafe fn dnrequest_info(
 pub(crate) unsafe fn mach_port_kernel_object(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<(c_uint, VmOffset), KernError> {
+) -> Result<(c_uint, VmOffset), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let entry = unsafe { ipc_right::lookup_write(space, name) }?;
@@ -207,7 +207,7 @@ pub(crate) unsafe fn mach_port_kernel_object(
     if unsafe { (*entry).bits() } & MACH_PORT_TYPE_SEND_RECEIVE == 0 {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // SAFETY: a typed entry names a live port.
@@ -221,7 +221,7 @@ pub(crate) unsafe fn mach_port_kernel_object(
     if !unsafe { port.is_active() } {
         // SAFETY: the port is live and locked.
         unsafe { port.unlock() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // SAFETY: the port is live and locked.

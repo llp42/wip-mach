@@ -16,7 +16,7 @@
 
 use crate::arch::x86_64::per_cpu::cpu_id;
 use crate::arch::x86_64::spl;
-use crate::ipc::ipc_kmsg::{self, Kmsg, MsgReturn, ikm_plus_overhead};
+use crate::ipc::ipc_kmsg::{self, Kmsg, ikm_plus_overhead};
 use crate::ipc::ipc_mqueue;
 use crate::ipc::ipc_port;
 use crate::ipc::{IpcPort, MachMsgHeader, MachMsgType};
@@ -1464,7 +1464,7 @@ unsafe fn deliver(nonblocking: bool) -> bool {
 
         // SAFETY: the message is live and holds the destination right.
         if unsafe { ipc_mqueue::send(queued.as_ptr(), MACH_SEND_TIMEOUT, 0) }
-            == MsgReturn::SUCCESS
+            .is_ok()
         {
             let counter = if high_priority {
                 &NET_KMSG_SEND_HIGH_HITS

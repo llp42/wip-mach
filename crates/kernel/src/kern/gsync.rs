@@ -10,6 +10,7 @@
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::user_access;
+use crate::kern::error::Error;
 use crate::kern::ipc_sched::{
     thread_will_wait, thread_will_wait_with_timeout,
 };
@@ -19,7 +20,6 @@ use crate::kern::sched_prim::{
 };
 use crate::kern::task::{Task, current_task};
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
 use crate::vm::types::{PAGE_SIZE, VmInherit, VmObject, VmProt};
 use crate::vm::vm_kern::KERNEL_MAP;
 use crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS;
@@ -169,14 +169,14 @@ fn probe(
     addr: VmOffset,
     flags: Flags,
     args: &mut VmArgs,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let mut prot = VmProt::READ;
     if flags.contains(Flags::MUTATE) {
         prot |= VmProt::WRITE;
     }
 
     let Some(mut map) = NonNull::new(map) else {
-        return Err(KernError::InvalidAddress);
+        return Err(Error::InvalidAddress);
     };
     // SAFETY: the caller's task holds the live map, and the lookup takes its
     // read lock and returns the object locked, as the C's `keep_map_locked`
@@ -194,9 +194,9 @@ fn probe(
                 (*map.as_ptr()).lock.done();
                 (*found.object).lock.unlock();
             }
-            Err(KernError::InvalidAddress)
+            Err(Error::InvalidAddress)
         }
-        Err(_) => Err(KernError::InvalidAddress),
+        Err(_) => Err(Error::InvalidAddress),
     }
 }
 
@@ -207,7 +207,7 @@ fn prepare_key(
     addr: VmOffset,
     flags: Flags,
     args: &mut VmArgs,
-) -> Result<(Key, usize), KernError> {
+) -> Result<(Key, usize), Error> {
     probe(task.map.cast::<VmMap>(), addr, flags, args)?;
     let key = if flags.contains(Flags::SHARED) {
         Key::Shared {
@@ -306,7 +306,7 @@ unsafe fn wait_compare(
     lo: c_uint,
     hi: c_uint,
     flags: Flags,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let mut equal;
     if remote {
         let paddr = temp_mapping(args, addr, VmProt::READ);
@@ -319,7 +319,7 @@ unsafe fn wait_compare(
             // SAFETY: the reference the caller added, and the failed
             // mapping took none.
             unsafe { crate::vm::vm_object::deallocate(args.object) };
-            return Err(KernError::MemoryFailure);
+            return Err(Error::MemoryFailure);
         }
 
         let offset = addr & (PAGE_SIZE - 1);
@@ -347,14 +347,15 @@ unsafe fn wait_compare(
                 (&raw mut value).cast::<c_void>(),
                 size_of::<c_uint>(),
             )
-        } != 0
+        }
+        .is_err()
         {
             // SAFETY: the two locks the lookup and the bucket took.
             unsafe {
                 (*task_map).lock.done();
                 (*bucketp).lock.unlock();
             }
-            return Err(KernError::InvalidAddress);
+            return Err(Error::InvalidAddress);
         }
 
         equal = value == lo;
@@ -366,14 +367,15 @@ unsafe fn wait_compare(
                     (&raw mut second).cast::<c_void>(),
                     size_of::<c_uint>(),
                 )
-            } != 0
+            }
+            .is_err()
             {
                 // SAFETY: the same two locks.
                 unsafe {
                     (*task_map).lock.done();
                     (*bucketp).lock.unlock();
                 }
-                return Err(KernError::InvalidAddress);
+                return Err(Error::InvalidAddress);
             }
             equal = equal && second == hi;
         }
@@ -385,7 +387,7 @@ unsafe fn wait_compare(
     if !equal {
         // SAFETY: the bucket lock taken above.
         unsafe { (*bucketp).lock.unlock() };
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
     Ok(())
 }
@@ -398,9 +400,9 @@ pub(crate) fn wait(
     hi: c_uint,
     msec: c_uint,
     flags: Flags,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if !addr.is_multiple_of(size_of::<c_int>()) {
-        return Err(KernError::InvalidAddress);
+        return Err(Error::InvalidAddress);
     }
 
     // SAFETY: the caller promises a live task, and `current_task()` reads the
@@ -500,9 +502,9 @@ pub(crate) fn wait(
     unsafe { (*bucketp).lock.unlock() };
 
     Err(if wait_result == THREAD_INTERRUPTED {
-        KernError::Interrupted
+        Error::Interrupted
     } else {
-        KernError::Timedout
+        Error::TimedOut
     })
 }
 
@@ -512,9 +514,9 @@ pub(crate) fn wake(
     addr: VmOffset,
     val: c_uint,
     flags: Flags,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if !addr.is_multiple_of(size_of::<c_int>()) {
-        return Err(KernError::InvalidAddress);
+        return Err(Error::InvalidAddress);
     }
 
     let mut args = VmArgs {
@@ -553,7 +555,7 @@ pub(crate) fn wake(
                 }
                 // SAFETY: the reference this call added.
                 unsafe { crate::vm::vm_object::deallocate(args.object) };
-                return Err(KernError::MemoryFailure);
+                return Err(Error::MemoryFailure);
             }
 
             let mapped = paddr.wrapping_add(addr & (PAGE_SIZE - 1));
@@ -577,13 +579,13 @@ pub(crate) fn wake(
                     size_of::<c_uint>(),
                 )
             };
-            if copied != 0 {
+            if copied.is_err() {
                 // SAFETY: the bucket lock and the map's read lock.
                 unsafe {
                     (*bucketp).lock.unlock();
                     (*task_map).lock.done();
                 }
-                return Err(KernError::InvalidAddress);
+                return Err(Error::InvalidAddress);
             }
         }
     }
@@ -626,7 +628,7 @@ pub(crate) fn wake(
             }
             Ok(())
         }
-        _ => Err(KernError::InvalidArgument),
+        _ => Err(Error::InvalidArgument),
     };
 
     // SAFETY: the bucket lock taken above.
@@ -718,11 +720,11 @@ pub(crate) fn requeue(
     dst: VmOffset,
     wake_one: bool,
     flags: Flags,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if !src.is_multiple_of(size_of::<c_int>())
         || !dst.is_multiple_of(size_of::<c_int>())
     {
-        return Err(KernError::InvalidAddress);
+        return Err(Error::InvalidAddress);
     }
 
     // SAFETY: the caller promises the live task.
@@ -797,7 +799,7 @@ pub(crate) fn requeue(
             }
             Ok(())
         }
-        _ => Err(KernError::InvalidArgument),
+        _ => Err(Error::InvalidArgument),
     };
 
     // SAFETY: the bucket locks taken above.

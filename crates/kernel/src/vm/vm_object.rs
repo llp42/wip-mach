@@ -14,10 +14,6 @@ use crate::arch::x86_64::mp_desc::simple_lock_pause;
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::pmap::pmap_is_modified;
 use crate::arch::x86_64::pmap::pmap_page_protect;
-use crate::glue::{
-    memory_object_copy, memory_object_create, memory_object_init,
-    memory_object_terminate,
-};
 use crate::ipc::{IpcPort, ipc_port, ipc_space};
 use crate::kern::console::kprint;
 use crate::kern::debug::{kpanic, soft_debugger};
@@ -27,10 +23,15 @@ use crate::kern::sched_prim::{
     thread_wakeup_prim,
 };
 use crate::kern::slab::{CacheInitFlags, KmemCache};
+use crate::mig::{
+    memory_object_copy, memory_object_create, memory_object_init,
+    memory_object_terminate,
+};
 use crate::utils::cell::SyncCell;
-use crate::vm::error::{Error, KERN_SUCCESS, MACH_SEND_INTERRUPTED};
+use crate::vm::error::Error;
 use crate::vm::memory_object::default_manager;
 use crate::vm::types::{Pmap, VmObject, VmObjectCachedList, VmPage, VmProt};
+use crate::vm::vm_fault::FaultError;
 use crate::vm::vm_page::{self, ListqList};
 use crate::vm::vm_pageout::vm_pageout_page;
 use crate::vm::vm_resident::VM_PAGE_FICTITIOUS_ADDR;
@@ -63,13 +64,6 @@ const IKOT_PAGING_NAME: c_uint = 16;
 const MEMORY_OBJECT_COPY_NONE: c_int = 0;
 const MEMORY_OBJECT_COPY_CALL: c_int = 1;
 const MEMORY_OBJECT_COPY_DELAY: c_int = 2;
-
-/// `VM_FAULT_*` of <`vm/vm_fault.h`>, the values `vm_fault_page()` returns.
-const VM_FAULT_SUCCESS: c_int = 0;
-const VM_FAULT_INTERRUPTED: c_int = 2;
-const VM_FAULT_MEMORY_SHORTAGE: c_int = 3;
-const VM_FAULT_FICTITIOUS_SHORTAGE: c_int = 4;
-const VM_FAULT_MEMORY_ERROR: c_int = 5;
 
 /// `VM_MAX_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS` of
 /// <`machine/vm_param.h`>, the size the kernel object and the submap
@@ -706,8 +700,7 @@ pub(crate) unsafe fn terminate(object: *mut VmObject) {
                 }
 
                 if !(*page).is_dirty() {
-                    (*page)
-                        .set_dirty(pmap_is_modified((*page).phys_addr) != 0);
+                    (*page).set_dirty(pmap_is_modified((*page).phys_addr));
                 }
 
                 if (*page).is_dirty() || (*page).is_precious() {
@@ -785,7 +778,7 @@ pub(crate) unsafe fn memory_object_release(
 
     unsafe {
         port.reference();
-        memory_object_terminate(pager, pager_request, pager_name);
+        let _ = memory_object_terminate(pager, pager_request, pager_name);
         pager_wakeup(pager);
         port.release();
     }
@@ -1121,7 +1114,7 @@ pub(crate) unsafe fn copy_slowly(
             };
 
             match fault.result {
-                VM_FAULT_SUCCESS => {
+                Ok(()) => {
                     // SAFETY: the fault left the result page's object
                     // locked and holds its paging reference; `new_page` is
                     // this call's fresh page.
@@ -1134,24 +1127,24 @@ pub(crate) unsafe fn copy_slowly(
                     }
                     break;
                 }
-                VM_FAULT_MEMORY_SHORTAGE => {
+                Err(FaultError::MemoryShortage) => {
                     // SAFETY: the page wait takes no continuation.
                     unsafe { vm_page::wait(None) };
                 }
-                VM_FAULT_FICTITIOUS_SHORTAGE => {
+                Err(FaultError::FictitiousShortage) => {
                     // SAFETY: the slab package is up in this path.
                     unsafe { vm_resident::more_fictitious() };
                 }
-                VM_FAULT_INTERRUPTED => {
+                Err(FaultError::Interrupted) => {
                     // SAFETY: the fresh page belongs to this call.
                     unsafe {
                         vm_resident::free(new_page);
                         deallocate(new_object.as_ptr());
                         deallocate(src_object);
                     }
-                    return Err(Error::SendInterrupted);
+                    return Err(Error::Interrupted);
                 }
-                VM_FAULT_MEMORY_ERROR => {
+                Err(FaultError::MemoryError) => {
                     // SAFETY: the fresh page belongs to this call.
                     unsafe {
                         vm_resident::free(new_page);
@@ -1160,7 +1153,7 @@ pub(crate) unsafe fn copy_slowly(
                     }
                     return Err(Error::MemoryError);
                 }
-                _ => (),
+                Err(FaultError::Retry) => (),
             }
         }
 
@@ -1173,35 +1166,6 @@ pub(crate) unsafe fn copy_slowly(
     unsafe { deallocate(src_object) };
 
     Ok(new_object)
-}
-
-/// `vm_object_copy_slowly()` of the C.
-///
-/// # Safety
-///
-/// The source object must be live and locked on entry and holds a reference;
-/// `result_object` must be writable.
-pub(crate) unsafe fn vm_object_copy_slowly(
-    src_object: *mut VmObject,
-    src_offset: VmOffset,
-    size: VmSize,
-    interruptible: c_int,
-    result_object: *mut *mut VmObject,
-) -> c_int {
-    let result = unsafe {
-        copy_slowly(src_object, src_offset, size, interruptible != 0)
-    };
-
-    match result {
-        Ok(object) => {
-            unsafe { result_object.write(object.as_ptr()) };
-            KERN_SUCCESS
-        }
-        Err(error) => {
-            unsafe { result_object.write(null_mut()) };
-            error.as_kern_return()
-        }
-    }
 }
 
 /// What `vm_object_copy_temporary()` hands back when it can copy without
@@ -1264,31 +1228,6 @@ pub(crate) unsafe fn copy_temporary(
     None
 }
 
-/// `vm_object_copy_temporary()` of the C.
-///
-/// # Safety
-///
-/// `object` and `offset` must be the caller's writable slots; on success the
-/// other two slots are written too, as the C wrote them.
-pub(crate) unsafe fn vm_object_copy_temporary(
-    object: *mut *mut VmObject,
-    _offset: *mut VmOffset,
-    src_needs_copy: *mut c_int,
-    dst_needs_copy: *mut c_int,
-) -> c_int {
-    unsafe { copy_temporary(NonNull::new(*object)) }.map_or_else(
-        || c_int::from(false),
-        |copy| {
-            unsafe {
-                object.write(copy.object);
-                src_needs_copy.write(c_int::from(copy.src_needs_copy));
-                dst_needs_copy.write(c_int::from(copy.dst_needs_copy));
-            }
-            c_int::from(true)
-        },
-    )
-}
-
 /// `vm_object_copy_call()` of the C.
 ///
 /// # Safety
@@ -1318,7 +1257,7 @@ unsafe fn copy_call(
 
         ipc_port::make_send(IpcPort::from_raw(new_memory_object)).as_ptr();
 
-        memory_object_copy(
+        let _ = memory_object_copy(
             (*src_object).pager,
             (*src_object).pager_request,
             src_offset,
@@ -1526,50 +1465,6 @@ pub(crate) unsafe fn copy_strategically(
     }
 }
 
-/// `vm_object_copy_strategically()` of the C.
-///
-/// # Safety
-///
-/// The source object must be live and unlocked; the three slots are written
-/// as the C wrote them, which is not on every failure path.
-pub(crate) unsafe fn vm_object_copy_strategically(
-    src_object: *mut VmObject,
-    src_offset: VmOffset,
-    size: VmSize,
-    dst_object: *mut *mut VmObject,
-    dst_offset: *mut VmOffset,
-    dst_needs_copy: *mut c_int,
-) -> c_int {
-    match unsafe { copy_strategically(src_object, src_offset, size) } {
-        StrategicResult::Copied {
-            object,
-            offset,
-            needs_copy,
-        } => {
-            unsafe {
-                dst_object.write(object.as_ptr());
-                dst_offset.write(offset);
-                dst_needs_copy.write(c_int::from(needs_copy));
-            }
-            KERN_SUCCESS
-        }
-        StrategicResult::Interrupted => {
-            unsafe {
-                dst_object.write(null_mut());
-                dst_offset.write(0);
-                dst_needs_copy.write(c_int::from(false));
-            }
-            MACH_SEND_INTERRUPTED
-        }
-        StrategicResult::NullObject(error) => {
-            unsafe { dst_object.write(null_mut()) };
-            error.as_kern_return()
-        }
-        StrategicResult::Failed(error) => error.as_kern_return(),
-        StrategicResult::Unchanged => KERN_SUCCESS,
-    }
-}
-
 /// `vm_object_shadow()` of the C.
 ///
 /// # Safety
@@ -1754,7 +1649,7 @@ unsafe fn enter_init(
                 let dmm = default_manager::reference();
                 (*object).set_internal(true);
                 (*object).set_pager_ready(true);
-                memory_object_create(
+                let _ = memory_object_create(
                     dmm.as_ptr(),
                     pager,
                     (*object).size,
@@ -1768,7 +1663,7 @@ unsafe fn enter_init(
                 vm_resident::VM_OBJECT_EXTERNAL_COUNT
                     .fetch_add(1, Ordering::Relaxed);
                 (*object).set_pager_ready(false);
-                memory_object_init(
+                let _ = memory_object_init(
                     pager,
                     (*object).pager_request,
                     (*object).pager_name,
@@ -2418,45 +2313,6 @@ pub(crate) unsafe fn coalesce(
 
         (*object).lock.unlock();
         Some((object, new_offset))
-    }
-}
-
-/// `vm_object_coalesce()` of the C.
-///
-/// # Safety
-///
-/// Both objects must be null or live, and their references move as the C's
-/// did; `new_object` and `new_offset` must be writable, and are written only
-/// when the C wrote them.
-#[expect(clippy::too_many_arguments)]
-pub(crate) unsafe fn vm_object_coalesce(
-    prev_object: *mut VmObject,
-    next_object: *mut VmObject,
-    prev_offset: VmOffset,
-    next_offset: VmOffset,
-    prev_size: VmSize,
-    next_size: VmSize,
-    new_object: *mut *mut VmObject,
-    new_offset: *mut VmOffset,
-) -> c_int {
-    match unsafe {
-        coalesce(
-            NonNull::new(prev_object),
-            NonNull::new(next_object),
-            prev_offset,
-            next_offset,
-            prev_size,
-            next_size,
-        )
-    } {
-        Some((object, offset)) => {
-            unsafe {
-                new_object.write(object);
-                new_offset.write(offset);
-            }
-            c_int::from(true)
-        }
-        None => c_int::from(false),
     }
 }
 

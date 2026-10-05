@@ -10,10 +10,11 @@
 
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
+use crate::kern::error::Error;
 use crate::kern::lock::SimpleLock;
 use crate::kern::sched_prim::{assert_wait, thread_block};
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
+use crate::mig::code::{KERN_SUCCESS, kern_return};
 use crate::utils::cell::SyncCell;
 use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_uint};
@@ -77,11 +78,12 @@ fn counter(ev_id: c_uint) -> Option<NonNull<EventCounter>> {
 }
 
 /// `evc_continue()` of kern/eventcount.c: give the blocked waiter the stack
-/// back with `KERN_SUCCESS` as the syscall answer.
+/// back with success as the syscall answer.
 unsafe extern "C" fn evc_continue() {
-    // SAFETY: `thread_syscall_return()` never returns, and the C passed
-    // `KERN_SUCCESS`.
-    unsafe { crate::arch::x86_64::locore::thread_syscall_return(0) }
+    // SAFETY: `thread_syscall_return()` never returns.
+    unsafe {
+        crate::arch::x86_64::locore::thread_syscall_return(KERN_SUCCESS);
+    }
 }
 
 /// `evc_notify_abort()` of kern/eventcount.c: let go of a dying waiter.
@@ -115,9 +117,9 @@ pub(crate) unsafe fn notify_abort(thread: *mut Thread) {
 }
 
 /// `evc_wait()` of kern/eventcount.c.
-pub(crate) fn wait(ev_id: c_uint) -> Result<(), KernError> {
+pub(crate) fn wait(ev_id: c_uint) -> Result<(), Error> {
     let Some(ev) = counter(ev_id) else {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     };
 
     // SAFETY: `counter()` returned a registered counter; the C took the
@@ -144,14 +146,14 @@ pub(crate) fn wait(ev_id: c_uint) -> Result<(), KernError> {
 
         (*ev.as_ptr()).lock.unlock();
         spl::splx(s);
-        Err(KernError::NoSpace)
+        Err(Error::NoSpace)
     }
 }
 
 /// `evc_wait_clear()` of kern/eventcount.c: clear the count before blocking.
-pub(crate) fn wait_clear(ev_id: c_uint) -> Result<(), KernError> {
+pub(crate) fn wait_clear(ev_id: c_uint) -> Result<(), Error> {
     let Some(ev) = counter(ev_id) else {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     };
 
     // SAFETY: `counter()` returned a registered counter; the C took the
@@ -171,7 +173,7 @@ pub(crate) fn wait_clear(ev_id: c_uint) -> Result<(), KernError> {
 
         (*ev.as_ptr()).lock.unlock();
         spl::splx(s);
-        Err(KernError::NoSpace)
+        Err(Error::NoSpace)
     }
 }
 
@@ -182,10 +184,7 @@ pub(crate) fn wait_clear(ev_id: c_uint) -> Result<(), KernError> {
 /// The caller is the system-call entry, which passes the id in the trap's
 /// first argument slot.
 pub(crate) unsafe extern "C" fn evc_wait(ev_id: c_uint) -> c_int {
-    match wait(ev_id) {
-        Ok(()) => 0,
-        Err(error) => c_int::from(error),
-    }
+    kern_return(wait(ev_id))
 }
 
 /// `evc_wait_clear()` of kern/eventcount.c, the trap <`mach/syscall_sw.h`>
@@ -196,8 +195,5 @@ pub(crate) unsafe extern "C" fn evc_wait(ev_id: c_uint) -> c_int {
 /// The caller is the system-call entry, which passes the id in the trap's
 /// first argument slot.
 pub(crate) unsafe extern "C" fn evc_wait_clear(ev_id: c_uint) -> c_int {
-    match wait_clear(ev_id) {
-        Ok(()) => 0,
-        Err(error) => c_int::from(error),
-    }
+    kern_return(wait_clear(ev_id))
 }

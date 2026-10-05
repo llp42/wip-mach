@@ -501,7 +501,7 @@ unsafe fn page_state(page: *mut VmPage) -> c_uint {
         }
 
         if state & (VPI_STATE_NODATA | VPI_STATE_DIRTY) == 0
-            && pmap_is_modified(page_ref.phys_addr) != 0
+            && pmap_is_modified(page_ref.phys_addr)
         {
             state |= VPI_STATE_DIRTY;
             page_ref.set_dirty(true);
@@ -525,7 +525,7 @@ unsafe fn page_state(page: *mut VmPage) -> c_uint {
         }
 
         if state & (VPI_STATE_NODATA | VPI_STATE_REFERENCE) == 0
-            && pmap_is_referenced(page_ref.phys_addr) != 0
+            && pmap_is_referenced(page_ref.phys_addr)
         {
             state |= VPI_STATE_REFERENCE;
             page_ref.set_reference(true);

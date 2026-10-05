@@ -14,11 +14,12 @@ use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
 use crate::arch::x86_64::pcb::Pcb;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::arch::x86_64::spl;
-use crate::glue::time_value::TimeValue64;
 use crate::ipc::IpcSpace;
+use crate::ipc::ipc_thread::IpcWait;
 use crate::ipc::mach_port;
 use crate::kern::ast::{self, AstReason};
 use crate::kern::debug::kpanic;
+use crate::kern::error::Error;
 use crate::kern::eventcount;
 use crate::kern::host_time;
 use crate::kern::ipc_mig::abort_rpc;
@@ -44,9 +45,8 @@ use crate::kern::slab::{CacheInitFlags, KmemCache, kalloc, kfree};
 use crate::kern::syscall_subr::depress_abort;
 use crate::kern::task::{Task, add_time64, current_task, kernel_task};
 use crate::kern::timer::{TIMER_RATE, Timer, TimerSave, read_times};
-use crate::kern::types::KernError;
+use crate::mig::time_value::TimeValue64;
 use crate::utils::cell::SyncCell;
-use crate::utils::string::strncpy;
 use crate::vm::vm_map::{VmMap, round_page};
 use collections::tail_queue::{self, TailQueue};
 use core::cell::UnsafeCell;
@@ -277,8 +277,8 @@ pub struct Thread {
     pub ith_next: *mut Self,
     /// `ith_prev`: the IPC thread queue's previous link.
     pub ith_prev: *mut Self,
-    /// `ith_state`: the IPC thread queue state.
-    pub ith_state: c_int,
+    /// `ith_state`: what a blocked message transfer was left with.
+    pub ith_state: IpcWait,
     /// `data`: the received message or its maximum size.
     pub data: ThreadData,
     /// `ith_seqno`: the sequence number of the received message.
@@ -691,12 +691,12 @@ impl Thread {
     /// `thread` must be null or point at a live thread.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null, and
-    /// [`KernError::Failure`] when the thread's user stop count is already
+    /// Returns [`Error::InvalidArgument`] when `thread` is null, and
+    /// [`Error::Failure`] when the thread's user stop count is already
     /// zero.
-    pub unsafe fn resume(thread: *mut Self) -> Result<(), KernError> {
+    pub unsafe fn resume(thread: *mut Self) -> Result<(), Error> {
         if thread.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: `splsched()` is the C spl call and returns the level to
@@ -724,7 +724,7 @@ impl Thread {
                 }
                 Ok(())
             } else {
-                Err(KernError::Failure)
+                Err(Error::Failure)
             };
             (*thread).lock.unlock();
             spl::splx(s);
@@ -774,11 +774,11 @@ impl Thread {
     /// `thread` must be null or point at a live thread.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null or the
-    /// current thread, and [`KernError::Aborted`] when the halt fails.
-    pub unsafe fn abort(thread: *mut Self) -> Result<(), KernError> {
+    /// Returns [`Error::InvalidArgument`] when `thread` is null or the
+    /// current thread, and [`Error::Aborted`] when the halt fails.
+    pub unsafe fn abort(thread: *mut Self) -> Result<(), Error> {
         if thread.is_null() || thread == per_cpu::thread() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: the check above; the event count
@@ -786,7 +786,7 @@ impl Thread {
         unsafe { eventcount::notify_abort(thread) };
 
         if unsafe { Self::halt(thread, false) }.is_err() {
-            return Err(KernError::Aborted);
+            return Err(Error::Aborted);
         }
 
         unsafe { abort_rpc(thread) };
@@ -838,12 +838,12 @@ impl Thread {
     /// `thread` must be null or point at a live thread.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null.
+    /// Returns [`Error::InvalidArgument`] when `thread` is null.
     pub unsafe fn assignment(
         thread: *mut Self,
-    ) -> Result<*mut ProcessorSet, KernError> {
+    ) -> Result<*mut ProcessorSet, Error> {
         if thread.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: the check above; the set pointer
@@ -881,7 +881,7 @@ impl Thread {
     /// must be valid for a read and a write.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null or the
+    /// Returns [`Error::InvalidArgument`] when `thread` is null or the
     /// current thread; otherwise it returns the error the machine-dependent
     /// status routine reports.
     pub unsafe fn get_status(
@@ -889,7 +889,7 @@ impl Thread {
         flavor: c_int,
         old_state: *mut c_uint,
         old_state_count: *mut c_uint,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if flavor == I386_DEBUG_STATE && thread == per_cpu::thread() {
             return unsafe {
                 crate::arch::x86_64::pcb::thread_getstatus(
@@ -898,11 +898,12 @@ impl Thread {
                     old_state,
                     old_state_count,
                 )
-            };
+            }
+            .map_err(Error::from);
         }
 
         if thread.is_null() || thread == per_cpu::thread() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: the checks above; the suspend and
@@ -919,7 +920,8 @@ impl Thread {
                 old_state,
                 old_state_count,
             )
-        };
+        }
+        .map_err(Error::from);
 
         unsafe { Self::release(thread) };
 
@@ -934,7 +936,7 @@ impl Thread {
     /// be readable for `new_state_count` words.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null or the
+    /// Returns [`Error::InvalidArgument`] when `thread` is null or the
     /// current thread; otherwise it returns the error the machine-dependent
     /// status routine reports.
     pub unsafe fn set_status(
@@ -942,7 +944,7 @@ impl Thread {
         flavor: c_int,
         new_state: *mut c_uint,
         new_state_count: c_uint,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if thread == per_cpu::thread()
             && (flavor == I386_DEBUG_STATE || flavor == I386_FSGS_BASE_STATE)
         {
@@ -953,11 +955,12 @@ impl Thread {
                     new_state,
                     new_state_count,
                 )
-            };
+            }
+            .map_err(Error::from);
         }
 
         if thread.is_null() || thread == per_cpu::thread() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: the checks above; the suspend and
@@ -974,7 +977,8 @@ impl Thread {
                 new_state,
                 new_state_count,
             )
-        };
+        }
+        .map_err(Error::from);
 
         unsafe { Self::release(thread) };
 
@@ -988,16 +992,16 @@ impl Thread {
     /// `thread` must be null or point at a live thread.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null or
-    /// `priority` is invalid, and [`KernError::Failure`] when `priority` is
+    /// Returns [`Error::InvalidArgument`] when `thread` is null or
+    /// `priority` is invalid, and [`Error::Failure`] when `priority` is
     /// below the thread's maximum priority.
     pub unsafe fn priority(
         thread: *mut Self,
         priority: c_int,
         set_max: bool,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if thread.is_null() || invalid_pri(priority) {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
@@ -1008,7 +1012,7 @@ impl Thread {
         let result = unsafe {
             (*thread).lock.lock();
             let result = if priority < (*thread).max_priority {
-                Err(KernError::Failure)
+                Err(Error::Failure)
             } else {
                 if (*thread).depress_priority >= 0 {
                     (*thread).depress_priority = priority;
@@ -1063,16 +1067,16 @@ impl Thread {
     /// `thread` and `pset` must be null or point at live objects.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when an argument is null or
-    /// `max_priority` is invalid, and [`KernError::Failure`] when `pset` is
+    /// Returns [`Error::InvalidArgument`] when an argument is null or
+    /// `max_priority` is invalid, and [`Error::Failure`] when `pset` is
     /// not the thread's processor set.
     pub unsafe fn max_priority(
         thread: *mut Self,
         pset: *mut ProcessorSet,
         max_priority: c_int,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if thread.is_null() || pset.is_null() || invalid_pri(max_priority) {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
@@ -1094,7 +1098,7 @@ impl Thread {
                 }
                 Ok(())
             } else {
-                Err(KernError::Failure)
+                Err(Error::Failure)
             };
             (*thread).lock.unlock();
             result
@@ -1113,8 +1117,8 @@ impl Thread {
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null or the
-    /// policy is invalid, and [`KernError::Failure`] when the thread's
+    /// Returns [`Error::InvalidArgument`] when `thread` is null or the
+    /// policy is invalid, and [`Error::Failure`] when the thread's
     /// processor set does not support the policy.
     ///
     /// # Panics
@@ -1125,9 +1129,9 @@ impl Thread {
         thread: *mut Self,
         policy: c_int,
         data: c_int,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if thread.is_null() || invalid_policy(policy) {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
@@ -1145,7 +1149,7 @@ impl Thread {
             } else {
                 let pset = (*thread).processor_set;
                 if ((*pset).policies & policy) == 0 {
-                    Err(KernError::Failure)
+                    Err(Error::Failure)
                 } else {
                     (*thread).policy = policy;
                     if policy == POLICY_FIXEDPRI {
@@ -1171,14 +1175,11 @@ impl Thread {
     /// `thread` must be null or point at a live thread.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null or is
+    /// Returns [`Error::InvalidArgument`] when `thread` is null or is
     /// not the current thread.
-    pub unsafe fn wire(
-        thread: *mut Self,
-        wired: bool,
-    ) -> Result<(), KernError> {
+    pub unsafe fn wire(thread: *mut Self, wired: bool) -> Result<(), Error> {
         if thread.is_null() || thread != per_cpu::thread() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
@@ -1212,18 +1213,25 @@ impl Thread {
     /// readable up to `TASK_NAME_SIZE - 1` bytes or a NUL inside them.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null.
+    /// Returns [`Error::InvalidArgument`] when `thread` is null.
     pub unsafe fn set_name(
         thread: *mut Self,
         name: *const c_char,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if thread.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
+        // The name ends at its first NUL or after `TASK_NAME_SIZE - 1` bytes,
+        // and NULs fill the rest of the field.
         unsafe {
-            strncpy((*thread).name.as_mut_ptr(), name, TASK_NAME_SIZE - 1);
-            (*thread).name[TASK_NAME_SIZE - 1] = 0;
+            let field = (&raw mut (*thread).name).cast::<c_char>();
+            let mut len = 0;
+            while len < TASK_NAME_SIZE - 1 && name.add(len).read() != 0 {
+                field.add(len).write(name.add(len).read());
+                len += 1;
+            }
+            field.add(len).write_bytes(0, TASK_NAME_SIZE - len);
         }
         Ok(())
     }
@@ -1236,17 +1244,25 @@ impl Thread {
     /// writable for `TASK_NAME_SIZE` bytes.
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `thread` is null.
+    /// Returns [`Error::InvalidArgument`] when `thread` is null.
     pub unsafe fn get_name(
         thread: *mut Self,
         name: *mut c_char,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if thread.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
+        // The copy stops at the name's first NUL, and NULs fill the rest of
+        // `name`.
         unsafe {
-            strncpy(name, (*thread).name.as_ptr(), TASK_NAME_SIZE);
+            let field = (&raw const (*thread).name).cast::<c_char>();
+            let mut len = 0;
+            while len < TASK_NAME_SIZE && field.add(len).read() != 0 {
+                name.add(len).write(field.add(len).read());
+                len += 1;
+            }
+            name.add(len).write_bytes(0, TASK_NAME_SIZE - len);
         }
         Ok(())
     }
@@ -1650,9 +1666,9 @@ impl Thread {
     /// must hold no locks: the routine allocates and may block.
     pub(crate) unsafe fn create(
         parent_task: *mut Task,
-    ) -> Result<*mut Self, KernError> {
+    ) -> Result<*mut Self, Error> {
         if parent_task.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         // SAFETY: `thread_init()` built the cache before any thread existed,
@@ -1660,7 +1676,7 @@ impl Thread {
         let Some(buf) =
             (unsafe { (*ptr::addr_of_mut!(THREAD_CACHE)).alloc() })
         else {
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         };
         let new_thread = buf.as_ptr().cast::<Self>();
 
@@ -1751,7 +1767,7 @@ impl Thread {
                 (*pset).lock.unlock();
                 let _ = Self::terminate(new_thread);
                 Self::deallocate(new_thread);
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
             (*parent_task).lock.unlock();
             (*pset).lock.unlock();
@@ -1890,13 +1906,11 @@ impl Thread {
     ///
     /// `thread` must be null or point at a live thread, and the caller must
     /// hold no locks: the routine waits and may block.
-    pub(crate) unsafe fn terminate(
-        thread: *mut Self,
-    ) -> Result<(), KernError> {
+    pub(crate) unsafe fn terminate(thread: *mut Self) -> Result<(), Error> {
         let cur_thread = per_cpu::thread();
 
         if thread.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         unsafe { ipc_thread_disable(thread) };
@@ -1936,7 +1950,7 @@ impl Thread {
                 spl::splx(s);
                 (*cur_task).lock.unlock();
                 let _ = Self::terminate(cur_thread);
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
 
             (*cur_thread).lock.unlock();
@@ -1945,7 +1959,7 @@ impl Thread {
             if !(*thread).active() {
                 (*thread).lock.unlock();
                 spl::splx(s);
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
 
             (*thread).set_active(false);
@@ -1982,9 +1996,9 @@ impl Thread {
         reply_port: c_uint,
         address: VmOffset,
         size: VmSize,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if task.is_null() || thread.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         unsafe {
@@ -2019,7 +2033,7 @@ impl Thread {
     pub(crate) unsafe fn halt(
         thread: *mut Self,
         must_halt: bool,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         let cur_thread = per_cpu::thread();
 
         if thread == cur_thread {
@@ -2069,7 +2083,7 @@ impl Thread {
                     (*thread).lock.unlock();
                     (*cur_thread).lock.unlock();
                     spl::splx(s);
-                    return Err(KernError::Failure);
+                    return Err(Error::Failure);
                 }
 
                 (*cur_thread).lock.unlock();
@@ -2101,7 +2115,7 @@ impl Thread {
                 if (*cur_thread).wait_result != THREAD_AWAKENED && !must_halt {
                     spl::splx(s);
                     Self::release(thread);
-                    return Err(KernError::Failure);
+                    return Err(Error::Failure);
                 }
                 (*thread).lock.lock();
             }
@@ -2125,7 +2139,7 @@ impl Thread {
         thread: *mut Self,
         must_halt: bool,
         mut s: c_int,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         unsafe {
             loop {
                 (*thread).lock.unlock();
@@ -2146,7 +2160,7 @@ impl Thread {
                     spl::splx(s);
 
                     Self::release(thread);
-                    return Err(KernError::Failure);
+                    return Err(Error::Failure);
                 }
 
                 clear_wait(thread, THREAD_INTERRUPTED, c_int::from(true));
@@ -2251,7 +2265,7 @@ impl Thread {
     pub(crate) unsafe fn dowait(
         thread: *mut Self,
         must_halt: bool,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if thread == per_cpu::thread() {
             kpanic!("thread_dowait", "thread_dowait")
         }
@@ -2301,7 +2315,7 @@ impl Thread {
                 if (*per_cpu::thread()).wait_result != THREAD_AWAKENED
                     && !must_halt
                 {
-                    result = Err(KernError::Failure);
+                    result = Err(Error::Failure);
                     break;
                 }
             }
@@ -2326,9 +2340,9 @@ impl Thread {
     ///
     /// `thread` must be null or point at a live thread, and the caller must
     /// hold no locks: the routine waits and may block.
-    pub(crate) unsafe fn suspend(thread: *mut Self) -> Result<(), KernError> {
+    pub(crate) unsafe fn suspend(thread: *mut Self) -> Result<(), Error> {
         if thread.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         let mut hold = false;
@@ -2530,9 +2544,9 @@ impl Thread {
     pub(crate) unsafe fn assign(
         thread: *mut Self,
         new_pset: *mut ProcessorSet,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if thread.is_null() || new_pset.is_null() {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         unsafe {
@@ -2607,7 +2621,7 @@ pub(crate) unsafe fn kernel_thread(
         Thread::deallocate(thread);
         (*thread).start(start);
         (*thread).saved.other = arg;
-        let _ = crate::kern::thread_swap::doswapin(thread);
+        crate::kern::thread_swap::doswapin(thread);
         (*thread).max_priority = BASEPRI_SYSTEM;
         (*thread).priority = BASEPRI_SYSTEM;
         (*thread).sched_pri = BASEPRI_SYSTEM;
@@ -2716,9 +2730,9 @@ pub(crate) unsafe fn stack_init(stack: VmOffset) {
 /// `host` must be null or the live host the MIG stub converted.
 pub(crate) unsafe fn host_stack_usage(
     host: *mut c_void,
-) -> Result<StackUsage, KernError> {
+) -> Result<StackUsage, Error> {
     if host.is_null() {
-        return Err(KernError::InvalidHost);
+        return Err(Error::InvalidHost);
     }
 
     let maxusage = STACK_MAX_USAGE.load(Ordering::Relaxed);
@@ -2743,9 +2757,9 @@ pub(crate) unsafe fn host_stack_usage(
 /// hold no locks: the routine allocates.
 pub(crate) unsafe fn processor_set_stack_usage(
     pset: *mut ProcessorSet,
-) -> Result<StackUsage, KernError> {
+) -> Result<StackUsage, Error> {
     if pset.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let mut size: VmSize = 0;
@@ -2758,7 +2772,7 @@ pub(crate) unsafe fn processor_set_stack_usage(
             (*pset).lock.lock();
             if (*pset).active == 0 {
                 (*pset).lock.unlock();
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
 
             // The C read the `int` count into an `unsigned int`; it is the
@@ -2781,7 +2795,7 @@ pub(crate) unsafe fn processor_set_stack_usage(
         size = size_needed;
         // SAFETY: `kalloc_init()` ran during the boot this routine follows.
         let Some(buf) = kalloc(size) else {
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         };
         addr = Some(buf);
     }

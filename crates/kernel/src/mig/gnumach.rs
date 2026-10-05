@@ -17,12 +17,12 @@
 //! The cores stay in the `crate::kern` and `crate::vm` modules.
 
 use crate::arch::types::{RpcPhysAddr, VmOffset, VmSize};
+use crate::kern::error::Error;
 use crate::kern::gsync::{self, Flags};
 use crate::kern::host::Host;
 use crate::kern::task::{self, Task};
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
-use crate::vm::error::{
+use crate::mig::code::{
     KERN_INVALID_ARGUMENT, KERN_INVALID_TASK, KERN_SUCCESS, kern_return,
 };
 use crate::vm::types::VmObject;
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn register_new_task_notification(
     notification: *mut c_void,
 ) -> c_int {
     if host.is_null() {
-        return c_int::from(KernError::InvalidHost);
+        return c_int::from(Error::InvalidHost);
     }
 
     // Only the first registration wins; the C's unlocked test and store let
@@ -125,7 +125,7 @@ pub unsafe extern "C" fn register_new_task_notification(
     );
     match registered {
         Ok(_) => 0,
-        Err(_) => c_int::from(KernError::NoAccess),
+        Err(_) => c_int::from(Error::NoAccess),
     }
 }
 
@@ -144,7 +144,7 @@ pub unsafe extern "C" fn gsync_wait(
     flags: c_int,
 ) -> c_int {
     let Some(task) = NonNull::new(task) else {
-        return c_int::from(KernError::InvalidTask);
+        return c_int::from(Error::InvalidTask);
     };
     match gsync::wait(task, addr, lo, hi, msec, Flags::from_bits(flags)) {
         Ok(()) => 0,
@@ -165,7 +165,7 @@ pub unsafe extern "C" fn gsync_wake(
     flags: c_int,
 ) -> c_int {
     let Some(task) = NonNull::new(task) else {
-        return c_int::from(KernError::InvalidTask);
+        return c_int::from(Error::InvalidTask);
     };
     match gsync::wake(task, addr, val, Flags::from_bits(flags)) {
         Ok(()) => 0,
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn gsync_requeue(
     flags: c_int,
 ) -> c_int {
     let Some(task) = NonNull::new(task) else {
-        return c_int::from(KernError::InvalidTask);
+        return c_int::from(Error::InvalidTask);
     };
     match gsync::requeue(
         task,
@@ -298,7 +298,7 @@ pub unsafe extern "C" fn vm_allocate_contiguous(
             }
             KERN_SUCCESS
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn vm_pages_phys(
         )
     } {
         Ok(()) => KERN_SUCCESS,
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 

@@ -27,20 +27,23 @@ use crate::arch::x86_64::model_dep::timemmap;
 use crate::device::ds_routines::DevOps;
 use crate::device::intr::irqgetstat;
 use crate::device::kmsg::{kmsgclose, kmsggetstat, kmsgopen, kmsgread};
-use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
+use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 
 /// `/dev/time` open stub.
-fn timeopen(_dev: DevT, _flag: c_int, _ior: *mut IoReq) -> c_int {
-    Ok(DeviceSuccess::Success).as_io_return()
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the device switch entry has this signature"
+)]
+const fn timeopen(_dev: DevT, _flag: c_int, _ior: *mut IoReq) -> IoResult {
+    Ok(DeviceSuccess::Success)
 }
 
 /// `/dev/time` close stub.
 const fn timeclose(_dev: DevT, _flag: c_int) {}
 
 use crate::utils::cell::SyncCell;
-use crate::utils::string::strcmp;
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_int, c_uint, c_ushort, c_void};
+use core::ffi::{CStr, c_char, c_int, c_uint, c_ushort, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::slice;
@@ -70,71 +73,91 @@ const DEV_NAME_COUNT: usize = 10;
 const DEV_INDIRECT_COUNT: usize = 1;
 
 /// `nulldev_reset()` in C.
-pub(crate) fn nulldev_reset(_dev: DevT) -> c_int {
-    Ok(DeviceSuccess::Success).as_io_return()
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the device switch entry has this signature"
+)]
+pub(crate) const fn nulldev_reset(_dev: DevT) -> Result<(), DeviceError> {
+    Ok(())
 }
 
 /// `nulldev_open()` in C.
-pub(crate) fn nulldev_open(
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the device switch entry has this signature"
+)]
+pub(crate) const fn nulldev_open(
     _dev: DevT,
     _flags: c_int,
     _ior: *mut IoReq,
-) -> c_int {
-    Ok(DeviceSuccess::Success).as_io_return()
+) -> IoResult {
+    Ok(DeviceSuccess::Success)
 }
 
 /// `nulldev_close()` in C.
 pub(crate) const fn nulldev_close(_dev: DevT, _flags: c_int) {}
 
 /// `nulldev_read()` in C.
-pub(crate) fn nulldev_read(_dev: DevT, _ior: *mut IoReq) -> c_int {
-    Ok(DeviceSuccess::Success).as_io_return()
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the device switch entry has this signature"
+)]
+pub(crate) const fn nulldev_read(_dev: DevT, _ior: *mut IoReq) -> IoResult {
+    Ok(DeviceSuccess::Success)
 }
 
 /// `nulldev_write()` in C.
-pub(crate) fn nulldev_write(_dev: DevT, _ior: *mut IoReq) -> c_int {
-    Ok(DeviceSuccess::Success).as_io_return()
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the device switch entry has this signature"
+)]
+pub(crate) const fn nulldev_write(_dev: DevT, _ior: *mut IoReq) -> IoResult {
+    Ok(DeviceSuccess::Success)
 }
 
 /// `nulldev_getstat()` in C.
-pub(crate) fn nulldev_getstat(
+pub(crate) const fn nulldev_getstat(
     _dev: DevT,
     _flavor: c_uint,
     _data: *mut c_int,
     _count: *mut c_uint,
-) -> c_int {
-    Err(DeviceError::InvalidOperation).as_io_return()
+) -> Result<(), DeviceError> {
+    Err(DeviceError::InvalidOperation)
 }
 
 /// `nulldev_setstat()` in C.
-pub(crate) fn nulldev_setstat(
+pub(crate) const fn nulldev_setstat(
     _dev: DevT,
     _flavor: c_uint,
     _data: *mut c_int,
     _count: c_uint,
-) -> c_int {
-    Err(DeviceError::InvalidOperation).as_io_return()
+) -> Result<(), DeviceError> {
+    Err(DeviceError::InvalidOperation)
 }
 
 /// `nulldev_portdeath()` in C.
-pub(crate) fn nulldev_portdeath(_dev: DevT, _port: VmOffset) -> c_int {
-    Ok(DeviceSuccess::Success).as_io_return()
+pub(crate) const fn nulldev_portdeath(_dev: DevT, _port: VmOffset) -> bool {
+    false
 }
 
 /// `nodev_async_in()` in C.
-pub(crate) fn nodev_async_in(
+pub(crate) const fn nodev_async_in(
     _dev: DevT,
     _port: *mut c_void,
     _x: c_int,
     _filter: *mut c_ushort,
     _j: c_uint,
-) -> c_int {
-    Err(DeviceError::InvalidOperation).as_io_return()
+) -> Result<(), DeviceError> {
+    Err(DeviceError::InvalidOperation)
 }
 
 /// `nodev_info()` in C.
-pub(crate) fn nodev_info(_dev: DevT, _a: c_int, _b: *mut c_int) -> c_int {
-    Err(DeviceError::InvalidOperation).as_io_return()
+pub(crate) const fn nodev_info(
+    _dev: DevT,
+    _a: c_int,
+    _b: *mut c_int,
+) -> Result<(), DeviceError> {
+    Err(DeviceError::InvalidOperation)
 }
 
 /// `nomap()` in C.
@@ -479,7 +502,7 @@ pub(crate) unsafe fn set_indirection(
         // SAFETY: `i` is inside the table.
         let di = unsafe { list.add(i) };
         // SAFETY: both names are NUL-terminated strings.
-        if unsafe { strcmp((*di).d_name, name) } == 0 {
+        if unsafe { CStr::from_ptr((*di).d_name) == CStr::from_ptr(name) } {
             // SAFETY: the lock-free update is the C's own; the table is
             // initialized at boot.
             unsafe {

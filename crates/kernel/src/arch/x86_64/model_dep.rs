@@ -11,8 +11,6 @@
 //! The machine-dependent boot and halt path of `i386/i386at/model_dep.c`:
 //! the idle and relax instructions, the `/dev/time` mmap hook, the wall
 //! clock, the bootstrap allocator and the boot entry points.
-//!
-//! The `extern "C"` edge is in [`model_dep_ffi`].
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_MASK, PAGE_SHIFT, PAGE_SIZE};
@@ -29,17 +27,18 @@ use crate::arch::x86_64::{
     apic, biosmem, cpuboot, fpu, gdt, idt, int_init, ioapic, irq, ktss, ldt,
     locore, mbinfo, mp_desc, per_cpu, pit, pmap, rtc,
 };
-use crate::glue;
-use crate::glue::time_value::TimeValue64;
-use crate::kern::console::{CStrArg, kprint};
+use crate::config::KERNEL_VERSION;
+use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
 use crate::kern::host_time;
 use crate::kern::kheap::Kalloc;
 use crate::kern::smp::CpuId;
+use crate::mig;
+use crate::mig::time_value::TimeValue64;
 use crate::vm::types::VmProt;
 use crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS;
 use core::arch::asm;
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -211,10 +210,8 @@ fn set_wallclock(seconds: i64) {
 
 /// `inittodr()` of <`i386/i386at/model_dep.h`>.
 pub(crate) fn inittodr() {
-    let mut seconds: u64 = 0;
-    // SAFETY: `seconds` is a local valid for a write, and `readtodc` leaves it
-    // alone when it fails.
-    unsafe { rtc::readtodc(&raw mut seconds) };
+    // The C left the seconds at zero when the clock had no valid time.
+    let seconds = rtc::read_todc().unwrap_or(0);
     // The C converted the `uint64_t` seconds to the record's `int64_t` field;
     // the cast reinterprets the bits as that conversion does.
     set_wallclock(seconds as i64);
@@ -222,8 +219,8 @@ pub(crate) fn inittodr() {
 
 /// `resettodr()` of <`i386/i386/model_dep.h`>.
 pub(crate) fn resettodr() {
-    // SAFETY: `writetodc` takes no argument, and the C passed none.
-    unsafe { rtc::writetodc() };
+    // The C ignored a clock that cannot keep the time.
+    let _ = rtc::write_todc(host_time::wallclock().seconds);
 }
 
 /// Allocate `size` bytes of physical memory during bootstrap, page-rounded, or
@@ -235,21 +232,6 @@ pub(crate) fn alloc_aligned(size: VmSize) -> Option<VmOffset> {
     let pages = (rounded >> PAGE_SHIFT) as u32;
     let address = biosmem::bootalloc(pages);
     if address == 0 { None } else { Some(address) }
-}
-
-/// `init_alloc_aligned()` of <`i386at/model_dep.h`>.
-///
-/// # Safety
-///
-/// `addrp` must be valid for a write; the C wrote the allocated address
-/// through it.
-pub(crate) unsafe fn init_alloc_aligned(
-    size: VmSize,
-    addrp: *mut VmOffset,
-) -> c_int {
-    let address = alloc_aligned(size).unwrap_or(0);
-    unsafe { *addrp = address };
-    c_int::from(address != 0)
 }
 
 /// `pmap_grab_page()` of <vm/pmap.h>.
@@ -272,9 +254,8 @@ pub(crate) fn machine_init() {
     // boot CPU is the caller's.
     unsafe { fpu::init_fpu() };
 
-    let err = crate::arch::x86_64::acpi_parse_apic::acpi_apic_init();
-    if err != 0 {
-        kprint!("acpi_apic_init failed with {}\n", err);
+    if let Err(error) = crate::arch::x86_64::acpi_parse_apic::init() {
+        kprint!("acpi_apic_init failed with {:?}\n", error);
         loop {
             core::hint::spin_loop();
         }
@@ -364,8 +345,8 @@ pub(crate) fn halt_all_cpus(reboot: c_int) -> ! {
 /// Register the boot loader's data with `biosmem` and `mbinfo`.
 fn register_boot_data(mbi: &MultibootRawInfo) {
     let flags = MultibootLoaderFlags::from_raw(mbi.flags);
-    let begin = ptr::addr_of!(glue::_start).addr();
-    let end = ptr::addr_of!(glue::_end).addr();
+    let begin = ptr::addr_of!(mig::_start).addr();
+    let end = ptr::addr_of!(mig::_end).addr();
     // SAFETY: the image bounds are the linker's, and this is the bootstrap
     // phase the call requires.
     unsafe {
@@ -381,7 +362,7 @@ fn register_boot_data(mbi: &MultibootRawInfo) {
         // SAFETY: the loader stored a NUL-terminated line at `start`, which
         // is in the direct map.
         let length = unsafe {
-            crate::utils::string::strlen(kv_ptr::<c_char>(phystokv(start)))
+            CStr::from_ptr(kv_ptr::<c_char>(phystokv(start))).count_bytes()
         } + 1;
         // SAFETY: the range is the line the loader stored.
         unsafe {
@@ -449,9 +430,8 @@ fn register_boot_modules(mbi: &MultibootRawInfo) {
             let string_start = address(string);
             // SAFETY: the loader stored a NUL-terminated name there.
             let length = unsafe {
-                crate::utils::string::strlen(kv_ptr::<c_char>(phystokv(
-                    string_start,
-                )))
+                CStr::from_ptr(kv_ptr::<c_char>(phystokv(string_start)))
+                    .count_bytes()
             } + 1;
             // SAFETY: the range is the name's.
             unsafe {
@@ -528,11 +508,11 @@ fn copy_boot_modules(mods_count: u32, mods_addr: u32) {
     // boot allocator returned `bytes` for the copy, and the two do not
     // overlap.
     unsafe {
-        crate::utils::string::memcpy(
-            modules.cast(),
-            kv_ptr::<c_void>(phystokv(address(mods_addr))),
+        ptr::copy_nonoverlapping(
+            kv_ptr::<u8>(phystokv(address(mods_addr))),
+            modules.cast::<u8>(),
             address(bytes),
-        )
+        );
     };
     // SAFETY: `BOOT_INFO` is written only on this boot path, on one CPU.
     unsafe { BOOT_INFO.mods_addr = mem as u32 };
@@ -557,11 +537,11 @@ fn copy_boot_modules(mods_count: u32, mods_addr: u32) {
         // SAFETY: `start` names `size` readable bytes and the boot
         // allocator returned `size` writable ones.
         unsafe {
-            crate::utils::string::memcpy(
-                kv_ptr_mut::<c_void>(phystokv(image)),
-                kv_ptr::<c_void>(phystokv(address(start))),
+            ptr::copy_nonoverlapping(
+                kv_ptr::<u8>(phystokv(address(start))),
+                kv_ptr_mut::<u8>(phystokv(image)),
                 address(size),
-            )
+            );
         };
         // SAFETY: the record was copied into `modules`, and this CPU is
         // its only writer.
@@ -573,9 +553,8 @@ fn copy_boot_modules(mods_count: u32, mods_addr: u32) {
         let string_start = address(string);
         // SAFETY: the loader stored a NUL-terminated name at `string`.
         let length = unsafe {
-            crate::utils::string::strlen(kv_ptr::<c_char>(phystokv(
-                string_start,
-            )))
+            CStr::from_ptr(kv_ptr::<c_char>(phystokv(string_start)))
+                .count_bytes()
         } + 1;
         let Some(name) = alloc_aligned(length) else {
             kpanic!(
@@ -587,11 +566,11 @@ fn copy_boot_modules(mods_count: u32, mods_addr: u32) {
         // SAFETY: `string_start` names `length` readable bytes and the
         // boot allocator returned `length` writable ones.
         unsafe {
-            crate::utils::string::memcpy(
-                kv_ptr_mut::<c_void>(phystokv(name)),
-                kv_ptr::<c_void>(phystokv(string_start)),
+            ptr::copy_nonoverlapping(
+                kv_ptr::<u8>(phystokv(string_start)),
+                kv_ptr_mut::<u8>(phystokv(name)),
                 length,
-            )
+            );
         };
         // SAFETY: the record was copied into `modules`, and this CPU is
         // its only writer.
@@ -632,7 +611,7 @@ fn i386at_init() {
         let source = address(cmdline);
         // SAFETY: the loader stored a NUL-terminated line at `source`.
         let length = unsafe {
-            crate::utils::string::strlen(kv_ptr::<c_char>(phystokv(source)))
+            CStr::from_ptr(kv_ptr::<c_char>(phystokv(source))).count_bytes()
         } + 1;
         let Some(mem) = alloc_aligned(length) else {
             kpanic!(
@@ -643,11 +622,11 @@ fn i386at_init() {
         // SAFETY: `source` names `length` readable bytes and the boot
         // allocator returned `length` writable ones.
         unsafe {
-            crate::utils::string::memcpy(
-                kv_ptr_mut::<c_void>(phystokv(mem)),
-                kv_ptr::<c_void>(phystokv(source)),
+            ptr::copy_nonoverlapping(
+                kv_ptr::<u8>(phystokv(source)),
+                kv_ptr_mut::<u8>(phystokv(mem)),
                 length,
-            )
+            );
         };
         KERNEL_CMDLINE
             .store(kv_ptr_mut::<c_char>(phystokv(mem)), Ordering::Relaxed);
@@ -695,17 +674,14 @@ fn i386at_init() {
     ioapic::SPL_INIT.store(true, Ordering::Relaxed);
 }
 
-/// `c_boot_entry()` of <`i386/i386/model_dep.h`>, the C entry `boothdr.S` calls.
-pub(crate) fn c_boot_entry(bi: VmOffset) {
+/// `c_boot_entry()`: the entry the boot header calls, with the physical
+/// address of the loader's Multiboot information in `bi`.
+pub(crate) extern "C" fn c_boot_entry(bi: VmOffset) {
     // SAFETY: `bi` is the physical address `boothdr.S` passes, and the
     // loader's block there is readable.
     unsafe { BOOT_INFO = *kv_ptr::<MultibootRawInfo>(phystokv(bi)) };
 
-    // SAFETY: `glue::version` is the NUL-terminated version string.
-    kprint!("{}", unsafe {
-        CStrArg::from_ptr(ptr::addr_of!(glue::version))
-    });
-    kprint!("\n");
+    kprint!("{}\n", KERNEL_VERSION);
 
     // The call also fills `cpu_features`; its return value is unused.
     #[expect(unused_variables)]

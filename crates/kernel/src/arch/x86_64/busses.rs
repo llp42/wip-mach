@@ -127,7 +127,7 @@ fn configure_master_devices(
             && slave.is_some_and(|slave| {
                 // SAFETY: `slave` is the driver's routine and `device` is a
                 // live table entry.
-                unsafe { slave(device.as_ptr(), virt) != 0 }
+                unsafe { slave(device.as_ptr(), virt) }
             });
         if !probed {
             // SAFETY: `device` is a live table entry.
@@ -219,7 +219,7 @@ fn configure_master(
     };
     // SAFETY: `probe` is the driver's probe routine, and `master` is the
     // live table entry the C passed it.
-    if unsafe { probe(virt, master.as_ptr()) } == 0 {
+    if !unsafe { probe(virt, master.as_ptr()) } {
         return false;
     }
 
@@ -301,7 +301,7 @@ fn configure_device(
     // SAFETY: `probe` is the driver's probe routine, and the C passed it the
     // device entry as a controller: `bus_ctlr` and `bus_device` place `unit`
     // and `address` at the same offsets, which is all the AT-bus probe reads.
-    if unsafe { probe(virt, device.as_ptr().cast::<BusCtlr>()) } == 0 {
+    if !unsafe { probe(virt, device.as_ptr().cast::<BusCtlr>()) } {
         return false;
     }
 
@@ -359,10 +359,10 @@ pub(crate) unsafe fn configure_bus_master(
     _phys: VmOffset,
     adpt_no: c_int,
     bus_name: *const c_char,
-) -> c_int {
+) -> bool {
     let (name, bus_name) =
         unsafe { (CStr::from_ptr(name), CStr::from_ptr(bus_name)) };
-    c_int::from(configure_master(name, virt, adpt_no, bus_name))
+    configure_master(name, virt, adpt_no, bus_name)
 }
 
 /// `configure_bus_device()` of `chips/busses.c`.
@@ -376,8 +376,8 @@ pub(crate) unsafe fn configure_bus_device(
     phys: VmOffset,
     adpt_no: c_int,
     bus_name: *const c_char,
-) -> c_int {
+) -> bool {
     let (name, bus_name) =
         unsafe { (CStr::from_ptr(name), CStr::from_ptr(bus_name)) };
-    c_int::from(configure_device(name, virt, phys, adpt_no, bus_name))
+    configure_device(name, virt, phys, adpt_no, bus_name)
 }

@@ -13,12 +13,12 @@
 use crate::arch::x86_64::clock_platform::CLOCK;
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
-use crate::glue::time_value::{
-    MACH_ADJTIME_NSECS_OMIT, TimeValue, TimeValue64,
-};
+use crate::kern::error::Error;
 use crate::kern::processor;
 use crate::kern::sched_prim::{thread_bind, thread_block};
-use crate::kern::types::KernError;
+use crate::mig::time_value::{
+    MACH_ADJTIME_NSECS_OMIT, TimeValue, TimeValue64,
+};
 use core::ffi::c_void;
 use core::ptr;
 
@@ -89,27 +89,25 @@ pub(crate) unsafe fn read_time_stamp(
 }
 
 /// `host_get_time()`: the 32-bit wall clock.
-pub(crate) fn get_time(host: *mut c_void) -> Result<TimeValue, KernError> {
+pub(crate) fn get_time(host: *mut c_void) -> Result<TimeValue, Error> {
     if host.is_null() {
-        return Err(KernError::InvalidHost);
+        return Err(Error::InvalidHost);
     }
     Ok(TimeValue::from(wallclock()))
 }
 
 /// `host_get_time64()`.
-pub(crate) fn get_time64(host: *mut c_void) -> Result<TimeValue64, KernError> {
+pub(crate) fn get_time64(host: *mut c_void) -> Result<TimeValue64, Error> {
     if host.is_null() {
-        return Err(KernError::InvalidHost);
+        return Err(Error::InvalidHost);
     }
     Ok(wallclock())
 }
 
 /// `host_get_uptime64()`.
-pub(crate) fn get_uptime64(
-    host: *mut c_void,
-) -> Result<TimeValue64, KernError> {
+pub(crate) fn get_uptime64(host: *mut c_void) -> Result<TimeValue64, Error> {
     if host.is_null() {
-        return Err(KernError::InvalidHost);
+        return Err(Error::InvalidHost);
     }
     Ok(TimeValue64::from_nanos(CLOCK.mono().as_nanos()))
 }
@@ -119,9 +117,9 @@ pub(crate) fn get_uptime64(
 pub(crate) fn set_time64(
     host: *mut c_void,
     new_time: TimeValue64,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if host.is_null() {
-        return Err(KernError::InvalidHost);
+        return Err(Error::InvalidHost);
     }
 
     let thread = per_cpu::thread();
@@ -159,9 +157,9 @@ pub(crate) fn set_time64(
 pub(crate) fn adjust_time(
     host: *mut c_void,
     new_adjustment: TimeValue64,
-) -> Result<TimeValue64, KernError> {
+) -> Result<TimeValue64, Error> {
     if host.is_null() {
-        return Err(KernError::InvalidHost);
+        return Err(Error::InvalidHost);
     }
 
     let thread = per_cpu::thread();

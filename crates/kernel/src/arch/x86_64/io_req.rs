@@ -9,6 +9,7 @@
 //! `struct io_req` of <`device/io_req.h`>, the request the device layer and the
 //! x86 drivers share.
 
+use crate::device::r#return::DeviceError;
 use crate::kern::lock::SimpleLock;
 use crate::utils::kd_queue::{KdEvent, KdEventQueue};
 use crate::vm::vm_map::VmMapCopy;
@@ -25,11 +26,11 @@ pub type DevT = u16;
 /// A caller invoking one through [`IoReq`]'s `done` field must pass the
 /// same live request that was queued with it; `iodone()` and its
 /// completion thread call it without the request's lock held, and possibly
-/// at a raised interrupt level. Returning nonzero tells the caller the
-/// request is finished and may be freed or woken; returning zero means the
-/// callback re-queued the request itself, as `kmsg_read_done()` and
+/// at a raised interrupt level. Returning `true` tells the caller the
+/// request is finished and may be freed or woken; returning `false` means
+/// the callback re-queued the request itself, as `kmsg_read_done()` and
 /// `mouse_read_done()` do.
-pub type IoDone = unsafe fn(*mut IoReq) -> c_int;
+pub type IoDone = unsafe fn(*mut IoReq) -> bool;
 
 /// `struct io_req` of <`device/io_req.h>`: the IO request a driver is handed,
 /// and the queue node its first two fields form.
@@ -48,7 +49,8 @@ pub struct IoReq {
     pub count: c_long,
     pub alloc_size: usize,
     pub residual: c_long,
-    pub error: c_int,
+    /// `io_error`: how the request completed.
+    pub error: Result<(), DeviceError>,
     pub done: Option<IoDone>,
     pub reply_port: *mut c_void,
     pub reply_port_type: c_uint,
@@ -120,7 +122,7 @@ impl IoReq {
             count: 0,
             alloc_size: 0,
             residual: 0,
-            error: 0,
+            error: Ok(()),
             done: None,
             reply_port: ptr::null_mut(),
             reply_port_type: 0,
@@ -198,5 +200,3 @@ pub const DEV_GET_SIZE_DEVICE_SIZE: usize = 0;
 pub const DEV_GET_SIZE_RECORD_SIZE: usize = 1;
 /// The number of slots a `DEV_GET_SIZE` reply fills.
 pub const DEV_GET_SIZE_COUNT: u32 = 2;
-/// `KERN_SUCCESS` of <`mach/kern_return.h`>: the request succeeded.
-pub const KERN_SUCCESS: c_int = 0;

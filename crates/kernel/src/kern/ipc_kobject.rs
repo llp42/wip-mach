@@ -7,14 +7,15 @@
 //! `kern/ipc_kobject.h` declares.
 
 use crate::arch::types::VmOffset;
-use crate::glue;
-use crate::glue::MigRoutine;
 use crate::ipc::ipc_kmsg::{self, Kmsg};
 use crate::ipc::ipc_port;
 use crate::ipc::{IpcPort, MachMsgHeader, MachMsgType, MigReplyHeader};
 use crate::kern::console::kprint;
 use crate::kern::debug::kpanic;
 use crate::kern::task::kernel_task;
+use crate::mig;
+use crate::mig::MigRoutine;
+use crate::mig::code::{KERN_SUCCESS, MIG_BAD_ID, MIG_NO_REPLY};
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr;
@@ -54,13 +55,6 @@ const MACH_NOTIFY_NO_SENDERS: c_int = 68;
 const MACH_NOTIFY_SEND_ONCE: c_int = 69;
 /// `MACH_NOTIFY_DEAD_NAME` of <mach/notify.h>.
 const MACH_NOTIFY_DEAD_NAME: c_int = 70;
-
-/// `KERN_SUCCESS` of <`mach/kern_return.h`>.
-const KERN_SUCCESS: c_int = 0;
-/// `MIG_BAD_ID` of <`mach/mig_errors.h`>.
-const MIG_BAD_ID: c_int = -303;
-/// `MIG_NO_REPLY` of <`mach/mig_errors.h`>.
-const MIG_NO_REPLY: c_int = -305;
 
 /// The `8192`-byte bound `ipc_kobject_server()` gives a reply body, before
 /// the message overhead is subtracted.
@@ -181,7 +175,7 @@ pub(crate) unsafe fn notify(
     match unsafe { port.kotype() } {
         // SAFETY: a device port's notification handler takes the header.
         IKOT_DEVICE => unsafe {
-            crate::device::ds_routines::ds_notify(request_header.cast()) != 0
+            crate::device::ds_routines::ds_notify(request_header.cast())
         },
         // SAFETY: a proxy pager's handler takes the header.
         IKOT_PAGER_PROXY => unsafe {
@@ -320,16 +314,16 @@ fn strange_destination() -> ! {
 /// headers: pick the MIG entry point for `msgh_id`, or `None`.
 fn server_routine(msgh_id: c_int) -> MigRoutine {
     let tables: [(*const MigRoutine, c_int, c_int); 10] = [
-        (&raw const glue::mach_server_routines, 2000, 100),
-        (&raw const glue::mach_port_server_routines, 3200, 23),
-        (&raw const glue::mach_host_server_routines, 2600, 49),
-        (&raw const glue::device_server_routines, 2800, 14),
-        (&raw const glue::device_pager_server_routines, 2200, 9),
-        (&raw const glue::mach_debug_server_routines, 3000, 24),
-        (&raw const glue::mach4_server_routines, 4000, 11),
-        (&raw const glue::gnumach_server_routines, 4200, 16),
-        (&raw const glue::experimental_server_routines, 424_242, -1),
-        (&raw const glue::mach_i386_server_routines, 3800, 9),
+        (&raw const mig::mach_server_routines, 2000, 100),
+        (&raw const mig::mach_port_server_routines, 3200, 23),
+        (&raw const mig::mach_host_server_routines, 2600, 49),
+        (&raw const mig::device_server_routines, 2800, 14),
+        (&raw const mig::device_pager_server_routines, 2200, 9),
+        (&raw const mig::mach_debug_server_routines, 3000, 24),
+        (&raw const mig::mach4_server_routines, 4000, 11),
+        (&raw const mig::gnumach_server_routines, 4200, 16),
+        (&raw const mig::experimental_server_routines, 424_242, -1),
+        (&raw const mig::mach_i386_server_routines, 3800, 9),
     ];
 
     for (table, base, max) in tables {

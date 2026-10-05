@@ -38,11 +38,7 @@ fn bootstrap() {
             start,
             end,
         ) {
-            kpanic!(
-                "kmem_init",
-                "vm_map_enter failed ({})\n",
-                error.as_kern_return()
-            );
+            kpanic!("kmem_init", "vm_map_enter failed ({:?})\n", error);
         }
         pmap_init();
         slab_init();

@@ -44,7 +44,7 @@ pub(crate) unsafe fn copy_in(
         return Err(CopyError::TooSmall);
     }
 
-    if unsafe { user_access::copyin(user, kernel.cast(), size) } != 0 {
+    if unsafe { user_access::copyin(user, kernel.cast(), size) }.is_err() {
         return Err(CopyError::UserFault);
     }
 

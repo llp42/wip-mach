@@ -10,19 +10,12 @@
 //!
 //! The cores are in [`crate::ipc::mach_port`].
 
+use crate::ipc::error::Error;
 use crate::ipc::mach_port::{self, MachPortStatus};
 use crate::ipc::{IpcPort, IpcSpace};
-use crate::kern::types::KernError;
+use crate::mig::code::kern_return;
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::{self, NonNull};
-
-/// The C `kern_return_t` of a core result: zero, or the error's code.
-fn kern_return(result: Result<(), KernError>) -> c_int {
-    match result {
-        Ok(()) => 0,
-        Err(error) => c_int::from(error),
-    }
-}
 
 /// `mach_port_names()` of `ipc/mach_port.c`.
 ///
@@ -449,7 +442,7 @@ pub unsafe extern "C" fn mach_port_set_ktype(
     ktype: c_uint,
 ) -> c_int {
     if host.is_null() {
-        return c_int::from(KernError::InvalidHost);
+        return c_int::from(Error::InvalidHost);
     }
 
     kern_return(unsafe {

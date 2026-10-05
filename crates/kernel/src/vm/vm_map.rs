@@ -29,27 +29,21 @@ use crate::kern::sched_prim::{
 };
 use crate::kern::slab::{CacheInitFlags, KmemCache, kalloc, kfree};
 use crate::utils::cell::SyncCell;
-use crate::vm::error::{
-    Error, KERN_SUCCESS, error_from_kern_return, kern_return,
-};
+use crate::vm::error::Error;
 use crate::vm::memory_object_proxy;
 use crate::vm::types::{
     PAGE_MASK, PAGE_SIZE, Pmap, VmInherit, VmObject, VmPage, VmProt,
 };
-use crate::vm::vm_fault;
+use crate::vm::vm_fault::{self, FaultError};
 use crate::vm::vm_kern::KERNEL_MAP;
 use crate::vm::vm_kern::projected_buffer_collect;
 use crate::vm::vm_object;
 use crate::vm::vm_object::KERNEL_OBJECT;
+use crate::vm::vm_object::StrategicResult;
 use crate::vm::vm_object::VM_SUBMAP_OBJECT;
 use crate::vm::vm_object::vm_object_allocate;
-use crate::vm::vm_object::vm_object_coalesce;
-use crate::vm::vm_object::vm_object_copy_slowly;
-use crate::vm::vm_object::vm_object_copy_strategically;
-use crate::vm::vm_object::vm_object_copy_temporary;
 use crate::vm::vm_object::vm_object_pmap_protect;
 use crate::vm::vm_object::vm_object_shadow;
-use crate::vm::vm_object_ffi::vm_object_deallocate;
 use crate::vm::vm_page;
 use crate::vm::vm_resident;
 use crate::vm::vm_resident::VM_PAGE_QUEUE_LOCK;
@@ -773,7 +767,7 @@ impl VmMap {
     }
 
     /// `vm_map_msync()` in C, including its unfinished tail: a request with
-    /// work in it still reports `KERN_INVALID_ARGUMENT`.
+    /// work in it still reports [`Error::InvalidArgument`].
     pub(crate) const fn msync(
         map: Option<NonNull<Self>>,
         address: VmOffset,
@@ -1098,7 +1092,7 @@ impl VmMap {
                     (*entry.as_ptr()).object.vm_object = ptr::null_mut();
                 }
                 // SAFETY: the entry held the placeholder's reference.
-                unsafe { vm_object_deallocate(object) };
+                unsafe { vm_object::deallocate(object) };
                 // SAFETY: the entry held the placeholder's reference.
                 unsafe { (*entry.as_ptr()).set_sub_map(true) };
                 // SAFETY: the entry held the placeholder's reference.
@@ -1210,10 +1204,10 @@ const _: () = assert!(size_of::<VmMapVersion>() == 4);
 const _: () = assert!(align_of::<VmMapVersion>() == 4);
 
 /// `vm_map_copy_cont_fn`: a page-list copy's continuation.
-pub type VmMapCopyContFn = unsafe extern "C" fn(
+pub type VmMapCopyContFn = unsafe fn(
     args: *mut VmMapCopyinArgs,
     new_copy: *mut *mut VmMapCopy,
-) -> c_int;
+) -> Result<(), Error>;
 
 /// The `OBJECT` variant of a copy, `c_u.c_o`.
 #[repr(C)]
@@ -1296,14 +1290,6 @@ assert_layout!(VmMapCopyinArgs, 48, 8, {
 /// `VM_PAGE_HIGHMEM`: the `vm_page_grab()` flag asking for a page not
 /// restricted to the direct map.
 const VM_PAGE_HIGHMEM: c_uint = 0x08;
-
-/// `VM_FAULT_SUCCESS` of <`vm/vm_fault.h`>.
-const VM_FAULT_SUCCESS: c_int = 0;
-const VM_FAULT_RETRY: c_int = 1;
-const VM_FAULT_INTERRUPTED: c_int = 2;
-const VM_FAULT_MEMORY_SHORTAGE: c_int = 3;
-const VM_FAULT_FICTITIOUS_SHORTAGE: c_int = 4;
-const VM_FAULT_MEMORY_ERROR: c_int = 5;
 
 impl VmMapCopy {
     /// `kmem_cache_free()` on `vm_map_copy_cache` in C.
@@ -1401,7 +1387,7 @@ impl VmMapCopy {
             // exclusively owned for the discard.
             unsafe {
                 (*sentinel.as_ptr()).entry_unlink(entry, false);
-                vm_object_deallocate((*entry.as_ptr()).object.vm_object);
+                vm_object::deallocate((*entry.as_ptr()).object.vm_object);
             }
             // SAFETY: the entry is unlinked and unused.
             unsafe { VmMapEntry::dispose(entry) };
@@ -1554,8 +1540,8 @@ impl VmMapCopy {
         };
 
         // SAFETY: the continuation owns its argument; a null result pointer is
-        // the C's abort call.
-        unsafe { cont(args, ptr::null_mut()) };
+        // the C's abort call, whose outcome the C ignored.
+        let _ = unsafe { cont(args, ptr::null_mut()) };
 
         // SAFETY: the copy is live; the C macro clears the fields so the
         // storage can be freed without aborting twice.
@@ -1573,7 +1559,7 @@ impl VmMapCopy {
     /// caller must own it and every copy its continuation chain returns.
     pub(crate) unsafe fn invoke_cont(
         copy: NonNull<Self>,
-    ) -> (c_int, *mut Self) {
+    ) -> (Result<(), Error>, *mut Self) {
         unsafe { Self::page_discard(copy) };
 
         // SAFETY: `copy` holds the live PAGE_LIST variant.
@@ -1581,7 +1567,7 @@ impl VmMapCopy {
         // SAFETY: `pages` names the live variant.
         let (cont, args) = unsafe { ((*pages).cont, (*pages).cont_args) };
         let mut new_copy: *mut Self = ptr::null_mut();
-        let result = cont.map_or(KERN_SUCCESS, |cont| {
+        let result = cont.map_or(Ok(()), |cont| {
             // SAFETY: the continuation owns its argument and writes the next
             // copy through the out-pointer.
             unsafe { cont(args, &raw mut new_copy) }
@@ -1615,7 +1601,7 @@ impl VmMapCopy {
                     // SAFETY: the type word selects the live variant, and the
                     // copy holds the reference dropped here.
                     let object = unsafe { Self::object(copy) };
-                    unsafe { vm_object_deallocate(*object) };
+                    unsafe { vm_object::deallocate(*object) };
                 }
                 VM_MAP_COPY_PAGE_LIST => {
                     // SAFETY: the type word selects the live variant.
@@ -1817,17 +1803,6 @@ impl VmMapCopy {
     }
 }
 
-/// `vm_map_copy_discard()` in C.
-///
-/// # Safety
-///
-/// A non-null `copy` must be a live copy the caller owns; the call frees it.
-pub(crate) unsafe fn vm_map_copy_discard(copy: *mut VmMapCopy) {
-    if let Some(copy) = NonNull::new(copy) {
-        unsafe { VmMapCopy::discard(copy) };
-    }
-}
-
 /// Whether `cont` is `vm_map_copy_discard_cont()` below, which
 /// `vm_map_copy_discard()` recognizes and follows iteratively instead of
 /// recursing once per link of a page-list chain.
@@ -1842,17 +1817,21 @@ fn is_discard_cont(cont: VmMapCopyContFn) -> bool {
 /// `cont_args` must be null or the live copy a continuation chain names, and
 /// `copy_result` must be null or point at writable storage for one copy
 /// pointer.
-pub(crate) unsafe extern "C" fn vm_map_copy_discard_cont(
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a page-list copy's continuation has this signature"
+)]
+pub(crate) unsafe fn vm_map_copy_discard_cont(
     cont_args: *mut VmMapCopyinArgs,
     copy_result: *mut *mut VmMapCopy,
-) -> c_int {
+) -> Result<(), Error> {
     unsafe {
         VmMapCopy::discard_cont(NonNull::new(cont_args.cast::<VmMapCopy>()));
     };
     if let Some(copy_result) = NonNull::new(copy_result) {
         unsafe { copy_result.as_ptr().write(ptr::null_mut()) };
     }
-    KERN_SUCCESS
+    Ok(())
 }
 
 impl VmMapEntry {
@@ -2615,7 +2594,7 @@ impl VmMap {
             Self::deallocate(submap);
         } else {
             // SAFETY: the entry held the only reference to the object.
-            unsafe { vm_object_deallocate(object) };
+            unsafe { vm_object::deallocate(object) };
         }
 
         unsafe {
@@ -2806,19 +2785,22 @@ impl VmMap {
 
         // SAFETY: both entries are live and the map is locked.
         let coalesced = unsafe {
-            vm_object_coalesce(
-                (*prev.as_ptr()).object.vm_object,
-                (*entry.as_ptr()).object.vm_object,
+            vm_object::coalesce(
+                NonNull::new((*prev.as_ptr()).object.vm_object),
+                NonNull::new((*entry.as_ptr()).object.vm_object),
                 (*prev.as_ptr()).offset,
                 (*entry.as_ptr()).offset,
                 prev_size,
                 entry_size,
-                addr_of_mut!((*prev.as_ptr()).object.vm_object),
-                addr_of_mut!((*prev.as_ptr()).offset),
             )
         };
-        if coalesced == 0 {
+        let Some((object, offset)) = coalesced else {
             return false;
+        };
+        // SAFETY: `prev` is live and the map is locked.
+        unsafe {
+            (*prev.as_ptr()).object.vm_object = object;
+            (*prev.as_ptr()).offset = offset;
         }
 
         if self.hint() == entry.as_ptr() {
@@ -3640,21 +3622,24 @@ impl VmMap {
             };
 
         if extend_prev {
-            // SAFETY: `entry` is live and the map is locked, so
-            // `vm_object_coalesce` may write both out-parameters.
+            // SAFETY: `entry` is live and the map is locked, so the
+            // coalesced object and offset may replace its own.
             let coalesced = unsafe {
                 let before = &mut *entry.as_ptr();
-                vm_object_coalesce(
-                    before.object.vm_object,
-                    request.object,
+                let coalesced = vm_object::coalesce(
+                    NonNull::new(before.object.vm_object),
+                    NonNull::new(request.object),
                     before.offset,
                     request.offset,
                     before.links.end.wrapping_sub(before.links.start),
                     request.size,
-                    addr_of_mut!(before.object.vm_object),
-                    addr_of_mut!(before.offset),
-                )
-            } != 0;
+                );
+                if let Some((object, offset)) = coalesced {
+                    before.object.vm_object = object;
+                    before.offset = offset;
+                }
+                coalesced.is_some()
+            };
 
             if coalesced {
                 self.size = self.size.wrapping_add(request.size);
@@ -3688,21 +3673,24 @@ impl VmMap {
             };
 
         if extend_next {
-            // SAFETY: `next_entry` is live and the map is locked, so
-            // `vm_object_coalesce` may write both out-parameters.
+            // SAFETY: `next_entry` is live and the map is locked, so the
+            // coalesced object and offset may replace its own.
             let coalesced = unsafe {
                 let after = &mut *next_entry.as_ptr();
-                vm_object_coalesce(
-                    request.object,
-                    after.object.vm_object,
+                let coalesced = vm_object::coalesce(
+                    NonNull::new(request.object),
+                    NonNull::new(after.object.vm_object),
                     request.offset,
                     after.offset,
                     request.size,
                     after.links.end.wrapping_sub(after.links.start),
-                    addr_of_mut!(after.object.vm_object),
-                    addr_of_mut!(after.offset),
-                )
-            } != 0;
+                );
+                if let Some((object, offset)) = coalesced {
+                    after.object.vm_object = object;
+                    after.offset = offset;
+                }
+                coalesced.is_some()
+            };
 
             if coalesced {
                 self.size = self.size.wrapping_add(request.size);
@@ -3935,7 +3923,7 @@ impl VmMap {
     }
 
     /// The `VM_INHERIT_COPY` case of `vm_map_fork()`: give the new map a
-    /// private copy, either via `vm_object_copy_temporary` or the core
+    /// private copy, either via [`vm_object::copy_temporary`] or the core
     /// `copyin`.  Returns the entry to resume the scan at when the map was
     /// unlocked for the copy.
     ///
@@ -3960,22 +3948,21 @@ impl VmMap {
             // SAFETY: `new_entry` is unlinked storage.
             unsafe { VmMapEntry::copy(new_entry, old_entry) };
 
-            let mut src_needs_copy: c_int = 0;
-            let mut new_needs_copy: c_int = 0;
-            // SAFETY: `new_entry` is live and unlinked; the object copy writes
-            // both out-parameters.
+            // SAFETY: `new_entry` is live and unlinked, and its object is
+            // null or live.
             let copied = unsafe {
-                vm_object_copy_temporary(
-                    addr_of_mut!((*new_entry.as_ptr()).object.vm_object),
-                    addr_of_mut!((*new_entry.as_ptr()).offset),
-                    &raw mut src_needs_copy,
-                    &raw mut new_needs_copy,
-                ) != 0
+                vm_object::copy_temporary(NonNull::new(
+                    (*new_entry.as_ptr()).object.vm_object,
+                ))
             };
 
-            if copied {
+            if let Some(copied) = copied {
+                // SAFETY: `new_entry` is live and unlinked.
+                unsafe {
+                    (*new_entry.as_ptr()).object.vm_object = copied.object;
+                }
                 // SAFETY: the entry is live under the map lock.
-                if src_needs_copy != 0
+                if copied.src_needs_copy
                     && unsafe { !(*old_entry.as_ptr()).needs_copy() }
                 {
                     // SAFETY: the old entry and its object are live under the
@@ -4004,7 +3991,8 @@ impl VmMap {
 
                 // SAFETY: `new_entry` is live and unlinked.
                 unsafe {
-                    (*new_entry.as_ptr()).set_needs_copy(new_needs_copy != 0);
+                    (*new_entry.as_ptr())
+                        .set_needs_copy(copied.dst_needs_copy);
                 };
 
                 // SAFETY: `forked_map` is private and unlocked.
@@ -4366,27 +4354,23 @@ impl VmMap {
         };
 
         if !copy_successful && !was_wired {
-            let mut src_needs_copy: c_int = 0;
-            let mut new_entry_needs_copy: c_int = 0;
-            // SAFETY: `new_entry` is live unlinked storage; the object routine
-            // writes both out-parameters and the object/offset it is handed.
+            // SAFETY: `new_entry` is live unlinked storage, and its object is
+            // null or live.
             let optimized = unsafe {
-                vm_object_copy_temporary(
-                    addr_of_mut!((*new_entry.as_ptr()).object.vm_object),
-                    addr_of_mut!((*new_entry.as_ptr()).offset),
-                    &raw mut src_needs_copy,
-                    &raw mut new_entry_needs_copy,
-                ) != 0
+                vm_object::copy_temporary(NonNull::new(
+                    (*new_entry.as_ptr()).object.vm_object,
+                ))
             };
 
-            if optimized {
+            if let Some(optimized) = optimized {
                 // SAFETY: `new_entry` is live unlinked storage.
                 unsafe {
+                    (*new_entry.as_ptr()).object.vm_object = optimized.object;
                     (*new_entry.as_ptr())
-                        .set_needs_copy(new_entry_needs_copy != 0);
+                        .set_needs_copy(optimized.dst_needs_copy);
                 };
 
-                if src_needs_copy != 0
+                if optimized.src_needs_copy
                     && !unsafe {
                         // SAFETY: `entry` is a live entry of the locked map.
                         (*entry.as_ptr()).needs_copy()
@@ -4502,7 +4486,7 @@ impl VmMap {
                 // SAFETY: `new_entry` holds the reference dropped here and is
                 // unlinked.
                 unsafe {
-                    vm_object_deallocate(
+                    vm_object::deallocate(
                         (*new_entry.as_ptr()).object.vm_object,
                     );
                     VmMapEntry::dispose(new_entry);
@@ -4528,16 +4512,15 @@ impl VmMap {
         Self::unlock(map);
 
         if was_wired {
-            // SAFETY: `src_object` is live and the entry holds its reference.
+            // SAFETY: `src_object` is live and the entry holds its
+            // reference; a failed copy leaves the entry without an object.
             unsafe {
                 (*src_object).lock.lock();
-                vm_object_copy_slowly(
-                    src_object,
-                    src_offset,
-                    src_size,
-                    0,
-                    addr_of_mut!((*new_entry.as_ptr()).object.vm_object),
-                );
+                (*new_entry.as_ptr()).object.vm_object =
+                    vm_object::copy_slowly(
+                        src_object, src_offset, src_size, false,
+                    )
+                    .map_or(ptr::null_mut(), NonNull::as_ptr);
             }
             // SAFETY: `new_entry` is live unlinked storage.
             unsafe {
@@ -4545,44 +4528,61 @@ impl VmMap {
                 (*new_entry.as_ptr()).set_needs_copy(false);
             }
         } else {
-            let mut new_entry_needs_copy: c_int = 0;
-            // SAFETY: `new_entry` is live unlinked storage; the object routine
-            // writes its object, offset and flag.
-            let result = unsafe {
-                vm_object_copy_strategically(
-                    src_object,
-                    src_offset,
-                    src_size,
-                    addr_of_mut!((*new_entry.as_ptr()).object.vm_object),
-                    addr_of_mut!((*new_entry.as_ptr()).offset),
-                    &raw mut new_entry_needs_copy,
-                )
+            // SAFETY: the source object is live and unlocked, and the entry
+            // holds its reference.
+            let copied = unsafe {
+                vm_object::copy_strategically(src_object, src_offset, src_size)
             };
-            // SAFETY: `new_entry` is live unlinked storage.
-            unsafe {
-                (*new_entry.as_ptr())
-                    .set_needs_copy(new_entry_needs_copy != 0);
+            // SAFETY: `new_entry` is live unlinked storage; each arm writes
+            // the slots the C's out-parameters reached.
+            let result = unsafe {
+                let new = &mut *new_entry.as_ptr();
+                match copied {
+                    StrategicResult::Copied {
+                        object,
+                        offset,
+                        needs_copy,
+                    } => {
+                        new.object.vm_object = object.as_ptr();
+                        new.offset = offset;
+                        new.set_needs_copy(needs_copy);
+                        Ok(())
+                    }
+                    StrategicResult::Interrupted => {
+                        new.object.vm_object = ptr::null_mut();
+                        new.offset = 0;
+                        new.set_needs_copy(false);
+                        Err(Error::Interrupted)
+                    }
+                    StrategicResult::NullObject(error) => {
+                        new.object.vm_object = ptr::null_mut();
+                        new.set_needs_copy(false);
+                        Err(error)
+                    }
+                    StrategicResult::Failed(error) => {
+                        new.set_needs_copy(false);
+                        Err(error)
+                    }
+                    StrategicResult::Unchanged => {
+                        new.set_needs_copy(false);
+                        Ok(())
+                    }
+                }
             };
 
-            if result != KERN_SUCCESS {
+            if let Err(error) = result {
                 // SAFETY: `new_entry` is live and unlinked.
                 unsafe { VmMapEntry::dispose(new_entry) };
                 Self::lock(map);
                 Self::unlock(map);
                 // SAFETY: the copy is live and owned here.
                 unsafe { VmMapCopy::discard(copy) };
-                let error = if let Err(error) = error_from_kern_return(result)
-                {
-                    error
-                } else {
-                    Error::Failure
-                };
                 return Err(error);
             }
         }
 
         // SAFETY: the reference taken above.
-        unsafe { vm_object_deallocate(src_object) };
+        unsafe { vm_object::deallocate(src_object) };
 
         Ok(())
     }
@@ -4632,10 +4632,10 @@ fn set_page_list_cont(
 /// `cont_args` must be a live argument block created by
 /// `VmMap::copyin_page_list`, and `copy_result` null (the abort call) or
 /// writable storage for one copy pointer.
-unsafe extern "C" fn vm_map_copyin_page_list_cont(
+unsafe fn vm_map_copyin_page_list_cont(
     cont_args: *mut VmMapCopyinArgs,
     copy_result: *mut *mut VmMapCopy,
-) -> c_int {
+) -> Result<(), Error> {
     let args = unsafe { &*cont_args };
     let do_abort = copy_result.is_null();
     let src_destroy = args.destroy_len != 0;
@@ -4645,18 +4645,18 @@ unsafe extern "C" fn vm_map_copyin_page_list_cont(
         kpanic!("vm_map_copyin_page_list_cont", "vm_map_copyin_page_list")
     };
 
-    let mut result = KERN_SUCCESS;
+    let mut result = Ok(());
 
     if do_abort || src_destroy_only {
         if src_destroy {
             // SAFETY: the argument block holds the live map reference the
             // continuation was given.
-            result = kern_return(unsafe {
+            result = unsafe {
                 (*map.as_ptr()).remove(
                     args.destroy_addr,
                     args.destroy_addr.wrapping_add(args.destroy_len),
                 )
-            });
+            };
         }
         if !do_abort {
             unsafe { copy_result.write(ptr::null_mut()) };
@@ -4680,9 +4680,9 @@ unsafe extern "C" fn vm_map_copyin_page_list_cont(
                         .write(copy.map_or(ptr::null_mut(), NonNull::as_ptr));
                 };
                 returned_copy = copy;
-                KERN_SUCCESS
+                Ok(())
             }
-            Err(error) => error.as_kern_return(),
+            Err(error) => Err(error),
         };
 
         if src_destroy && args.steal_pages == 0 {
@@ -5133,7 +5133,7 @@ impl VmMap {
                 )
             };
 
-            if fault.result == VM_FAULT_SUCCESS {
+            if fault.result.is_ok() {
                 if !fault.top_page.is_null() {
                     // SAFETY: the fault returned a top page holding a paging
                     // reference on `src_object`; free it and drop both.
@@ -5152,7 +5152,7 @@ impl VmMap {
             }
 
             match fault.result {
-                VM_FAULT_INTERRUPTED | VM_FAULT_RETRY => {
+                Err(FaultError::Interrupted | FaultError::Retry) => {
                     // SAFETY: the fault consumed the lock and paging
                     // reference; take them again before retrying.
                     unsafe {
@@ -5160,7 +5160,7 @@ impl VmMap {
                         vm_object::paging_begin(src_object);
                     }
                 }
-                VM_FAULT_MEMORY_SHORTAGE => {
+                Err(FaultError::MemoryShortage) => {
                     // SAFETY: `vm_page_wait` owns the page queues.
                     unsafe { vm_page::wait(None) };
                     // SAFETY: `vm_page_wait` owns the page queues.
@@ -5169,7 +5169,7 @@ impl VmMap {
                         vm_object::paging_begin(src_object);
                     }
                 }
-                VM_FAULT_FICTITIOUS_SHORTAGE => {
+                Err(FaultError::FictitiousShortage) => {
                     // SAFETY: the page allocator owns its fictitious supply.
                     unsafe { vm_resident::more_fictitious() };
                     // SAFETY: the page allocator owns its fictitious supply.
@@ -5178,7 +5178,7 @@ impl VmMap {
                         vm_object::paging_begin(src_object);
                     }
                 }
-                VM_FAULT_MEMORY_ERROR => {
+                Err(FaultError::MemoryError) => {
                     Self::lock(map);
                     state.need_map_lookup = false;
                     // SAFETY: `pages` names the live variant.
@@ -5213,7 +5213,7 @@ impl VmMap {
                     unsafe { VmMapCopy::discard(copy) };
                     return Err(Error::MemoryError);
                 }
-                _ => {}
+                Ok(()) => {}
             }
         }
     }
@@ -5352,40 +5352,6 @@ impl VmMap {
                 );
             }
         }
-    }
-}
-
-/// `vm_map_copyin_page_list()` in C.
-///
-/// # Safety
-///
-/// `src_map` must point at a valid, unlocked map and `copy_result` at writable
-/// storage for one copy pointer.
-pub(crate) unsafe fn vm_map_copyin_page_list(
-    src_map: *mut VmMap,
-    src_addr: VmOffset,
-    len: VmSize,
-    src_destroy: c_int,
-    steal_pages: c_int,
-    copy_result: *mut *mut VmMapCopy,
-    is_cont: c_int,
-) -> c_int {
-    let map = unsafe { &mut *src_map };
-    match map.copyin_page_list(
-        src_addr,
-        len,
-        src_destroy != 0,
-        steal_pages != 0,
-        is_cont != 0,
-    ) {
-        Ok(copy) => {
-            unsafe {
-                copy_result
-                    .write(copy.map_or(ptr::null_mut(), NonNull::as_ptr));
-            };
-            KERN_SUCCESS
-        }
-        Err(error) => error.as_kern_return(),
     }
 }
 
@@ -5934,8 +5900,8 @@ impl VmMap {
                     let (cont_result, new_copy) =
                         unsafe { VmMapCopy::invoke_cont(current_copy) };
 
-                    if cont_result != KERN_SUCCESS {
-                        result = error_from_kern_return(cont_result);
+                    if let Err(error) = cont_result {
+                        result = Err(error);
                         Self::lock(map);
                         break 'pages;
                     }
@@ -6026,31 +5992,6 @@ impl VmMap {
             // SAFETY: the page queue lock is held.
             unsafe { vm_page::activate(m) };
         }
-    }
-}
-
-/// `vm_map_copyout()` in C.
-///
-/// # Safety
-///
-/// `dst_map` must be a valid, unlocked map and `dst_addr` writable storage for
-/// one address.
-pub(crate) unsafe fn vm_map_copyout(
-    dst_map: *mut VmMap,
-    dst_addr: *mut VmOffset,
-    copy: *mut VmMapCopy,
-) -> c_int {
-    let Some(copy) = NonNull::new(copy) else {
-        unsafe { dst_addr.write(0) };
-        return KERN_SUCCESS;
-    };
-    let map = unsafe { &mut *dst_map };
-    match unsafe { map.copyout(copy) } {
-        Ok(address) => {
-            unsafe { dst_addr.write(address) };
-            KERN_SUCCESS
-        }
-        Err(error) => error.as_kern_return(),
     }
 }
 
@@ -6306,7 +6247,7 @@ impl VmMap {
         };
 
         // SAFETY: the entry kept the reference dropped here.
-        unsafe { vm_object_deallocate(old_object) };
+        unsafe { vm_object::deallocate(old_object) };
 
         // SAFETY: `tmp_entry` is live and the map is locked.
         let start = unsafe { (*tmp_entry.as_ptr()).links.end };
@@ -6352,7 +6293,7 @@ impl VmMap {
         // SAFETY: the copy entry's object is live (the copy holds a
         // reference), the map is unlocked and the version, size and map are
         // valid, as `vm_fault_copy` requires.
-        let r = unsafe {
+        let copied = unsafe {
             vm_fault::copy(
                 NonNull::new((*copy_entry.as_ptr()).object.vm_object),
                 (*copy_entry.as_ptr()).offset,
@@ -6366,11 +6307,9 @@ impl VmMap {
         };
 
         // SAFETY: the reference taken above.
-        unsafe { vm_object_deallocate(dst_object) };
+        unsafe { vm_object::deallocate(dst_object) };
 
-        if r != KERN_SUCCESS {
-            error_from_kern_return(r)?;
-        }
+        copied?;
 
         if copy_entry_size != 0 {
             // SAFETY: `copy_entry` is live in the copy.
@@ -6391,7 +6330,7 @@ impl VmMap {
             // owns.
             unsafe {
                 (*copy_header.as_ptr()).entry_unlink(copy_entry, false);
-                vm_object_deallocate((*copy_entry.as_ptr()).object.vm_object);
+                vm_object::deallocate((*copy_entry.as_ptr()).object.vm_object);
             }
             // SAFETY: the entry is unlinked and unused.
             unsafe { VmMapEntry::dispose(copy_entry) };

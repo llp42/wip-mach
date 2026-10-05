@@ -7,8 +7,8 @@
 //! `kern/timer.h`.
 
 use crate::config::MAX_NCPUS;
-use crate::glue::time_value::TimeValue64;
 use crate::kern::thread::Thread;
+use crate::mig::time_value::TimeValue64;
 use crate::utils::cell::SyncCell;
 use core::cell::UnsafeCell;
 use core::ffi::c_uint;

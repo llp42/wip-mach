@@ -14,6 +14,3 @@ pub mod delay;
 
 #[path = "../../../../crates/kernel/src/utils/kd_queue.rs"]
 pub mod kd_queue;
-
-#[path = "../../../../crates/kernel/src/utils/string.rs"]
-pub mod string;

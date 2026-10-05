@@ -9,7 +9,7 @@
 
 use super::io_req::{
     D_NOWAIT, DEV_GET_SIZE, DEV_GET_SIZE_COUNT, DEV_GET_SIZE_DEVICE_SIZE,
-    DEV_GET_SIZE_RECORD_SIZE, DevT, IoReq, IoReqQueue, KERN_SUCCESS, drain,
+    DEV_GET_SIZE_RECORD_SIZE, DevT, IoReq, IoReqQueue, drain,
 };
 use crate::arch::x86_64::com;
 use crate::arch::x86_64::ioapic;
@@ -17,7 +17,7 @@ use crate::arch::x86_64::irq;
 use crate::arch::x86_64::pio::Port;
 use crate::arch::x86_64::spl;
 use crate::device::ds_routines::{device_read_alloc, ds_read_done, iodone};
-use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
+use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 use crate::device::subrs;
 use crate::kern::console::kprint;
 use crate::kern::sched_prim::{assert_wait, thread_block};
@@ -560,9 +560,9 @@ pub(crate) unsafe fn mouseopen(
     dev: DevT,
     _flags: c_int,
     _ior: *mut IoReq,
-) -> c_int {
+) -> IoResult {
     if mouse_in_use() != 0 {
-        return Err(DeviceError::AlreadyOpen).as_io_return();
+        return Err(DeviceError::AlreadyOpen);
     }
     set_mouse_in_use(1);
     let s = state();
@@ -603,7 +603,7 @@ pub(crate) unsafe fn mouseopen(
         _ => {}
     }
     s.mousebufindex = 0;
-    Ok(DeviceSuccess::Success).as_io_return()
+    Ok(DeviceSuccess::Success)
 }
 
 /// `mouseclose()` in C.
@@ -638,15 +638,12 @@ pub(crate) unsafe fn mouseclose(dev: DevT, _flags: c_int) {
 ///
 /// The device layer calls this with a valid, read-only request whose buffer
 /// `device_read_alloc()` may allocate; everything else runs at `SPLKD`.
-pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> IoResult {
     let wanted = unsafe { (*ior).count() };
     if wanted % size_of::<KdEvent>() as c_long != 0 {
-        return Err(DeviceError::InvalidSize).as_io_return();
+        return Err(DeviceError::InvalidSize);
     }
-    let err = unsafe { device_read_alloc(ior, wanted as usize) };
-    if err != KERN_SUCCESS {
-        return err;
-    }
+    unsafe { device_read_alloc(ior, wanted as usize) }?;
     let s = state();
     // SAFETY: queueing a request and the event queue share SPLKD.
     let sp = unsafe { spl::spltty() };
@@ -654,7 +651,7 @@ pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> c_int {
         if unsafe { (*ior).mode() } & D_NOWAIT != 0 {
             // SAFETY: `sp` is the level `spltty()` returned.
             unsafe { spl::splx(sp) };
-            return Err(DeviceError::WouldBlock).as_io_return();
+            return Err(DeviceError::WouldBlock);
         }
         unsafe { (*ior).set_done(mouse_read_done) };
         // SAFETY: the read queue is this state's, at SPLKD, and the request
@@ -662,13 +659,13 @@ pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> c_int {
         unsafe { read_queue(s).push_back_ptr(NonNull::new_unchecked(ior)) };
         // SAFETY: `sp` is the level `spltty()` returned.
         unsafe { spl::splx(sp) };
-        return Ok(DeviceSuccess::IoQueued).as_io_return();
+        return Ok(DeviceSuccess::IoQueued);
     }
     let count = drain(&mut s.queue, unsafe { &mut *ior });
     // SAFETY: `sp` is the level `spltty()` returned.
     unsafe { spl::splx(sp) };
     unsafe { (*ior).set_residual((*ior).count() - count) };
-    Ok(DeviceSuccess::Success).as_io_return()
+    Ok(DeviceSuccess::Success)
 }
 
 /// `mouse_read_done()` in C, as a callback value.
@@ -677,7 +674,7 @@ pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> c_int {
 ///
 /// `ior` must be the live request `mouseread()` queued, and the call must
 /// come through `ior`'s `done` slot at `spltty`, as `iodone()` invokes it.
-unsafe fn mouse_read_done(ior: *mut IoReq) -> c_int {
+unsafe fn mouse_read_done(ior: *mut IoReq) -> bool {
     let s = state();
     let sp = unsafe { spl::spltty() };
     if s.queue.is_empty() {
@@ -685,7 +682,7 @@ unsafe fn mouse_read_done(ior: *mut IoReq) -> c_int {
         unsafe { read_queue(s).push_back_ptr(NonNull::new_unchecked(ior)) };
         // SAFETY: `sp` is the level `spltty()` returned.
         unsafe { spl::splx(sp) };
-        return 0;
+        return false;
     }
     let count = drain(&mut s.queue, unsafe { &mut *ior });
     // SAFETY: `sp` is the level `spltty()` returned.
@@ -693,7 +690,7 @@ unsafe fn mouse_read_done(ior: *mut IoReq) -> c_int {
     unsafe { (*ior).set_residual((*ior).count() - count) };
     // SAFETY: the request is complete; its data buffer is populated.
     unsafe { ds_read_done(ior) };
-    1
+    true
 }
 
 /// `mousegetstat()` in C.
@@ -707,7 +704,7 @@ pub(crate) unsafe fn mousegetstat(
     flavor: c_uint,
     data: *mut c_int,
     count: *mut u32,
-) -> c_int {
+) -> Result<(), DeviceError> {
     if flavor == DEV_GET_SIZE {
         unsafe {
             *data.add(DEV_GET_SIZE_DEVICE_SIZE) = 0;
@@ -715,9 +712,9 @@ pub(crate) unsafe fn mousegetstat(
                 size_of::<KdEvent>() as c_int;
             *count = DEV_GET_SIZE_COUNT;
         }
-        Ok(DeviceSuccess::Success).as_io_return()
+        Ok(())
     } else {
-        Err(DeviceError::InvalidOperation).as_io_return()
+        Err(DeviceError::InvalidOperation)
     }
 }
 

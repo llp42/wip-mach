@@ -24,6 +24,7 @@ use crate::kern::lock::SimpleLock;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, thread_block, thread_wakeup_prim,
 };
+use crate::kern::thread::Continuation;
 use crate::utils::cell::SyncCell;
 use crate::vm::memory_object::default_manager;
 use crate::vm::types::{VmObject, VmProt};
@@ -818,7 +819,7 @@ unsafe fn remove_mappings(page: *mut VmPage) {
         (*page).set_busy(true);
         pmap_page_protect((*page).phys_addr, VmProt::NONE.bits());
         if !(*page).is_dirty() {
-            (*page).set_dirty(pmap_is_modified((*page).phys_addr) != 0);
+            (*page).set_dirty(pmap_is_modified((*page).phys_addr));
         }
     }
 }
@@ -1828,7 +1829,7 @@ unsafe fn seg_balance_page(
     if !was_active
         // SAFETY: the source page is live and its object lock is held.
         && !unsafe { (*src).is_reference() }
-        && unsafe { pmap_is_referenced((*src).phys_addr) } != 0
+        && unsafe { pmap_is_referenced((*src).phys_addr) }
     {
         // SAFETY: the page is live.
         unsafe { (*src).set_reference(true) };
@@ -2839,7 +2840,7 @@ unsafe fn evict_one(external: bool, active: bool, alloc_paused: bool) -> bool {
         if !active
             // SAFETY: the page is live and its object lock is held.
             && (unsafe { (*page).is_reference() }
-                || unsafe { pmap_is_referenced((*page).phys_addr) } != 0)
+                || unsafe { pmap_is_referenced((*page).phys_addr) })
         {
             // SAFETY: the segment, object and page-queues locks are held.
             unsafe { evict_reactivate(seg, page, object) };
@@ -3059,7 +3060,7 @@ pub(crate) fn refill_inactive() {
 ///
 /// The caller must not hold `vm_page_queue_free_lock` and must be ready to
 /// block.
-pub(crate) unsafe fn wait(continuation: Option<unsafe extern "C" fn()>) {
+pub(crate) unsafe fn wait(continuation: Continuation) {
     VM_PAGE_QUEUE_FREE_LOCK.lock();
 
     // SAFETY: the state is live for the kernel's lifetime.

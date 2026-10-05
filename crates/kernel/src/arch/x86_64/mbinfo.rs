@@ -5,13 +5,13 @@
 
 //! `/dev/mbinfo`: `mbinfo.c`'s raw multiboot information device.
 
-use crate::arch::x86_64::io_req::{DevT, IoReq, KERN_SUCCESS};
+use crate::arch::x86_64::io_req::{DevT, IoReq};
 use crate::arch::x86_64::multiboot::MultibootRawInfo;
 use crate::device::ds_routines::device_read_alloc;
-use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
+use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 use crate::utils::cell::SyncCell;
 use core::cell::UnsafeCell;
-use core::ffi::{c_int, c_long};
+use core::ffi::c_long;
 use core::mem::size_of;
 use core::ptr;
 
@@ -37,20 +37,15 @@ pub(crate) unsafe fn mbinfo_register_boot_data(mbi: *const MultibootRawInfo) {
 ///
 /// Called from the `/dev/mbinfo` device switch in `conf.c`; `ior` must be the
 /// request the device layer passed.
-pub(crate) unsafe fn mbinforead(_dev: DevT, ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn mbinforead(_dev: DevT, ior: *mut IoReq) -> IoResult {
     // SAFETY: the device layer owns the request for this call.
     let ior = unsafe { &mut *ior };
     let count = ior.count();
     if count > size_of::<MultibootRawInfo>() as c_long {
-        return Err(DeviceError::InvalidSize).as_io_return();
+        return Err(DeviceError::InvalidSize);
     }
     // SAFETY: `count` bytes fit the info block, checked above.
-    let err = unsafe {
-        device_read_alloc(ptr::from_mut::<IoReq>(ior), count as usize)
-    };
-    if err != KERN_SUCCESS {
-        return err;
-    }
+    unsafe { device_read_alloc(ptr::from_mut::<IoReq>(ior), count as usize) }?;
     // SAFETY: the request now has a buffer of `count` bytes, and the info
     // block is at least that large.
     unsafe {
@@ -61,5 +56,5 @@ pub(crate) unsafe fn mbinforead(_dev: DevT, ior: *mut IoReq) -> c_int {
         );
     };
     ior.set_residual(0);
-    Ok(DeviceSuccess::Success).as_io_return()
+    Ok(DeviceSuccess::Success)
 }

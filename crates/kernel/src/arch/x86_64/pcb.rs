@@ -16,6 +16,7 @@
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{KERNEL_STACK_SIZE, VM_MAX_USER_ADDRESS};
 use crate::arch::x86_64::cswitch;
+use crate::arch::x86_64::error::Error;
 use crate::arch::x86_64::fpu::{self, I386FpSaveState};
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::arch::x86_64::pmap::{activate_user, deactivate_user};
@@ -26,7 +27,6 @@ use crate::kern::lock::SimpleLock;
 use crate::kern::slab::{CacheInitFlags, KmemCache};
 use crate::kern::task::{Task, current_task};
 use crate::kern::thread::{Continuation, StackResume, Thread};
-use crate::kern::types::KernError;
 use crate::vm::vm_map::VmMap;
 use core::ffi::{c_int, c_long, c_uint, c_ulong, c_ushort, c_void};
 use core::mem::{align_of, offset_of, size_of};
@@ -887,11 +887,11 @@ pub(crate) unsafe fn thread_setstatus(
     flavor: c_int,
     tstate: *mut c_uint,
     count: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     match flavor {
         I386_THREAD_STATE | I386_REGS_SEGS_STATE => {
             if count < I386_THREAD_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             let state = tstate.cast::<I386ThreadState>();
             let saved_state = unsafe { &mut (*(*thread).pcb).iss };
@@ -906,7 +906,7 @@ pub(crate) unsafe fn thread_setstatus(
                         || (*state).ss == 0
                         || ((*state).ss & SEL_PL) != SEL_PL_U
                     {
-                        return Err(KernError::InvalidArgument);
+                        return Err(Error::InvalidArgument);
                     }
                 }
             }
@@ -939,7 +939,7 @@ pub(crate) unsafe fn thread_setstatus(
 
         fpu::I386_FLOAT_STATE => {
             if count < I386_FLOAT_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 fpu::fpu_set_state(thread, tstate.cast::<c_void>(), flavor)
@@ -953,7 +953,7 @@ pub(crate) unsafe fn thread_setstatus(
             xfp_size /= size_of::<c_int>();
             // `c_uint` is 32 bits and `usize` is at least that wide here.
             if (count as usize) < xfp_size {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 fpu::fpu_set_state(thread, tstate.cast::<c_void>(), flavor)
@@ -962,14 +962,14 @@ pub(crate) unsafe fn thread_setstatus(
 
         I386_ISA_PORT_MAP_STATE => {
             if count < I386_ISA_PORT_MAP_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             Ok(())
         }
 
         I386_DEBUG_STATE => {
             if count < I386_DEBUG_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 db_interface::set_debug_state(
@@ -981,7 +981,7 @@ pub(crate) unsafe fn thread_setstatus(
 
         I386_FSGS_BASE_STATE => {
             if count < I386_FSGS_BASE_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 let state = tstate.cast::<I386FsgsBaseState>();
@@ -999,7 +999,7 @@ pub(crate) unsafe fn thread_setstatus(
             Ok(())
         }
 
-        _ => Err(KernError::InvalidArgument),
+        _ => Err(Error::InvalidArgument),
     }
 }
 
@@ -1016,14 +1016,14 @@ pub(crate) unsafe fn thread_getstatus(
     flavor: c_int,
     tstate: *mut c_uint,
     count: *mut c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let requested = unsafe { *count };
 
     match flavor {
         THREAD_STATE_FLAVOR_LIST => {
             let ncount: c_uint = 3;
             if requested < ncount {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             // SAFETY: the check above leaves three writable words.
             unsafe {
@@ -1041,7 +1041,7 @@ pub(crate) unsafe fn thread_getstatus(
 
         fpu::I386_FLOAT_STATE => {
             if requested < I386_FLOAT_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 *count = I386_FLOAT_STATE_COUNT;
@@ -1056,7 +1056,7 @@ pub(crate) unsafe fn thread_getstatus(
             xfp_size /= size_of::<c_int>();
             // `c_uint` is 32 bits and `usize` is at least that wide here.
             if (requested as usize) < xfp_size {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 *count = xfp_size as c_uint;
@@ -1066,7 +1066,7 @@ pub(crate) unsafe fn thread_getstatus(
 
         I386_ISA_PORT_MAP_STATE => {
             if requested < I386_ISA_PORT_MAP_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 let state = tstate.cast::<I386IsaPortMapState>();
@@ -1093,7 +1093,7 @@ pub(crate) unsafe fn thread_getstatus(
 
         I386_DEBUG_STATE => {
             if requested < I386_DEBUG_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 db_interface::get_debug_state(
@@ -1107,7 +1107,7 @@ pub(crate) unsafe fn thread_getstatus(
 
         I386_FSGS_BASE_STATE => {
             if requested < I386_FSGS_BASE_STATE_COUNT {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             }
             unsafe {
                 let state = tstate.cast::<I386FsgsBaseState>();
@@ -1118,7 +1118,7 @@ pub(crate) unsafe fn thread_getstatus(
             Ok(())
         }
 
-        _ => Err(KernError::InvalidArgument),
+        _ => Err(Error::InvalidArgument),
     }
 }
 
@@ -1134,9 +1134,9 @@ unsafe fn get_thread_state(
     tstate: *mut c_uint,
     requested: c_uint,
     count: *mut c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if requested < I386_THREAD_STATE_COUNT {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
     let (state, saved_state) = unsafe {
         (tstate.cast::<I386ThreadState>(), &mut (*(*thread).pcb).iss)

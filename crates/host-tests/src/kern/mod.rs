@@ -6,5 +6,5 @@
 #[path = "../../../../crates/kernel/src/kern/policy.rs"]
 pub mod policy;
 
-#[path = "../../../../crates/kernel/src/kern/types.rs"]
-pub mod types;
+#[path = "../../../../crates/kernel/src/kern/error.rs"]
+pub mod error;

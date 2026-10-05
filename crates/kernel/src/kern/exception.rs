@@ -10,13 +10,14 @@
 
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::user_access;
+use crate::ipc::error::ReceiveError;
 use crate::ipc::ipc_entry::{self, IE_BITS_GEN_ONE};
-use crate::ipc::ipc_kmsg::{self, Kmsg, MsgReturn};
+use crate::ipc::ipc_kmsg::{self, Kmsg};
 use crate::ipc::ipc_mqueue::{self, Received};
 use crate::ipc::ipc_object;
 use crate::ipc::ipc_port;
 use crate::ipc::ipc_space;
-use crate::ipc::ipc_thread::{IpcThreadQueue, ThreadRef};
+use crate::ipc::ipc_thread::{IpcThreadQueue, IpcWait, ThreadRef};
 use crate::ipc::{
     IpcMqueue, IpcPort, IpcSpace, IpcTarget, MachMsgHeader, MachMsgType,
     MigReplyHeader,
@@ -28,21 +29,14 @@ use crate::kern::ipc_tt::{
     retrieve_task_self_fast, retrieve_thread_self_fast,
 };
 use crate::kern::thread::Thread;
+use crate::mig::code::{KERN_SUCCESS, MACH_MSG_SUCCESS, kern_return};
 use core::ffi::{c_int, c_long, c_uint, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// `KERN_SUCCESS` of <`mach/kern_return.h`>.
-const KERN_SUCCESS: c_int = 0;
-/// `MACH_MSG_SUCCESS` of <mach/message.h>.
-const MACH_MSG_SUCCESS: c_int = 0;
-/// `MACH_RCV_INTERRUPTED` of <mach/message.h>.
-const MACH_RCV_INTERRUPTED: c_int = 0x1000_4005;
-/// `MACH_RCV_PORT_DIED` of <mach/message.h>.
-const MACH_RCV_PORT_DIED: c_int = 0x1000_4009;
-/// `MIG_REPLY_MISMATCH` of <`mach/mig_errors.h`>.
-const MIG_REPLY_MISMATCH: c_int = -301;
+/// The exception number zero, which names no exception.
+const NO_EXCEPTION: c_int = 0;
 /// `MACH_RCV_NOTIFY` of <mach/message.h>.
 const MACH_RCV_NOTIFY: c_int = 0x0000_0200;
 /// `MACH_MSG_OPTION_NONE` of <mach/message.h>.
@@ -225,7 +219,7 @@ pub(crate) unsafe fn exception(
 ) -> ! {
     let self_ = per_cpu::thread();
 
-    if exception_ == KERN_SUCCESS {
+    if exception_ == NO_EXCEPTION {
         kpanic!("exception", "exception")
     }
 
@@ -335,7 +329,7 @@ pub(crate) unsafe fn try_task(
         exc_port.increment_srights();
         exc_port.unlock();
 
-        (*self_).saved.exception.exc = KERN_SUCCESS;
+        (*self_).saved.exception.exc = NO_EXCEPTION;
     }
 
     // SAFETY: the running thread and its task are live.
@@ -411,7 +405,8 @@ impl Rights {
             ptr::addr_of_mut!((*exc).subcode_type).write(EXC_SUBCODE_PROTO);
             ptr::addr_of_mut!((*exc).subcode).write(self.subcode);
 
-            ipc_mqueue::send_always(self.kmsg.as_ptr());
+            // An unlimited send always queues the message.
+            let _ = ipc_mqueue::send_always(self.kmsg.as_ptr());
         }
 
         // SAFETY: the reply port is the live special-space port this call
@@ -422,7 +417,7 @@ impl Rights {
             // SAFETY: the port lock is held.
             unsafe { self.reply_port.unlock() };
             // SAFETY: nothing is locked and this call owns the message.
-            unsafe { continue_slow(MACH_RCV_PORT_DIED, None, 0) }
+            unsafe { continue_slow(Err(ReceiveError::PortDied)) }
         }
         // SAFETY: the reply queue is live; the lock order is the C's.
         unsafe {
@@ -442,16 +437,14 @@ impl Rights {
                 Some(exception_raise_continue),
             )
         } {
-            Received::Kmsg { kmsg, seqno } => {
+            Received::Kmsg { kmsg, .. } => {
                 // SAFETY: the receive handed over a live message.
-                unsafe { continue_slow(MACH_MSG_SUCCESS, Some(kmsg), seqno) }
+                unsafe { continue_slow(Ok(kmsg)) }
             }
             Received::TooLarge { .. } => unsafe {
-                continue_slow(MsgReturn::RCV_TOO_LARGE.raw(), None, 0)
+                continue_slow(Err(ReceiveError::TooLarge))
             },
-            Received::Failed { code } => unsafe {
-                continue_slow(code.raw(), None, 0)
-            },
+            Received::Failed { error } => unsafe { continue_slow(Err(error)) },
         }
     }
 
@@ -507,7 +500,7 @@ impl Rights {
                 ptr::addr_of_mut!((*exc).task).write(self.task_port.addr());
                 ipc_kmsg::destroy(self.kmsg);
                 crate::arch::x86_64::locore::thread_syscall_return(
-                    MsgReturn::RCV_TOO_LARGE.raw(),
+                    c_int::from(ReceiveError::TooLarge),
                 );
             }
         }
@@ -613,7 +606,7 @@ unsafe fn finish_queues(
     unsafe {
         let threads = (*reply_mqueue).threads().cast::<IpcThreadQueue>();
         (*threads).enqueue(ThreadRef::new(self_.cast()));
-        (*self_).ith_state = MsgReturn::RCV_IN_PROGRESS.raw();
+        (*self_).ith_state = IpcWait::Receiving;
         (*self_).data.msize = MACH_MSG_SIZE_MAX;
         (*reply_mqueue).unlock();
 
@@ -721,7 +714,9 @@ unsafe fn finish_abort(
             };
             // SAFETY: `thread_syscall_return` never returns.
             unsafe {
-                crate::arch::x86_64::locore::thread_syscall_return(error.raw())
+                crate::arch::x86_64::locore::thread_syscall_return(
+                    c_int::from(error),
+                );
             };
         }
     }
@@ -742,27 +737,27 @@ unsafe fn finish_copyout(
     receiver: *mut Thread,
 ) -> ! {
     // SAFETY: nothing is locked and the caller owns both body rights.
-    let (thread_mr, thread_name) = unsafe {
+    let (thread_lost, thread_name) = unsafe {
         ipc_kmsg::copyout_object(
             space,
             self_.thread_port,
             MACH_MSG_TYPE_MOVE_SEND,
         )
     };
-    let (task_mr, task_name) = unsafe {
+    let (task_lost, task_name) = unsafe {
         ipc_kmsg::copyout_object(
             space,
             self_.task_port,
             MACH_MSG_TYPE_MOVE_SEND,
         )
     };
-    let mr = thread_mr | task_mr;
+    let lost = thread_lost | task_lost;
     // SAFETY: the record's two name slots are writable.
     unsafe {
         ptr::addr_of_mut!((*exc).thread).write(thread_name as usize);
         ptr::addr_of_mut!((*exc).task).write(task_name as usize);
     }
-    if mr != MsgReturn::SUCCESS {
+    if !lost.is_none() {
         // SAFETY: the failed body copyout leaves the message to this call,
         // and the receiver's buffer is writable.
         let _ = unsafe {
@@ -774,9 +769,9 @@ unsafe fn finish_copyout(
         };
         // SAFETY: `thread_syscall_return` never returns.
         unsafe {
-            crate::arch::x86_64::locore::thread_syscall_return(
-                (mr | MsgReturn::RCV_BODY_ERROR).raw(),
-            )
+            crate::arch::x86_64::locore::thread_syscall_return(c_int::from(
+                ReceiveError::Body(lost),
+            ));
         };
     }
 
@@ -789,11 +784,12 @@ unsafe fn finish_copyout(
             (*receiver).saved.receive.msg,
             size_of::<MachException>(),
         )
-    } != 0
+    }
+    .is_err()
     {
         // SAFETY: the failed copyout leaves the message to this call, and
         // the receiver's buffer is writable.
-        let mr = unsafe {
+        let put = unsafe {
             ipc_kmsg::put(
                 (*receiver).saved.receive.msg,
                 self_.kmsg,
@@ -802,14 +798,16 @@ unsafe fn finish_copyout(
         };
         // SAFETY: `thread_syscall_return` never returns.
         unsafe {
-            crate::arch::x86_64::locore::thread_syscall_return(mr.raw())
+            crate::arch::x86_64::locore::thread_syscall_return(kern_return(
+                put,
+            ));
         };
     }
 
     // SAFETY: the message was copied out and this call owns it.
     if !unsafe { ipc_kmsg::cache_free_try(self_.kmsg) } {
         // SAFETY: the free failed, so this call owns the message.
-        let mr = unsafe {
+        let put = unsafe {
             ipc_kmsg::put(
                 (*receiver).saved.receive.msg,
                 self_.kmsg,
@@ -818,7 +816,9 @@ unsafe fn finish_copyout(
         };
         // SAFETY: `thread_syscall_return` never returns.
         unsafe {
-            crate::arch::x86_64::locore::thread_syscall_return(mr.raw())
+            crate::arch::x86_64::locore::thread_syscall_return(kern_return(
+                put,
+            ));
         };
     }
 
@@ -1040,14 +1040,15 @@ unsafe fn handoff(
 }
 
 /// `exception_parse_reply()` of kern/exception.c: check and consume the reply
-/// the server sent back.
+/// the server sent back, and return whether the server handled the
+/// exception, its reply well formed and its return code `KERN_SUCCESS`.
 ///
 /// # Safety
 ///
 /// The caller must own the live reply message and pass it to no one else:
 /// this call always consumes it, either destroying it if malformed or
 /// freeing it to the cache once its return code is read.
-pub(crate) unsafe fn parse_reply(kmsg: Kmsg) -> c_int {
+pub(crate) unsafe fn parse_reply(kmsg: Kmsg) -> bool {
     let msg = unsafe { kmsg.header().cast::<MigReplyHeader>() };
     let head = unsafe { ptr::addr_of_mut!((*msg).head) };
 
@@ -1067,14 +1068,14 @@ pub(crate) unsafe fn parse_reply(kmsg: Kmsg) -> c_int {
             (*head).set_remote(MACH_PORT_NAME_NULL as usize);
             ipc_kmsg::destroy(kmsg);
         }
-        return MIG_REPLY_MISMATCH;
+        return false;
     }
 
     // SAFETY: the checked header is a whole record.
     let code = unsafe { (*msg).ret_code };
     // SAFETY: the reply is clean and this call owns it.
     unsafe { ipc_kmsg::cache_free(kmsg) };
-    code
+    code == KERN_SUCCESS
 }
 
 /// `exception_raise_continue()` of kern/exception.c: resume the receive after
@@ -1104,16 +1105,14 @@ pub(crate) unsafe fn raise_continue() -> ! {
             Some(exception_raise_continue),
         )
     } {
-        Received::Kmsg { kmsg, seqno } => {
+        Received::Kmsg { kmsg, .. } => {
             // SAFETY: the receive handed over a live message.
-            unsafe { continue_slow(MACH_MSG_SUCCESS, Some(kmsg), seqno) }
+            unsafe { continue_slow(Ok(kmsg)) }
         }
         Received::TooLarge { .. } => unsafe {
-            continue_slow(MsgReturn::RCV_TOO_LARGE.raw(), None, 0)
+            continue_slow(Err(ReceiveError::TooLarge))
         },
-        Received::Failed { code } => unsafe {
-            continue_slow(code.raw(), None, 0)
-        },
+        Received::Failed { error } => unsafe { continue_slow(Err(error)) },
     }
 }
 
@@ -1123,12 +1122,10 @@ pub(crate) unsafe fn raise_continue() -> ! {
 /// # Safety
 ///
 /// The caller must be the running thread, entering with no locks held and
-/// with `ith_port` naming the live reply port; when `kmsg` is `Some`, the
-/// caller owns that message.
+/// with `ith_port` naming the live reply port; when `received` holds a
+/// message, the caller owns it.
 pub(crate) unsafe fn continue_slow(
-    mut mr: c_int,
-    mut kmsg: Option<Kmsg>,
-    mut _seqno: c_uint,
+    mut received: Result<Kmsg, ReceiveError>,
 ) -> ! {
     let self_ = per_cpu::thread();
     // SAFETY: the thread's `ith_port` was set by `exception_raise()`.
@@ -1136,7 +1133,7 @@ pub(crate) unsafe fn continue_slow(
         unsafe { IpcPort::from_raw((*self_).saved.exception.port) };
     let reply_mqueue = unsafe { reply_port.messages() };
 
-    while mr == MACH_RCV_INTERRUPTED {
+    while matches!(received, Err(ReceiveError::Interrupted)) {
         while should_halt(self_) {
             // SAFETY: the AST and the port are the running thread's.
             if unsafe { (*self_).ast }.contains(AstReason::TERMINATE) {
@@ -1156,7 +1153,7 @@ pub(crate) unsafe fn continue_slow(
         if !unsafe { reply_port.is_active() } {
             // SAFETY: the port lock is held.
             unsafe { reply_port.unlock() };
-            mr = MACH_RCV_PORT_DIED;
+            received = Err(ReceiveError::PortDied);
             break;
         }
         // SAFETY: the reply queue is live; the lock order is the C's.
@@ -1167,7 +1164,7 @@ pub(crate) unsafe fn continue_slow(
 
         // SAFETY: the queue was just locked and is unlocked by the receive,
         // and this call holds the reply port's reference.
-        (mr, kmsg, _seqno) = match unsafe {
+        received = match unsafe {
             ipc_mqueue::receive(
                 reply_mqueue,
                 MACH_MSG_OPTION_NONE,
@@ -1177,31 +1174,27 @@ pub(crate) unsafe fn continue_slow(
                 Some(exception_raise_continue),
             )
         } {
-            Received::Kmsg { kmsg, seqno } => {
-                (MACH_MSG_SUCCESS, Some(kmsg), seqno)
-            }
-            Received::TooLarge { .. } => {
-                (MsgReturn::RCV_TOO_LARGE.raw(), None, 0)
-            }
-            Received::Failed { code } => (code.raw(), None, 0),
+            Received::Kmsg { kmsg, .. } => Ok(kmsg),
+            Received::TooLarge { .. } => Err(ReceiveError::TooLarge),
+            Received::Failed { error } => Err(error),
         };
     }
 
     // SAFETY: the reference `ith_port` names is the one this call releases.
     unsafe { reply_port.release() };
 
-    if mr == MACH_MSG_SUCCESS {
-        let Some(reply) = kmsg else {
-            unsafe { no_server() }
-        };
-        // SAFETY: the successful receive handed over the reply's send-once
-        // right.
-        unsafe { ipc_port::release_sonce(reply_port) };
-        // SAFETY: the reply message is live and this call owns it.
-        mr = unsafe { parse_reply(reply) };
-    }
+    let handled = match received {
+        Ok(reply) => {
+            // SAFETY: the successful receive handed over the reply's
+            // send-once right.
+            unsafe { ipc_port::release_sonce(reply_port) };
+            // SAFETY: the reply message is live and this call owns it.
+            unsafe { parse_reply(reply) }
+        }
+        Err(error) => error == ReceiveError::PortDied,
+    };
 
-    if mr == KERN_SUCCESS || mr == MACH_RCV_PORT_DIED {
+    if handled {
         // SAFETY: the routine returns to user mode and never comes back.
         unsafe { crate::arch::x86_64::locore::thread_exception_return() };
     }
@@ -1214,7 +1207,7 @@ pub(crate) unsafe fn continue_slow(
             (*self_).saved.exception.subcode,
         )
     };
-    if exception != KERN_SUCCESS {
+    if exception != NO_EXCEPTION {
         // SAFETY: the exception path holds no lock here.
         unsafe { try_task(exception, code, subcode) };
     }

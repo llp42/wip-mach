@@ -20,6 +20,7 @@ use crate::arch::x86_64::spl;
 use crate::config::MAX_NCPUS;
 use crate::kern::console::kprint;
 use crate::kern::debug::{self, kpanic};
+use crate::kern::error::Error;
 use crate::kern::lock::SimpleLock;
 use crate::kern::priority;
 use crate::kern::processor::{
@@ -33,7 +34,6 @@ use crate::kern::sched_prim::{
 };
 use crate::kern::smp::CpuId;
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
 use crate::utils::cell::SyncCell;
 use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_uint, c_void};
@@ -262,9 +262,9 @@ impl RebootOptions {
 fn reboot(
     host: Option<NonNull<c_void>>,
     options: RebootOptions,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if host.is_none() {
-        return Err(KernError::InvalidHost);
+        return Err(Error::InvalidHost);
     }
 
     if options.contains(RebootOptions::DEBUGGER) {
@@ -447,12 +447,12 @@ pub(crate) unsafe fn assign(
     processor: *mut Processor,
     new_pset: *mut ProcessorSet,
     wait: bool,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if processor.is_null()
         || new_pset.is_null()
         || processor == boot_processor()
     {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     // SAFETY: `new_pset` is live; the reference is the one the action takes.
@@ -470,7 +470,7 @@ pub(crate) unsafe fn assign(
                 (*processor).lock.unlock();
                 spl::splx(s);
                 (*new_pset).deallocate();
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
 
             if state == ProcessorState::Assign {
@@ -520,11 +520,9 @@ pub(crate) unsafe fn assign(
 ///
 /// `processor` must be null or a live processor; the routine takes the
 /// processor lock itself and may be called from interrupt level.
-pub(crate) unsafe fn shutdown(
-    processor: *mut Processor,
-) -> Result<(), KernError> {
+pub(crate) unsafe fn shutdown(processor: *mut Processor) -> Result<(), Error> {
     if processor.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
@@ -833,28 +831,17 @@ unsafe fn shutdown_tail(
     }
 }
 
-/// `action_thread_continue()` of kern/machine.c: drain the action queue,
-/// shutting processors down or reassigning them.
-///
-/// # Safety
-///
-/// The thread that runs this must be the action thread, and nothing else may
-/// drain `action_queue`.
-pub(crate) unsafe extern "C" fn action_thread_continue() -> ! {
-    // SAFETY: `engine()` never returns.
-    unsafe { engine() }
-}
-
-/// `action_thread()` of kern/machine.c, declared in <kern/machine.h>.
+/// `action_thread()` of kern/machine.c, declared in <kern/machine.h>: drain
+/// the action queue, shutting processors down or reassigning them.
 ///
 /// # Safety
 ///
 /// `kern/startup.c` is the only caller; it starts this during boot with
 /// `kernel_thread()` and nothing locked.
 pub(crate) unsafe extern "C" fn action_thread() {
-    // SAFETY: `action_thread_continue()` drains the action queue in a loop
-    // whose wait re-enters the routine itself, so it does not return.
-    unsafe { action_thread_continue() };
+    // SAFETY: this is the action thread, the only drainer of the queue, and
+    // `engine()` never returns.
+    unsafe { engine() };
 }
 
 /// The action loop itself, separate so the continuation pointer can be a
@@ -862,7 +849,8 @@ pub(crate) unsafe extern "C" fn action_thread() {
 ///
 /// # Safety
 ///
-/// As [`action_thread_continue()`].
+/// The thread that runs this must be the action thread, and nothing else may
+/// drain `action_queue`.
 unsafe fn engine() -> ! {
     loop {
         // SAFETY: the action thread is the only drainer of the queue, and the
@@ -935,6 +923,6 @@ pub(crate) unsafe extern "C" fn processor_doshutdown(
 pub(crate) unsafe fn host_reboot(
     host_priv: *mut c_void,
     options: c_int,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     reboot(NonNull::new(host_priv), RebootOptions(options))
 }

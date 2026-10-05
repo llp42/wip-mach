@@ -16,10 +16,10 @@ use crate::arch::x86_64::io_req::{DevT, IoReq};
 use crate::arch::x86_64::spl;
 use crate::device::chario::{
     LINESW, LdiscSwitch, TS_BUSY, TS_CARR_ON, TS_ISOPEN, TS_TTSTOP, TS_WOPEN,
-    TTLOWAT, Tty, char_open, tty_get_status, tty_portdeath,
-    tty_queue_completion, tty_set_status, ttychars, ttyclose,
+    TTLOWAT, Tty, tty_get_status, tty_portdeath, tty_queue_completion,
+    tty_set_status, ttychars, ttyclose,
 };
-use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
+use crate::device::r#return::{DeviceError, IoResult};
 use core::ffi::{c_int, c_uint, c_void};
 
 /// `B115200` of <`device/tty_status.h`>.
@@ -77,7 +77,15 @@ pub(crate) fn ttychars_init() {
 /// # Safety
 ///
 /// The device layer calls this with a valid request.
-pub(crate) unsafe fn kdopen(dev: DevT, flag: c_int, ior: *mut IoReq) -> c_int {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the device switch entry has this signature"
+)]
+pub(crate) unsafe fn kdopen(
+    dev: DevT,
+    flag: c_int,
+    ior: *mut IoReq,
+) -> IoResult {
     let tp = tty();
     // SAFETY: `splhigh()` is the asm entry of <machine/spl.h>.
     let o_pri = unsafe { spl::splhigh() };
@@ -99,9 +107,14 @@ pub(crate) unsafe fn kdopen(dev: DevT, flag: c_int, ior: *mut IoReq) -> c_int {
     tp.t_lock.unlock();
     // SAFETY: `o_pri` is the level `splhigh()` returned above.
     unsafe { spl::splx(o_pri) };
-    // SAFETY: the request and tty are the caller's.  The C passed the
-    // `int flag` to the `dev_mode_t mode` parameter unchanged.
-    unsafe { char_open(c_int::from(dev), tp, flag as c_uint, ior) }
+    // SAFETY: the request is the caller's.  The C passed the `int flag` to
+    // the `dev_mode_t mode` parameter unchanged.
+    Ok(crate::device::chario::open(
+        tp,
+        c_int::from(dev),
+        flag as c_uint,
+        unsafe { &mut *ior },
+    ))
 }
 
 /// `kdclose()` in C.
@@ -127,11 +140,11 @@ pub(crate) unsafe fn kdclose(_dev: DevT, _flag: c_int) {
 /// # Safety
 ///
 /// The device layer calls this with a valid request.
-pub(crate) unsafe fn kdread(_dev: DevT, uio: *mut IoReq) -> c_int {
+pub(crate) unsafe fn kdread(_dev: DevT, uio: *mut IoReq) -> IoResult {
     let tp = tty();
     tp.t_state |= TS_CARR_ON;
     let Some(read) = ldisc(tp).and_then(|d| d.l_read) else {
-        return Err(DeviceError::InvalidOperation).as_io_return();
+        return Err(DeviceError::InvalidOperation);
     };
     // SAFETY: the discipline is `chario::read()`, and the tty and the request
     // are the device layer's.
@@ -143,10 +156,10 @@ pub(crate) unsafe fn kdread(_dev: DevT, uio: *mut IoReq) -> c_int {
 /// # Safety
 ///
 /// The device layer calls this with a valid request.
-pub(crate) unsafe fn kdwrite(_dev: DevT, uio: *mut IoReq) -> c_int {
+pub(crate) unsafe fn kdwrite(_dev: DevT, uio: *mut IoReq) -> IoResult {
     let tp = tty();
     let Some(write) = ldisc(tp).and_then(|d| d.l_write) else {
-        return Err(DeviceError::InvalidOperation).as_io_return();
+        return Err(DeviceError::InvalidOperation);
     };
     // SAFETY: the discipline is `chario::write()`, and the tty and the request
     // are the device layer's.
@@ -171,7 +184,7 @@ pub(crate) unsafe fn kdmmap(_dev: DevT, off: usize, _prot: c_int) -> usize {
 /// # Safety
 ///
 /// The device layer calls this with a valid port.
-pub(crate) unsafe fn kdportdeath(dev: DevT, port: VmOffset) -> c_int {
+pub(crate) unsafe fn kdportdeath(dev: DevT, port: VmOffset) -> bool {
     let _ = dev;
     // SAFETY: the tty layer owns the request queues.
     unsafe { tty_portdeath(tty(), port as *mut c_void) }
@@ -187,21 +200,21 @@ pub(crate) unsafe fn kdgetstat(
     flavor: c_uint,
     data: *mut c_int,
     count: *mut u32,
-) -> c_int {
+) -> Result<(), DeviceError> {
     if flavor == KDGSTATE {
         if unsafe { *count } < 1 {
-            return Err(DeviceError::InvalidOperation).as_io_return();
+            return Err(DeviceError::InvalidOperation);
         }
         unsafe {
             *data = kd().state_bits();
             *count = 1;
         }
-        Ok(DeviceSuccess::Success).as_io_return()
+        Ok(())
     } else if flavor == KDGKBENT {
         let kb = unsafe { &mut *data.cast::<KbEntry>() };
         keyboard::entry_get(kb);
         unsafe { *count = 1 };
-        Ok(DeviceSuccess::Success).as_io_return()
+        Ok(())
     } else {
         // SAFETY: the tty layer handles its own flavors.
         unsafe { tty_get_status(tty(), flavor, data, count) }
@@ -218,21 +231,21 @@ pub(crate) unsafe fn kdsetstat(
     flavor: c_uint,
     data: *mut c_int,
     count: u32,
-) -> c_int {
+) -> Result<(), DeviceError> {
     if flavor == KDSKBENT {
         if count < 1 {
-            return Err(DeviceError::InvalidOperation).as_io_return();
+            return Err(DeviceError::InvalidOperation);
         }
         let kb = unsafe { &*data.cast::<KbEntry>() };
         keyboard::entry_set(*kb);
-        Ok(DeviceSuccess::Success).as_io_return()
+        Ok(())
     } else if flavor == KDSETBELL {
         if count < 1 {
-            return Err(DeviceError::InvalidOperation).as_io_return();
+            return Err(DeviceError::InvalidOperation);
         }
         // SAFETY: one integer behind `data`.
         let val = unsafe { *data };
-        console::set_bell(val, 0).as_io_return()
+        console::set_bell(val, 0).map(|_| ())
     } else {
         // SAFETY: the tty layer handles its own flavors.
         unsafe { tty_set_status(tty(), flavor, data, count) }

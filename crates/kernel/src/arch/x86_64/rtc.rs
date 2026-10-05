@@ -10,8 +10,6 @@
 use crate::arch::x86_64::pio::Port;
 use crate::arch::x86_64::spl;
 use crate::kern::console::kprint;
-use crate::kern::host_time;
-use core::ffi::c_int;
 use core::mem::{align_of, offset_of, size_of};
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -52,7 +50,7 @@ const MONTH: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /// Why the clock cannot supply a time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RtcError {
+pub(crate) enum RtcError {
     /// Register D's `RTC_VRT` is clear: the battery lost the time.
     NotValid,
 }
@@ -233,7 +231,7 @@ const fn month_lengths(bissextile: bool) -> [u8; 12] {
 }
 
 /// Read the wall clock.
-fn read_todc() -> Result<u64, RtcError> {
+pub(crate) fn read_todc() -> Result<u64, RtcError> {
     // SAFETY: `splclock()` is the real asm function <i386/spl.h> declares, and
     // the value it returns is only handed back to `splx()`.
     let ospl = unsafe { spl::splclock() };
@@ -296,7 +294,7 @@ fn read_todc() -> Result<u64, RtcError> {
 }
 
 /// Program the wall clock with `seconds` since the Unix epoch.
-fn write_todc(seconds: i64) -> Result<(), RtcError> {
+pub(crate) fn write_todc(seconds: i64) -> Result<(), RtcError> {
     // SAFETY: `splclock()` is the real asm function <i386/spl.h> declares, and
     // the value it returns is only handed back to `splx()`.
     let ospl = unsafe { spl::splclock() };
@@ -359,40 +357,4 @@ fn write_todc(seconds: i64) -> Result<(), RtcError> {
     unsafe { spl::splx(ospl) };
 
     Ok(())
-}
-
-/// `readtodc()` of <i386at/rtc.h>, which `i386/i386at/rtc.c` used to define.
-///
-/// # Safety
-///
-/// `tp` must be valid for a write.
-pub(crate) unsafe fn readtodc(tp: *mut u64) -> c_int {
-    read_todc().map_or(-1, |seconds| {
-        unsafe { *tp = seconds };
-        0
-    })
-}
-
-/// `writetodc()` of <i386at/rtc.h>, which `i386/i386at/rtc.c` used to define.
-///
-/// # Safety
-///
-/// There is no argument contract, the C prototype takes none.
-pub(crate) unsafe fn writetodc() -> c_int {
-    // SAFETY: the wall clock is the maintained global, read at the level
-    // the caller provides.
-    let seconds = host_time::wallclock().seconds;
-    unsafe { writetodc_seconds(seconds) }
-}
-
-/// `writetodc()` with an explicit epoch second count.
-///
-/// # Safety
-///
-/// There is no argument contract, the C prototype takes none.
-pub(crate) unsafe fn writetodc_seconds(seconds: i64) -> c_int {
-    match write_todc(seconds) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
 }

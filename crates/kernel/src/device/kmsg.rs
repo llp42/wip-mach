@@ -10,11 +10,11 @@
 use crate::arch::types::VmSize;
 use crate::arch::x86_64::io_req::{
     D_NOWAIT, DEV_GET_SIZE, DEV_GET_SIZE_COUNT, DEV_GET_SIZE_DEVICE_SIZE,
-    DEV_GET_SIZE_RECORD_SIZE, DevT, IoReq, IoReqQueue, KERN_SUCCESS,
+    DEV_GET_SIZE_RECORD_SIZE, DevT, IoReq, IoReqQueue,
 };
 use crate::arch::x86_64::platform::MachPlatform;
 use crate::device::ds_routines;
-use crate::device::r#return::{DeviceError, DeviceSuccess, IoResultExt};
+use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 use crate::utils::cell::SyncCell;
 use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_long, c_uint};
@@ -68,25 +68,8 @@ const GET_SIZE_REPLY: [c_int; DEV_GET_SIZE_COUNT as usize] = {
     reply
 };
 
-/// The two error families a read can return: the raw `kern_return_t`
-/// `device_read_alloc()` produced, or a `D_*` code of the device layer.
-#[derive(Clone, Copy)]
-pub(crate) enum KmsgError {
-    Kern(c_int),
-    Device(DeviceError),
-}
-
-impl KmsgError {
-    pub(crate) const fn as_io_return(self) -> c_int {
-        match self {
-            Self::Kern(code) => code,
-            Self::Device(error) => error as c_int,
-        }
-    }
-}
-
 /// `kmsgopen()` of `device/kmsg.c`.
-pub(crate) fn open() -> Result<DeviceSuccess, DeviceError> {
+pub(crate) fn open() -> IoResult {
     let mut ring = KMSG.lock();
     if ring.in_use {
         drop(ring);
@@ -137,22 +120,17 @@ unsafe fn copy_out(ring: &mut Ring, ior: *mut IoReq) -> c_int {
 /// # Safety
 ///
 /// `ior` must be a live read request.
-pub(crate) unsafe fn read(
-    ior: *mut IoReq,
-) -> Result<DeviceSuccess, KmsgError> {
+pub(crate) unsafe fn read(ior: *mut IoReq) -> IoResult {
     // The C narrowed `io_count` to `vm_size_t` for the allocation.
     let size = unsafe { (*ior).count } as VmSize;
-    let kr = unsafe { ds_routines::device_read_alloc(ior, size) };
-    if kr != KERN_SUCCESS {
-        return Err(KmsgError::Kern(kr));
-    }
+    unsafe { ds_routines::device_read_alloc(ior, size) }?;
 
     let mut ring = KMSG.lock();
     if ring.read == ring.write {
         // SAFETY: the request is live.
         if unsafe { (*ior).mode } & D_NOWAIT != 0 {
             drop(ring);
-            return Err(KmsgError::Device(DeviceError::WouldBlock));
+            return Err(DeviceError::WouldBlock);
         }
 
         // SAFETY: the request is live, the queue stays at its address, and
@@ -180,7 +158,7 @@ pub(crate) unsafe fn read(
 /// `ior` must be the live request `read()` queued, and the call must come
 /// through `ior`'s `done` slot, as `iodone()` invokes it without the lock
 /// held.
-unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
+unsafe fn kmsg_read_done(ior: *mut IoReq) -> bool {
     let mut ring = KMSG.lock();
     if ring.read == ring.write {
         // SAFETY: the request is live and requeued at once, as the C did,
@@ -190,7 +168,7 @@ unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
             read_queue().push_back_ptr(NonNull::new_unchecked(ior));
         }
         drop(ring);
-        return 0;
+        return false;
     }
 
     // SAFETY: `ior` owns its buffer.
@@ -200,7 +178,7 @@ unsafe fn kmsg_read_done(ior: *mut IoReq) -> c_int {
     drop(ring);
 
     unsafe { ds_routines::ds_read_done(ior) };
-    c_int::from(true)
+    true
 }
 
 /// `kmsg_putchar()` of `device/kmsg.c`.
@@ -245,7 +223,7 @@ pub(crate) unsafe fn kmsggetstat(
     flavor: c_uint,
     data: *mut c_int,
     count: *mut c_uint,
-) -> c_int {
+) -> Result<(), DeviceError> {
     match getstat(flavor) {
         Some((reply, n)) => {
             unsafe {
@@ -254,9 +232,9 @@ pub(crate) unsafe fn kmsggetstat(
                 }
                 *count = n;
             }
-            Ok(DeviceSuccess::Success).as_io_return()
+            Ok(())
         }
-        None => Err(DeviceError::InvalidOperation).as_io_return(),
+        None => Err(DeviceError::InvalidOperation),
     }
 }
 
@@ -269,11 +247,8 @@ pub(crate) unsafe fn kmsgopen(
     _dev: DevT,
     _flag: c_int,
     _ior: *mut IoReq,
-) -> c_int {
-    match open() {
-        Ok(success) => Ok(success).as_io_return(),
-        Err(error) => Err(error).as_io_return(),
-    }
+) -> IoResult {
+    open()
 }
 
 /// `kmsgclose()` in C.
@@ -290,9 +265,6 @@ pub(crate) unsafe fn kmsgclose(_dev: DevT, _flag: c_int) {
 /// # Safety
 ///
 /// `ior` must be a live read request.
-pub(crate) unsafe fn kmsgread(_dev: DevT, ior: *mut IoReq) -> c_int {
-    match unsafe { read(ior) } {
-        Ok(success) => Ok(success).as_io_return(),
-        Err(error) => error.as_io_return(),
-    }
+pub(crate) unsafe fn kmsgread(_dev: DevT, ior: *mut IoReq) -> IoResult {
+    unsafe { read(ior) }
 }

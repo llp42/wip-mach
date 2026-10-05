@@ -6,6 +6,7 @@
 //! The IPC object routines, which `ipc/ipc_object.c` used to define and
 //! `ipc/ipc_object.h` declares.
 
+use crate::ipc::error::Error;
 use crate::ipc::ipc_entry;
 use crate::ipc::ipc_notify;
 use crate::ipc::ipc_right;
@@ -15,7 +16,6 @@ use crate::ipc::{
 };
 use crate::kern::debug::kpanic;
 use crate::kern::slab::{KmemCache, kmem_cache_init};
-use crate::kern::types::KernError;
 use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
@@ -218,14 +218,14 @@ pub(crate) unsafe fn translate(
     space: IpcSpace,
     name: c_uint,
     right: c_uint,
-) -> Result<*mut c_void, KernError> {
+) -> Result<*mut c_void, Error> {
     let entry = unsafe { ipc_right::lookup_write(space, name) }?;
 
     // SAFETY: the entry is live and the space is locked.
     if unsafe { (*entry).bits() } & mach_port_type(right) == 0 {
         // SAFETY: the earlier call took the space lock.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     // SAFETY: a typed entry names a live object.
@@ -245,7 +245,7 @@ pub(crate) unsafe fn translate(
 /// # Safety
 ///
 /// `space` must be live and nothing may be locked; may allocate memory.
-pub(crate) unsafe fn alloc_dead(space: IpcSpace) -> Result<c_uint, KernError> {
+pub(crate) unsafe fn alloc_dead(space: IpcSpace) -> Result<c_uint, Error> {
     unsafe { space.lock_write() };
 
     // SAFETY: the space lock is held.
@@ -275,7 +275,7 @@ pub(crate) unsafe fn alloc_dead(space: IpcSpace) -> Result<c_uint, KernError> {
 pub(crate) unsafe fn alloc_dead_name(
     space: IpcSpace,
     name: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     unsafe { space.lock_write() };
 
     // SAFETY: the space lock is held.
@@ -291,7 +291,7 @@ pub(crate) unsafe fn alloc_dead_name(
     // SAFETY: `ipc_right_inuse` unlocks the space when the entry is in use,
     // as the C's did.
     if unsafe { ipc_right::inuse(space, entry) } {
-        return Err(KernError::NameExists);
+        return Err(Error::NameExists);
     }
 
     // SAFETY: the entry is live and the space is locked.
@@ -314,9 +314,9 @@ pub(crate) unsafe fn alloc(
     otype: c_uint,
     type_: c_uint,
     urefs: c_uint,
-) -> Result<(c_uint, *mut c_void), KernError> {
+) -> Result<(c_uint, *mut c_void), Error> {
     let Some(object) = io_alloc(otype) else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     // SAFETY: `io_alloc` returned a fresh allocation of `otype`'s size.
@@ -361,9 +361,9 @@ pub(crate) unsafe fn alloc_name(
     type_: c_uint,
     urefs: c_uint,
     name: c_uint,
-) -> Result<*mut c_void, KernError> {
+) -> Result<*mut c_void, Error> {
     let Some(object) = io_alloc(otype) else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     // SAFETY: `io_alloc` returned a fresh allocation of `otype`'s size.
@@ -388,7 +388,7 @@ pub(crate) unsafe fn alloc_name(
     if unsafe { ipc_right::inuse(space, entry) } {
         // SAFETY: the object is the fresh allocation from above.
         unsafe { io_free(otype, object) };
-        return Err(KernError::NameExists);
+        return Err(Error::NameExists);
     }
 
     // SAFETY: the entry is live, the object is fresh, and the space lock is
@@ -414,7 +414,7 @@ pub(crate) unsafe fn copyin(
     space: IpcSpace,
     name: c_uint,
     msgt_name: c_uint,
-) -> Result<*mut c_void, KernError> {
+) -> Result<*mut c_void, Error> {
     let entry = unsafe { ipc_right::lookup_write(space, name) }?;
 
     // SAFETY: the entry is live and the space is write-locked and active.
@@ -516,14 +516,14 @@ pub(crate) unsafe fn copyout(
     object: *mut c_void,
     msgt_name: c_uint,
     overflow: bool,
-) -> Result<c_uint, KernError> {
+) -> Result<c_uint, Error> {
     unsafe { space.lock_write() };
 
     // SAFETY: the space lock is held.
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     }
 
     // SAFETY: the space is locked and active.  On success the object is
@@ -556,7 +556,7 @@ pub(crate) unsafe fn copyout(
                 (*header).lock.unlock();
                 ipc_entry::dealloc(space, name, entry);
                 space.lock_done();
-                return Err(KernError::InvalidCapability);
+                return Err(Error::InvalidCapability);
             }
             (*entry).set_object(object);
         }
@@ -588,7 +588,7 @@ pub(crate) unsafe fn copyout_name(
     msgt_name: c_uint,
     overflow: bool,
     name: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     unsafe { space.lock_write() };
 
     // SAFETY: the space lock is held.
@@ -620,13 +620,13 @@ pub(crate) unsafe fn copyout_name(
                 }
                 space.lock_done();
             }
-            return Err(KernError::RightExists);
+            return Err(Error::RightExists);
         }
     } else {
         // SAFETY: `ipc_right_inuse` unlocks the space when the entry is in
         // use, as the C's did.
         if unsafe { ipc_right::inuse(space, entry) } {
-            return Err(KernError::NameExists);
+            return Err(Error::NameExists);
         }
 
         // SAFETY: the space is locked, so the object cannot die under us.
@@ -637,7 +637,7 @@ pub(crate) unsafe fn copyout_name(
                 (*header).lock.unlock();
                 ipc_entry::dealloc(space, name, entry);
                 space.lock_done();
-                return Err(KernError::InvalidCapability);
+                return Err(Error::InvalidCapability);
             }
             (*entry).set_object(object);
         }
@@ -738,7 +738,7 @@ pub(crate) unsafe fn rename(
     space: IpcSpace,
     oname: c_uint,
     nname: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     unsafe { space.lock_write() };
 
     // SAFETY: the space lock is held.
@@ -754,7 +754,7 @@ pub(crate) unsafe fn rename(
     // SAFETY: `ipc_right_inuse` unlocks the space when the entry is in use,
     // as the C's did.
     if unsafe { ipc_right::inuse(space, nentry) } {
-        return Err(KernError::NameExists);
+        return Err(Error::NameExists);
     }
 
     // SAFETY: the space is live, active, and write-locked.
@@ -770,7 +770,7 @@ pub(crate) unsafe fn rename(
             ipc_entry::dealloc(space, nname, nentry);
             space.lock_done();
         }
-        return Err(KernError::InvalidName);
+        return Err(Error::InvalidName);
     };
 
     // SAFETY: the space is write-locked and both entries are live;

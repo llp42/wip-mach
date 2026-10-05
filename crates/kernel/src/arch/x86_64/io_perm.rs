@@ -7,6 +7,7 @@
 //! The I/O permission bitmap objects, which `i386/i386/io_perm.c` used to
 //! define and `i386/i386/io_perm.h` declares.
 
+use crate::arch::x86_64::error::Error;
 use crate::arch::x86_64::machine_task::{IOPB_BYTES, IOPB_CACHE};
 use crate::arch::x86_64::pcb;
 use crate::device::dev_lookup;
@@ -15,7 +16,6 @@ use crate::ipc::{IpcPort, MachMsgHeader, ipc_port, ipc_space};
 use crate::kern::ipc_kobject::set;
 use crate::kern::slab;
 use crate::kern::task::{self, Task};
-use crate::kern::types::KernError;
 use core::ffi::{c_int, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
@@ -192,21 +192,21 @@ pub(crate) unsafe fn create(
     from: u16,
     to: u16,
     new: *mut *mut IoPerm,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if master_port != crate::device::device_init::master_device_port() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     if from > to {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     if TAKEN_PCI_CFG.load(Ordering::Relaxed) && contains_pci_cfg(from, to) {
-        return Err(KernError::ProtectionFailure);
+        return Err(Error::PortsTaken);
     }
 
     let Some(allocation) = slab::kalloc(size_of::<IoPerm>()) else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
     let io_perm = allocation.as_ptr().cast::<IoPerm>();
 
@@ -216,7 +216,7 @@ pub(crate) unsafe fn create(
     else {
         // SAFETY: the allocation is fresh and nothing else can see it.
         unsafe { slab::kfree(allocation, size_of::<IoPerm>()) };
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     // SAFETY: the allocation is a fresh `IoPerm` image nothing else can see,
@@ -274,7 +274,7 @@ pub(crate) unsafe fn modify(
     target_task: NonNull<Task>,
     io_perm: NonNull<IoPerm>,
     access: Access,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let (from, to) =
         unsafe { ((*io_perm.as_ptr()).from, (*io_perm.as_ptr()).to) };
     let machine = unsafe { &raw mut (*target_task.as_ptr()).machine };
@@ -329,7 +329,7 @@ pub(crate) unsafe fn modify(
         } else {
             // SAFETY: this call took the lock above.
             unsafe { (*machine).iopb_lock.unlock() };
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         }
     }
 

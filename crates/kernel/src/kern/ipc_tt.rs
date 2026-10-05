@@ -13,10 +13,10 @@ use crate::ipc::ipc_space;
 use crate::ipc::ipc_thread::ipc_thread_links_init;
 use crate::ipc::{IpcPort, IpcSpace};
 use crate::kern::debug::kpanic;
+use crate::kern::error::Error;
 use crate::kern::slab::{kalloc, kfree};
 use crate::kern::task::{self, TASK_PORT_REGISTER_MAX, Task, current_task};
 use crate::kern::thread::{IpcKmsgQueue, Thread};
-use crate::kern::types::KernError;
 use crate::vm::vm_map::VmMap;
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
@@ -93,7 +93,7 @@ impl ThreadSpecialPort {
 }
 
 /// `ipc_space_create()` of <`ipc/ipc_space.h`>.
-fn create_space() -> Result<*mut c_void, KernError> {
+fn create_space() -> Result<*mut c_void, Error> {
     Ok(ipc_space::create()?.as_ptr())
 }
 
@@ -531,16 +531,16 @@ unsafe fn thread_port_field(
 pub(crate) unsafe fn task_get_special_port(
     task: *mut Task,
     which: TaskSpecialPort,
-) -> Result<Option<IpcPort>, KernError> {
+) -> Result<Option<IpcPort>, Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
         (*task).itk_lock_data.lock();
         if (*task).itk_self.is_null() {
             (*task).itk_lock_data.unlock();
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
 
         let port =
@@ -561,16 +561,16 @@ pub(crate) unsafe fn task_set_special_port(
     task: *mut Task,
     which: TaskSpecialPort,
     port: *mut c_void,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
         (*task).itk_lock_data.lock();
         if (*task).itk_self.is_null() {
             (*task).itk_lock_data.unlock();
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
 
         let whichp = task_port_field(task, which);
@@ -591,16 +591,16 @@ pub(crate) unsafe fn task_set_special_port(
 pub(crate) unsafe fn thread_get_special_port(
     thread: *mut Thread,
     which: ThreadSpecialPort,
-) -> Result<Option<IpcPort>, KernError> {
+) -> Result<Option<IpcPort>, Error> {
     if thread.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
         (*thread).ith_lock_data.lock();
         if (*thread).ith_self.is_null() {
             (*thread).ith_lock_data.unlock();
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
 
         let port = IpcPort::new(ipc_port::copy_send(*thread_port_field(
@@ -622,16 +622,16 @@ pub(crate) unsafe fn thread_set_special_port(
     thread: *mut Thread,
     which: ThreadSpecialPort,
     port: *mut c_void,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if thread.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
         (*thread).ith_lock_data.lock();
         if (*thread).ith_self.is_null() {
             (*thread).ith_lock_data.unlock();
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
 
         let whichp = thread_port_field(thread, which);
@@ -653,9 +653,9 @@ pub(crate) unsafe fn thread_set_special_port(
 pub(crate) unsafe fn ports_register(
     task: *mut Task,
     ports: &[VmOffset],
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if task.is_null() || ports.len() > TASK_PORT_REGISTER_MAX {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let mut new_ports = [ptr::null_mut(); TASK_PORT_REGISTER_MAX];
@@ -667,7 +667,7 @@ pub(crate) unsafe fn ports_register(
         (*task).itk_lock_data.lock();
         if (*task).itk_self.is_null() {
             (*task).itk_lock_data.unlock();
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         for (slot, new) in
@@ -696,15 +696,15 @@ pub(crate) unsafe fn ports_register(
 /// routine allocates.
 pub(crate) unsafe fn ports_lookup(
     task: *mut Task,
-) -> Result<(NonNull<VmOffset>, c_uint), KernError> {
+) -> Result<(NonNull<VmOffset>, c_uint), Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let size = TASK_PORT_REGISTER_MAX * size_of::<VmOffset>();
     // SAFETY: `kalloc_init()` ran during the boot this kernel call follows.
     let Some(memory) = kalloc(size) else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     unsafe {
@@ -712,7 +712,7 @@ pub(crate) unsafe fn ports_lookup(
         if (*task).itk_self.is_null() {
             (*task).itk_lock_data.unlock();
             kfree(memory, size);
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         let ports = memory.as_ptr().cast::<VmOffset>();

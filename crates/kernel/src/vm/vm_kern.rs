@@ -16,7 +16,7 @@ use crate::arch::x86_64::pmap::pmap_map_bd;
 use crate::arch::x86_64::pmap::pmap_pageable;
 use crate::arch::x86_64::pmap::pmap_reference;
 use crate::arch::x86_64::pmap::pmap_remove;
-use crate::arch::x86_64::user_access;
+use crate::arch::x86_64::user_access::{self, UserFault};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
 use crate::kern::slab::slab_collect;
@@ -748,7 +748,7 @@ pub(crate) unsafe fn copyinmap(
     fromaddr: *const c_char,
     toaddr: *mut c_char,
     length: c_int,
-) -> c_int {
+) -> Result<(), UserFault> {
     // SAFETY: `kernel_pmap` is the boot pmap.
     if map.pmap == kernel_pmap_ptr() {
         unsafe {
@@ -758,7 +758,7 @@ pub(crate) unsafe fn copyinmap(
                 usize::try_from(length).unwrap_or(0),
             );
         };
-        return 0;
+        return Ok(());
     }
 
     // SAFETY: `current_task()` is the running task, whose map is live.
@@ -775,7 +775,7 @@ pub(crate) unsafe fn copyinmap(
         };
     }
 
-    1
+    Err(UserFault)
 }
 
 /// `copyoutmap()` in C: `copyout()` into a kernel map or the current user
@@ -790,7 +790,7 @@ pub(crate) unsafe fn copyoutmap(
     fromaddr: *const c_char,
     toaddr: *mut c_char,
     length: c_int,
-) -> c_int {
+) -> Result<(), UserFault> {
     // SAFETY: `kernel_pmap` is the boot pmap.
     if map.pmap == kernel_pmap_ptr() {
         unsafe {
@@ -800,7 +800,7 @@ pub(crate) unsafe fn copyoutmap(
                 usize::try_from(length).unwrap_or(0),
             );
         };
-        return 0;
+        return Ok(());
     }
 
     // SAFETY: `current_task()` is the running task, whose map is live.
@@ -817,5 +817,5 @@ pub(crate) unsafe fn copyoutmap(
         };
     }
 
-    1
+    Err(UserFault)
 }

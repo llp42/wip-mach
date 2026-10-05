@@ -14,14 +14,12 @@ use crate::arch::x86_64::io_req::{D_NOWAIT, IoDone, IoReq, IoReqQueue};
 use crate::arch::x86_64::spl;
 use crate::device::cirbuf::{self, Cirbuf};
 use crate::device::ds_routines;
-use crate::device::r#return::{DeviceError, DeviceSuccess};
-use crate::glue;
+use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 use crate::ipc::IpcPort;
 use crate::kern::lock::SimpleLock;
 use crate::kern::machine;
-use crate::vm::error::KERN_SUCCESS;
+use crate::mig;
 use crate::vm::vm_map::VmMapCopy;
-use crate::vm::vm_map::vm_map_copyout;
 use crate::vm::vm_user;
 use core::ffi::{c_char, c_int, c_long, c_short, c_uint, c_void};
 use core::mem::{offset_of, size_of};
@@ -134,11 +132,13 @@ const _: () = assert!(B115200 < NSPEEDS);
 /// A driver's `t_getstat` routine: invoked with the owning tty's device
 /// number, a status flavor and a writable buffer for it, with the tty lock
 /// held.
-type TtyGetstat = unsafe fn(u16, c_uint, *mut c_int, *mut u32) -> c_int;
+type TtyGetstat =
+    unsafe fn(u16, c_uint, *mut c_int, *mut u32) -> Result<(), DeviceError>;
 /// A driver's `t_setstat` routine: invoked with the owning tty's device
 /// number, a status flavor and a readable buffer of that many words, with
 /// the tty lock held.
-type TtySetstat = unsafe fn(u16, c_uint, *mut c_int, u32) -> c_int;
+type TtySetstat =
+    unsafe fn(u16, c_uint, *mut c_int, u32) -> Result<(), DeviceError>;
 
 /// `struct tty` of <device/tty.h>, field for field.
 #[repr(C)]
@@ -252,14 +252,14 @@ const TTY_START: c_uint = 0x0074_0005;
 pub(crate) struct LdiscSwitch {
     /// Invoked with a live tty and a live read request, as [`char_read()`]
     /// requires.
-    pub(crate) l_read: Option<unsafe fn(*mut Tty, *mut IoReq) -> c_int>,
+    pub(crate) l_read: Option<unsafe fn(*mut Tty, *mut IoReq) -> IoResult>,
     /// Invoked with a live tty and a live write request, as [`char_write()`]
     /// requires.
-    pub(crate) l_write: Option<unsafe fn(*mut Tty, *mut IoReq) -> c_int>,
+    pub(crate) l_write: Option<unsafe fn(*mut Tty, *mut IoReq) -> IoResult>,
     /// Invoked with a live, locked tty, as [`ttyinput()`] requires.
     pub(crate) l_rint: Option<unsafe fn(c_uint, *mut Tty)>,
     /// Invoked with a live, locked tty, as [`ttymodem()`] requires.
-    pub(crate) l_modem: Option<unsafe fn(*mut Tty, c_int) -> c_int>,
+    pub(crate) l_modem: Option<unsafe fn(*mut Tty, c_int) -> bool>,
     /// Invoked with a live tty locked at `spltty`, as [`tty_output()`]
     /// requires.
     pub(crate) l_start: Option<unsafe fn(*mut Tty)>,
@@ -313,40 +313,6 @@ static mut PDMA_TIMEOUTS: [c_int; NSPEEDS] = [0; NSPEEDS];
 
 /// `pdma_water_mark[]` of device/chario.c: input-queue water marks.
 static mut PDMA_WATER_MARK: [c_int; NSPEEDS] = [0; NSPEEDS];
-
-/// The error families a tty reply can carry: the device layer's `D_*` codes,
-/// or a `kern_return_t` the character copy passed through unchanged.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TtyError {
-    /// A `kern_return_t` from `vm_map_copyout()` or `device_read_alloc()`,
-    /// returned raw because the C returned it unchanged.
-    Kern(c_int),
-    /// A `D_*` error of <`device/device_types.h`>.
-    Device(DeviceError),
-}
-
-impl TtyError {
-    /// The `io_return_t` the C caller sees.
-    pub(crate) const fn as_io_return(self) -> c_int {
-        match self {
-            Self::Kern(code) => code,
-            Self::Device(error) => error as c_int,
-        }
-    }
-}
-
-/// What a tty operation reports: the `D_SUCCESS`/`D_IO_QUEUED` codes, or a
-/// [`TtyError`].
-pub(crate) type TtyResult = Result<DeviceSuccess, TtyError>;
-
-/// The `io_return_t` a [`TtyResult`] denotes.
-pub(crate) const fn io_return(result: TtyResult) -> c_int {
-    match result {
-        Ok(DeviceSuccess::Success) => 0,
-        Ok(DeviceSuccess::IoQueued) => -1,
-        Err(error) => error.as_io_return(),
-    }
-}
 
 /// The table row `speed` names, or `None` when it is outside the tables.
 fn speed_row(speed: c_int) -> Option<u8> {
@@ -540,13 +506,13 @@ unsafe fn clean_queue(
 ///
 /// `ior` must be the live request `ttyclose()`'s delayed-open queue held,
 /// as [`ds_routines::ds_open_done`] requires.
-unsafe fn tty_close_open_reply(ior: *mut IoReq) -> c_int {
+unsafe fn tty_close_open_reply(ior: *mut IoReq) -> bool {
     // SAFETY: `iodone()` passes back the live request it was queued with.
     unsafe {
-        (*ior).error = DeviceError::DeviceDown as c_int;
+        (*ior).error = Err(DeviceError::DeviceDown);
         ds_routines::ds_open_done(ior);
     }
-    c_int::from(true)
+    true
 }
 
 /// `tty_close_write_reply()` of device/chario.c.
@@ -555,14 +521,14 @@ unsafe fn tty_close_open_reply(ior: *mut IoReq) -> c_int {
 ///
 /// `ior` must be the live request `ttyclose()`'s delayed-write queue held,
 /// as [`ds_routines::ds_write_done`] requires.
-unsafe fn tty_close_write_reply(ior: *mut IoReq) -> c_int {
+unsafe fn tty_close_write_reply(ior: *mut IoReq) -> bool {
     // SAFETY: `iodone()` passes back the live request it was queued with.
     unsafe {
         (*ior).residual = (*ior).count;
-        (*ior).error = DeviceError::DeviceDown as c_int;
+        (*ior).error = Err(DeviceError::DeviceDown);
         ds_routines::ds_write_done(ior);
     }
-    c_int::from(true)
+    true
 }
 
 /// `tty_close_read_reply()` of device/chario.c.
@@ -571,14 +537,14 @@ unsafe fn tty_close_write_reply(ior: *mut IoReq) -> c_int {
 ///
 /// `ior` must be the live request `ttyclose()`'s delayed-read queue held,
 /// as [`ds_routines::ds_read_done`] requires.
-unsafe fn tty_close_read_reply(ior: *mut IoReq) -> c_int {
+unsafe fn tty_close_read_reply(ior: *mut IoReq) -> bool {
     // SAFETY: `iodone()` passes back the live request it was queued with.
     unsafe {
         (*ior).residual = (*ior).count;
-        (*ior).error = DeviceError::DeviceDown as c_int;
+        (*ior).error = Err(DeviceError::DeviceDown);
         ds_routines::ds_read_done(ior);
     }
-    c_int::from(true)
+    true
 }
 
 /// Open the tty, queueing the request when the carrier is not up yet.
@@ -632,26 +598,12 @@ pub(crate) fn open(
     DeviceSuccess::Success
 }
 
-/// `char_open()` of device/chario.c.
-///
-/// # Safety
-///
-/// `tp` must point at a live tty and `ior` at a live open request.
-pub(crate) unsafe fn char_open(
-    dev: c_int,
-    tp: *mut Tty,
-    mode: c_uint,
-    ior: *mut IoReq,
-) -> c_int {
-    io_return(Ok(unsafe { open(&mut *tp, dev, mode, &mut *ior) }))
-}
-
 /// `char_open_done()` of device/chario.c.
 ///
 /// # Safety
 ///
 /// `ior` is the live open request `open()` queued on a tty.
-pub(crate) unsafe fn char_open_done(ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn char_open_done(ior: *mut IoReq) -> bool {
     let ior = unsafe { &mut *ior };
     // SAFETY: `open()` set `dev_ptr` to the tty that stays live.
     let tp = unsafe { &mut *ior.dev_ptr.cast::<Tty>() };
@@ -667,7 +619,7 @@ pub(crate) unsafe fn char_open_done(ior: *mut IoReq) -> c_int {
             );
         };
         unlock_irq(tp, level);
-        return c_int::from(false);
+        return false;
     }
 
     tp.t_state |= TS_ISOPEN;
@@ -680,13 +632,13 @@ pub(crate) unsafe fn char_open_done(ior: *mut IoReq) -> c_int {
 
     unlock_irq(tp, level);
 
-    ior.error = 0;
+    ior.error = Ok(());
     unsafe { ds_routines::ds_open_done(ptr::from_mut(ior)) };
-    c_int::from(true)
+    true
 }
 
 /// Write the request's data to the tty's output queue.
-pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> TtyResult {
+pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
     let count = ior.count;
     if count == 0 {
         return Ok(DeviceSuccess::Success);
@@ -698,15 +650,13 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> TtyResult {
     if !inband {
         // SAFETY: the request's data is a live `vm_map_copy`, `device_io_map`
         // is the boot map `ds_routines` owns, and `addr` is writable.
-        let kr = unsafe {
-            vm_map_copyout(
-                ds_routines::DEVICE_IO_MAP,
-                &raw mut addr,
-                data.cast::<VmMapCopy>(),
-            )
-        };
-        if kr != KERN_SUCCESS {
-            return Err(TtyError::Kern(kr));
+        let copied = NonNull::new(data.cast::<VmMapCopy>())
+            .map_or(Ok(0), |copy| unsafe {
+                (*ds_routines::DEVICE_IO_MAP).copyout(copy)
+            });
+        match copied {
+            Ok(mapped) => addr = mapped,
+            Err(error) => return Err(DeviceError::Vm(error)),
         }
         // SAFETY: `vm_map_copyout()` mapped the copy's bytes at `addr` on
         // success.
@@ -717,9 +667,9 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> TtyResult {
 
     let result =
         if tp.t_state & TS_CARR_ON == 0 && tp.t_state & TS_ONDELAY == 0 {
-            Err(TtyError::Device(DeviceError::IoError))
+            Err(DeviceError::IoError)
         } else if tp.t_state & TS_CARR_ON == 0 && ior.mode & D_NOWAIT != 0 {
-            Err(TtyError::Device(DeviceError::WouldBlock))
+            Err(DeviceError::WouldBlock)
         } else {
             Ok(write_output(tp, ior, data, count))
         };
@@ -744,8 +694,8 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> TtyResult {
 /// # Safety
 ///
 /// `tp` must point at a live tty and `ior` at a live write request.
-pub(crate) unsafe fn char_write(tp: *mut Tty, ior: *mut IoReq) -> c_int {
-    io_return(unsafe { write(&mut *tp, &mut *ior) })
+pub(crate) unsafe fn char_write(tp: *mut Tty, ior: *mut IoReq) -> IoResult {
+    unsafe { write(&mut *tp, &mut *ior) }
 }
 
 /// The output path of `write()`, the tty lock held and the carrier checked.
@@ -790,7 +740,7 @@ fn write_output(
 /// # Safety
 ///
 /// `ior` is the live write request `write()` queued on a tty.
-pub(crate) unsafe fn char_write_done(ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn char_write_done(ior: *mut IoReq) -> bool {
     let ior = unsafe { &mut *ior };
     // SAFETY: `write_output()` set `dev_ptr` to the tty that stays live.
     let tp = unsafe { &mut *ior.dev_ptr.cast::<Tty>() };
@@ -806,7 +756,7 @@ pub(crate) unsafe fn char_write_done(ior: *mut IoReq) -> c_int {
             );
         };
         unlock_irq(tp, level);
-        return c_int::from(false);
+        return false;
     }
 
     unlock_irq(tp, level);
@@ -816,8 +766,8 @@ pub(crate) unsafe fn char_write_done(ior: *mut IoReq) -> c_int {
         let bytes = (ior.total - ior.residual) as c_int;
         if ior.op & IO_INBAND != 0 {
             // SAFETY: the generated reply stub takes the live reply port.
-            unsafe {
-                glue::ds_device_write_reply_inband(
+            let _ = unsafe {
+                mig::ds_device_write_reply_inband(
                     port.as_ptr(),
                     ior.reply_port_type,
                     ior.error,
@@ -825,8 +775,8 @@ pub(crate) unsafe fn char_write_done(ior: *mut IoReq) -> c_int {
                 )
             };
         } else {
-            unsafe {
-                glue::ds_device_write_reply(
+            let _ = unsafe {
+                mig::ds_device_write_reply(
                     port.as_ptr(),
                     ior.reply_port_type,
                     ior.error,
@@ -836,30 +786,26 @@ pub(crate) unsafe fn char_write_done(ior: *mut IoReq) -> c_int {
         }
     }
     unsafe { crate::device::dev_lookup::deallocate(ior.device.cast()) };
-    c_int::from(true)
+    true
 }
 
 /// Read the tty's input queue into the request's data buffer.
-pub(crate) fn read(tp: &mut Tty, ior: &mut IoReq) -> TtyResult {
+pub(crate) fn read(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
     // The C narrowed `io_count` to `vm_size_t`; the device layer sizes the
     // count, so the conversion cannot lose anything that matters.
     let size = ior.count as VmSize;
     // SAFETY: `device_read_alloc()`'s contract; the request is live.
-    let kr =
-        unsafe { ds_routines::device_read_alloc(ptr::from_mut(ior), size) };
-    if kr != KERN_SUCCESS {
-        return Err(TtyError::Kern(kr));
-    }
+    unsafe { ds_routines::device_read_alloc(ptr::from_mut(ior), size) }?;
 
     let level = lock_irq(tp);
 
     if tp.t_state & TS_CARR_ON == 0 && tp.t_state & TS_ONDELAY == 0 {
         unlock_irq(tp, level);
-        return Err(TtyError::Device(DeviceError::IoError));
+        return Err(DeviceError::IoError);
     }
     if tp.t_state & TS_CARR_ON == 0 && ior.mode & D_NOWAIT != 0 {
         unlock_irq(tp, level);
-        return Err(TtyError::Device(DeviceError::WouldBlock));
+        return Err(DeviceError::WouldBlock);
     }
 
     if tp.t_inq.count() <= 0 || tp.t_state & TS_CARR_ON == 0 {
@@ -913,8 +859,8 @@ pub(crate) fn read(tp: &mut Tty, ior: &mut IoReq) -> TtyResult {
 /// # Safety
 ///
 /// `tp` must point at a live tty and `ior` at a live read request.
-pub(crate) unsafe fn char_read(tp: *mut Tty, ior: *mut IoReq) -> c_int {
-    io_return(unsafe { read(&mut *tp, &mut *ior) })
+pub(crate) unsafe fn char_read(tp: *mut Tty, ior: *mut IoReq) -> IoResult {
+    unsafe { read(&mut *tp, &mut *ior) }
 }
 
 /// `char_read_done()` of device/chario.c.
@@ -922,7 +868,7 @@ pub(crate) unsafe fn char_read(tp: *mut Tty, ior: *mut IoReq) -> c_int {
 /// # Safety
 ///
 /// `ior` is the live read request `read()` queued on a tty.
-pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> c_int {
+pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> bool {
     let ior = unsafe { &mut *ior };
     // SAFETY: `read()` set `dev_ptr` to the tty that stays live.
     let tp = unsafe { &mut *ior.dev_ptr.cast::<Tty>() };
@@ -938,7 +884,7 @@ pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> c_int {
             );
         };
         unlock_irq(tp, level);
-        return c_int::from(false);
+        return false;
     }
 
     let out = if ior.count <= 0 {
@@ -971,7 +917,7 @@ pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> c_int {
     unlock_irq(tp, level);
 
     unsafe { ds_routines::ds_read_done(ior) };
-    c_int::from(true)
+    true
 }
 
 /// `ttyclose()` of device/chario.c: complete the delayed replies and hang up.
@@ -1043,8 +989,8 @@ pub(crate) fn port_death(tp: &mut Tty, port: *mut c_void) -> bool {
 /// # Safety
 ///
 /// `tp` must point at a live tty and `port` is the reply port that died.
-pub(crate) unsafe fn tty_portdeath(tp: *mut Tty, port: *mut c_void) -> c_int {
-    c_int::from(port_death(unsafe { &mut *tp }, port))
+pub(crate) unsafe fn tty_portdeath(tp: *mut Tty, port: *mut c_void) -> bool {
+    port_death(unsafe { &mut *tp }, port)
 }
 
 /// The `TTY_STATUS` read of `tty_get_status()`.
@@ -1074,18 +1020,18 @@ pub(crate) unsafe fn tty_get_status(
     flavor: c_uint,
     data: *mut c_int,
     count: *mut u32,
-) -> c_int {
+) -> Result<(), DeviceError> {
     match flavor {
         TTY_STATUS => {
             if unsafe { *count } < TTY_STATUS_COUNT {
-                return DeviceError::InvalidOperation as c_int;
+                return Err(DeviceError::InvalidOperation);
             }
             let status = status(unsafe { &*tp });
             unsafe { data.cast::<TtyStatus>().write(status) };
             unsafe { *count = TTY_STATUS_COUNT };
-            0
+            Ok(())
         }
-        _ => DeviceError::InvalidOperation as c_int,
+        _ => Err(DeviceError::InvalidOperation),
     }
 }
 
@@ -1156,36 +1102,33 @@ pub(crate) unsafe fn tty_set_status(
     flavor: c_uint,
     data: *mut c_int,
     count: u32,
-) -> c_int {
+) -> Result<(), DeviceError> {
     match flavor {
         TTY_FLUSH => {
             if count < TTY_FLUSH_COUNT {
-                return DeviceError::InvalidOperation as c_int;
+                return Err(DeviceError::InvalidOperation);
             }
             let flags = unsafe { *data };
             let flags = if flags == 0 { D_READ | D_WRITE } else { flags };
             set_flush(unsafe { &mut *tp }, flags);
-            0
+            Ok(())
         }
         TTY_STOP => {
             stop_output(unsafe { &mut *tp });
-            0
+            Ok(())
         }
         TTY_START => {
             start_output(unsafe { &mut *tp });
-            0
+            Ok(())
         }
         TTY_STATUS => {
             if count < TTY_STATUS_COUNT {
-                return DeviceError::InvalidOperation as c_int;
+                return Err(DeviceError::InvalidOperation);
             }
             let status = unsafe { data.cast::<TtyStatus>().read() };
-            match apply_status(unsafe { &mut *tp }, &status) {
-                Ok(()) => 0,
-                Err(error) => error as c_int,
-            }
+            apply_status(unsafe { &mut *tp }, &status)
         }
-        _ => DeviceError::InvalidOperation as c_int,
+        _ => Err(DeviceError::InvalidOperation),
     }
 }
 
@@ -1444,8 +1387,8 @@ pub(crate) fn modem(tp: &mut Tty, carrier_up: bool) -> bool {
 ///
 /// `tp` must point at a live tty, and the caller must hold its lock at
 /// `spltty`, as the C contract requires.
-pub(crate) unsafe fn ttymodem(tp: *mut Tty, carrier_up: c_int) -> c_int {
-    c_int::from(modem(unsafe { &mut *tp }, carrier_up != 0))
+pub(crate) unsafe fn ttymodem(tp: *mut Tty, carrier_up: c_int) -> bool {
+    modem(unsafe { &mut *tp }, carrier_up != 0)
 }
 
 /// Handle a `ClearToSend` transition, the `tty_cts()` of device/chario.c.

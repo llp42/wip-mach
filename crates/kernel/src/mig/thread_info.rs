@@ -9,7 +9,6 @@
 //! conversions that fill them from the kernel's thread record.
 
 use crate::arch::x86_64::spl;
-use crate::glue::time_value::{RpcTimeValue, TimeValue, TimeValue64};
 use crate::kern::host_time::read_time_stamp;
 use crate::kern::machine;
 use crate::kern::policy::POLICY_FIXEDPRI;
@@ -18,6 +17,7 @@ use crate::kern::thread::{
     TH_HALTED, TH_IDLE, TH_RUN, TH_SUSP, TH_SWAPPED, TH_UNINT, TH_WAIT, Thread,
 };
 use crate::kern::timer::{TIMER_RATE, read_times};
+use crate::mig::time_value::{RpcTimeValue, TimeValue, TimeValue64};
 use core::ffi::{c_int, c_uint};
 use core::mem::{offset_of, size_of};
 use core::ptr;

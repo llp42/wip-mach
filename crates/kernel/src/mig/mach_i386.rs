@@ -11,17 +11,18 @@
 //! `i386/i386/mach_i386.srv` presents.
 //!
 //! The cores are in [`crate::arch::x86_64::fpu`],
-//! [`crate::arch::x86_64::io_perm`] and [`crate::arch::x86_64::user_ldt`];
-//! the type conversions and the destructor stay in `io_perm_ffi`.
+//! [`crate::arch::x86_64::io_perm`] and [`crate::arch::x86_64::user_ldt`].
+//! The translations and the destructor the interface names for its
+//! `io_perm_t` are here too.
 
 use crate::arch::types::VmSize;
 use crate::arch::x86_64::fpu;
 use crate::arch::x86_64::io_perm::{self, Access, IoPerm};
 use crate::arch::x86_64::pcb::RealDescriptor;
 use crate::arch::x86_64::user_ldt::{self, Descriptor};
+use crate::kern::error::Error;
 use crate::kern::task::Task;
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::NonNull;
 use core::slice;
@@ -42,7 +43,9 @@ pub unsafe extern "C" fn i386_set_ldt(
     desc_list_inline: c_int,
 ) -> c_int {
     let Some(thread) = NonNull::new(thread) else {
-        return user_ldt::Error::InvalidArgument.as_kern_return();
+        return c_int::from(
+            crate::arch::x86_64::error::Error::InvalidArgument,
+        );
     };
     let descriptors = descriptor_list.cast::<RealDescriptor>().cast_mut();
     match unsafe {
@@ -55,7 +58,7 @@ pub unsafe extern "C" fn i386_set_ldt(
         )
     } {
         Ok(()) => 0,
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -75,7 +78,9 @@ pub unsafe extern "C" fn i386_get_ldt(
     count: *mut c_uint,
 ) -> c_int {
     let Some(thread) = NonNull::new(thread) else {
-        return user_ldt::Error::InvalidArgument.as_kern_return();
+        return c_int::from(
+            crate::arch::x86_64::error::Error::InvalidArgument,
+        );
     };
     let capacity = unsafe { *count };
     let out = if capacity == 0 {
@@ -101,7 +106,7 @@ pub unsafe extern "C" fn i386_get_ldt(
             }
             0
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -139,7 +144,7 @@ pub unsafe extern "C" fn i386_io_perm_modify(
     let (Some(target_task), Some(io_perm)) =
         (NonNull::new(target_task), NonNull::new(io_perm))
     else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
     let access = match enable {
         0 => Access::Withdraw,
@@ -165,11 +170,13 @@ pub unsafe extern "C" fn i386_set_gdt(
     descriptor: Descriptor,
 ) -> c_int {
     let Some(thread) = NonNull::new(thread) else {
-        return user_ldt::Error::InvalidArgument.as_kern_return();
+        return c_int::from(
+            crate::arch::x86_64::error::Error::InvalidArgument,
+        );
     };
     match unsafe { user_ldt::set_gdt(thread, selector, descriptor) } {
         Ok(()) => 0,
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -185,11 +192,13 @@ pub unsafe extern "C" fn i386_get_gdt(
     descriptor: *mut Descriptor,
 ) -> c_int {
     let Some(thread) = NonNull::new(thread) else {
-        return user_ldt::Error::InvalidArgument.as_kern_return();
+        return c_int::from(
+            crate::arch::x86_64::error::Error::InvalidArgument,
+        );
     };
     match unsafe { user_ldt::get_gdt(thread, selector, descriptor) } {
         Ok(()) => 0,
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -205,9 +214,43 @@ pub unsafe extern "C" fn i386_get_xstate_size(
     size: *mut VmSize,
 ) -> c_int {
     if host.is_null() {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     }
 
     unsafe { fpu::i386_get_xstate_size(size) };
     0
+}
+
+/// `convert_io_perm_to_port()`: a send right for `io_perm`'s port, or null.
+///
+/// # Safety
+///
+/// `io_perm` must be null or point at a live [`IoPerm`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn convert_io_perm_to_port(
+    io_perm: *mut IoPerm,
+) -> *mut c_void {
+    unsafe { io_perm::convert_io_perm_to_port(NonNull::new(io_perm)) }
+}
+
+/// `convert_port_to_io_perm()`: the I/O permission `port` names, or null.
+///
+/// # Safety
+///
+/// `port` must be null or a live port.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn convert_port_to_io_perm(
+    port: *mut c_void,
+) -> *mut IoPerm {
+    unsafe { io_perm::convert_port_to_io_perm(port) }
+}
+
+/// `io_perm_deallocate()`: the destructor of an `io_perm_t` argument.
+///
+/// # Safety
+///
+/// `io_perm` must point at a live [`IoPerm`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn io_perm_deallocate(io_perm: *mut IoPerm) {
+    unsafe { io_perm::deallocate(io_perm) };
 }

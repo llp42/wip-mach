@@ -104,7 +104,7 @@ fn raise_to_spl7() -> c_int {
 /// The caller must be in kernel mode with `%gs` based at the running
 /// CPU's `struct percpu`, and must not hold a lock that `softclock()`
 /// could want.
-pub(crate) unsafe extern "C" fn spl0() -> c_int {
+pub(crate) unsafe fn spl0() -> c_int {
     serializing_fence();
     let old = current_ipl();
     interrupts_disable();
@@ -122,7 +122,8 @@ pub(crate) unsafe extern "C" fn spl0() -> c_int {
     old
 }
 
-/// Defines the `splsoftclock`..`spl7` aliases, which share one body.
+/// Defines the `splsoftclock`..`splhi` aliases, which share one body with
+/// [`spl7`].
 ///
 /// # Safety
 ///
@@ -138,7 +139,7 @@ macro_rules! ipl_entry {
             ///
             /// The caller must be in kernel mode with `%gs` based at the
             /// running CPU's `struct percpu`.
-            pub unsafe extern "C" fn $name() -> c_int {
+            pub unsafe fn $name() -> c_int {
                 raise_to_spl7()
             }
         )+
@@ -164,8 +165,19 @@ ipl_entry!(
     splsched,
     splhigh,
     splhi,
-    spl7,
 );
+
+/// `spl7()`: clear the interrupt flag and raise `curr_ipl` to [`SPL7`],
+/// returning the mask it replaced. The interrupt entry calls it from
+/// assembly.
+///
+/// # Safety
+///
+/// The caller must be in kernel mode with `%gs` based at the running CPU's
+/// `struct percpu`.
+pub(crate) unsafe extern "C" fn spl7() -> c_int {
+    raise_to_spl7()
+}
 
 /// The tail `spl(level)` of [`splx`]: set `curr_ipl` to `level` and
 /// return the mask it replaced.  Level 7 goes through [`spl7`], which
@@ -194,7 +206,7 @@ unsafe fn spl(level: c_int) -> c_int {
 /// The caller must be in kernel mode with `%gs` based at the running
 /// CPU's `struct percpu`, and must not hold a lock that the softclock
 /// path could want when `level` is [`SPL0`].
-pub(crate) unsafe extern "C" fn splx(level: c_int) -> c_int {
+pub(crate) unsafe fn splx(level: c_int) -> c_int {
     if level == SPL0 {
         return unsafe { spl0() };
     }
@@ -236,7 +248,7 @@ pub(crate) unsafe extern "C" fn splx_cli(level: c_int) {
 ///
 /// The caller must be in kernel mode; the returned flags must be
 /// restored with [`splon`].
-pub(crate) unsafe extern "C" fn sploff() -> c_ulong {
+pub(crate) unsafe fn sploff() -> c_ulong {
     let flags: c_ulong;
     // SAFETY: The `pushfq`/`popq` pair reads the flags into a register and
     // leaves the stack as it found it.
@@ -258,7 +270,7 @@ pub(crate) unsafe extern "C" fn sploff() -> c_ulong {
 /// # Safety
 ///
 /// `n` must come from an unmatched [`sploff`] on this CPU.
-pub(crate) unsafe extern "C" fn splon(n: c_ulong) {
+pub(crate) unsafe fn splon(n: c_ulong) {
     // SAFETY: The `pushq`/`popfq` pair restores the flags word the caller
     // got from `sploff`, and the stack ends where it started.
     unsafe {
@@ -268,7 +280,7 @@ pub(crate) unsafe extern "C" fn splon(n: c_ulong) {
 
 /// `setsoftclock()` of `i386/i386/spl.S` and `x86_64/spl.S`: raise the
 /// softclock flag [`spl0`] and [`splx_cli`] drain.
-pub(crate) extern "C" fn setsoftclock() {
+pub(crate) fn setsoftclock() {
     // Relaxed: The flag guards no other data; the locked increment is the
     // setter's only claim, and the caller's spl keeps a drain off this CPU.
     SOFTCLK_PENDING.fetch_add(1, Ordering::Relaxed);

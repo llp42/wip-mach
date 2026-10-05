@@ -23,9 +23,6 @@ use core::ffi::{c_int, c_void};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 
-/// `KERN_SUCCESS` in <`mach/kern_return.h`>.
-const KERN_SUCCESS: c_int = 0;
-
 /// `swapper_lock_data` of `kern/thread_swap.c`: guards `swapin_queue`.
 static SWAPPER_LOCK: SimpleLock = SimpleLock::new();
 
@@ -92,15 +89,15 @@ pub(crate) unsafe fn thread_swapin(thread: *mut Thread) {
     }
 }
 
-/// `thread_doswapin()` of `kern/thread_swap.c`, the body behind the adapter
-/// below.
+/// `thread_doswapin()` of `kern/thread_swap.c`: give the thread a stack and
+/// make it runnable again.
 ///
 /// # Safety
 ///
 /// `thread` must be a live thread with `TH_SWAP_STATE` set that no lock
 /// protects, because the stack allocation can block; the caller must hold no
 /// spin lock.
-pub(crate) unsafe fn doswapin(thread: *mut Thread) -> c_int {
+pub(crate) unsafe fn doswapin(thread: *mut Thread) {
     unsafe { (*thread).stack_alloc(Some(thread_continue)) };
 
     // SAFETY: `thread` is live and not locked; the spl level and the thread
@@ -115,17 +112,6 @@ pub(crate) unsafe fn doswapin(thread: *mut Thread) -> c_int {
         (*thread).lock.unlock();
         spl::splx(s);
     }
-    KERN_SUCCESS
-}
-
-/// `thread_doswapin()` in C.
-///
-/// # Safety
-///
-/// `thread` must be a live thread queued for swapin, and the caller must hold
-/// no spin lock, because the stack allocation can block.
-pub(crate) unsafe fn thread_doswapin(thread: *mut Thread) -> c_int {
-    unsafe { doswapin(thread) }
 }
 
 /// `swapin_thread_continue()` of `kern/thread_swap.c`, which C kept private.
@@ -152,18 +138,10 @@ unsafe fn swapin_thread_continue() -> ! {
                 // popped link is its thread; every entry on this queue was
                 // pushed that way.
                 let thread = ptr::from_mut(elt);
-                let kr = doswapin(thread);
+                doswapin(thread);
 
                 s = spl::splsched();
                 SWAPPER_LOCK.lock();
-
-                if kr != KERN_SUCCESS {
-                    // SAFETY: the failed `doswapin()` left the thread
-                    // unqueued, so its links may go back on the queue.
-                    swapin_queue()
-                        .push_front_ptr(NonNull::new_unchecked(thread));
-                    break;
-                }
             }
 
             // SAFETY: the event is the queue head's fixed address, and the

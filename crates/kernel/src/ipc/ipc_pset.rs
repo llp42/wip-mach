@@ -8,14 +8,14 @@
 //! The port-set routines, which `ipc/ipc_pset.c` used to define and
 //! `ipc/ipc_pset.h` declares.
 
-use crate::ipc::ipc_kmsg::MsgReturn;
+use crate::ipc::error::Error;
 use crate::ipc::ipc_mqueue;
 use crate::ipc::ipc_object;
 use crate::ipc::ipc_target;
+use crate::ipc::ipc_thread::IpcWait;
 use crate::ipc::{
     IOT_PORT_SET, IpcPort, IpcSpace, IpcTarget, MACH_PORT_TYPE_PORT_SET,
 };
-use crate::kern::types::KernError;
 use core::ffi::c_uint;
 use core::ptr::{self, NonNull};
 
@@ -31,7 +31,7 @@ const IOT_PORT_SET_OBJECT: c_uint = IOT_PORT_SET as c_uint;
 /// reference.
 pub(crate) unsafe fn alloc(
     space: IpcSpace,
-) -> Result<(c_uint, *mut IpcTarget), KernError> {
+) -> Result<(c_uint, *mut IpcTarget), Error> {
     let (name, object) = unsafe {
         ipc_object::alloc(
             space,
@@ -58,7 +58,7 @@ pub(crate) unsafe fn alloc(
 pub(crate) unsafe fn alloc_name(
     space: IpcSpace,
     name: c_uint,
-) -> Result<*mut IpcTarget, KernError> {
+) -> Result<*mut IpcTarget, Error> {
     let object = unsafe {
         ipc_object::alloc_name(
             space,
@@ -97,7 +97,7 @@ pub(crate) unsafe fn add(pset: *mut IpcTarget, port: IpcPort) {
         ipc_mqueue::move_messages(pset_queue, port_queue, port);
 
         (*pset_queue).unlock();
-        ipc_mqueue::changed(port_queue, MsgReturn::RCV_PORT_CHANGED);
+        ipc_mqueue::changed(port_queue, IpcWait::PortChanged);
         (*port_queue).unlock();
     }
 }
@@ -137,7 +137,7 @@ pub(crate) unsafe fn move_between(
     space: IpcSpace,
     port: IpcPort,
     nset: Option<NonNull<IpcTarget>>,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     unsafe { port.lock() };
 
     // SAFETY: the port is live and locked.
@@ -215,7 +215,7 @@ pub(crate) unsafe fn move_between(
     unsafe { port.unlock() };
 
     if nset.is_none() && oset.is_none() {
-        Err(KernError::NotInSet)
+        Err(Error::NotInSet)
     } else {
         Ok(())
     }
@@ -233,7 +233,7 @@ pub(crate) unsafe fn destroy(pset: *mut IpcTarget) {
 
         let mqueue = (*pset).messages();
         (*mqueue).lock();
-        ipc_mqueue::changed(mqueue, MsgReturn::RCV_PORT_DIED);
+        ipc_mqueue::changed(mqueue, IpcWait::PortDied);
         (*mqueue).unlock();
 
         ipc_target::terminate(pset);

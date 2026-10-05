@@ -12,21 +12,14 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The <`mach/mach_host.defs`> server entries, all 44 routines, which
+//! The <`mach/mach_host.defs`> server entries, all 43 routines, which
 //! `kern/mach_host.srv` presents.
 //!
 //! The cores stay in the `crate::kern` and `crate::vm` modules.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::config::{KERNEL_VERSION, KERNEL_VERSION_MAX, MAX_NCPUS};
-use crate::ffi::host_info::{
-    self, HOST_INFO_MAX, HostBasicInfo, HostLoadInfo, HostSchedInfo,
-};
-use crate::ffi::processor_info::ProcessorBasicInfo;
-use crate::ffi::processor_set_info::{
-    ProcessorSetBasicInfo, ProcessorSetSchedInfo,
-};
-use crate::glue::time_value::{TimeValue, TimeValue64};
+use crate::kern::error::Error;
 use crate::kern::host::{self, Host, processor_ports, processor_set_priv};
 use crate::kern::host_time as clock;
 use crate::kern::ipc_host;
@@ -35,8 +28,15 @@ use crate::kern::processor::{self, Processor, ProcessorSet};
 use crate::kern::syscall_subr;
 use crate::kern::task::{self, Task};
 use crate::kern::thread::{Thread, default_pset};
-use crate::kern::types::KernError;
-use crate::vm::error::kern_return;
+use crate::mig::code::kern_return;
+use crate::mig::host_info::{
+    self, HOST_INFO_MAX, HostBasicInfo, HostLoadInfo, HostSchedInfo,
+};
+use crate::mig::processor_info::ProcessorBasicInfo;
+use crate::mig::processor_set_info::{
+    ProcessorSetBasicInfo, ProcessorSetSchedInfo,
+};
+use crate::mig::time_value::{TimeValue, TimeValue64};
 use crate::vm::types::VmProt;
 use crate::vm::vm_map::VmMap;
 use crate::vm::vm_user;
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn host_processors(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn processor_start(pr: *mut Processor) -> c_int {
     let Some(pr) = NonNull::new(pr) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { (*pr.as_ptr()).start() } {
@@ -97,7 +97,7 @@ pub unsafe extern "C" fn processor_start(pr: *mut Processor) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn processor_exit(pr: *mut Processor) -> c_int {
     let Some(pr) = NonNull::new(pr) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { (*pr.as_ptr()).exit() } {
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn processor_set_destroy(
     pset: *mut ProcessorSet,
 ) -> c_int {
     let Some(pset) = NonNull::new(pset) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { (*pset.as_ptr()).destroy() } {
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn processor_get_assignment(
     pset: *mut *mut ProcessorSet,
 ) -> c_int {
     let Some(pr) = NonNull::new(pr) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { (*pr.as_ptr()).get_assignment() } {
@@ -324,15 +324,6 @@ pub unsafe extern "C" fn task_get_assignment(
     }
 }
 
-/// The deprecated spelling of [`host_get_kernel_version`].
-#[unsafe(no_mangle)]
-pub extern "C" fn host_kernel_version(
-    host: Option<NonNull<Host>>,
-    out_version: Option<&mut [u8; KERNEL_VERSION_MAX]>,
-) -> c_int {
-    host_get_kernel_version(host, out_version)
-}
-
 /// `thread_priority()` of kern/thread.c.
 ///
 /// # Safety
@@ -397,7 +388,7 @@ pub unsafe extern "C" fn processor_set_max_priority(
     change_threads: c_int,
 ) -> c_int {
     let Some(pset) = NonNull::new(pset) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe {
@@ -436,7 +427,7 @@ pub unsafe extern "C" fn processor_set_policy_enable(
     policy: c_int,
 ) -> c_int {
     let Some(pset) = NonNull::new(pset) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { (*pset.as_ptr()).policy_enable(policy) } {
@@ -457,7 +448,7 @@ pub unsafe extern "C" fn processor_set_policy_disable(
     change_threads: c_int,
 ) -> c_int {
     let Some(pset) = NonNull::new(pset) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { (*pset.as_ptr()).policy_disable(policy, change_threads) } {
@@ -531,7 +522,7 @@ pub unsafe extern "C" fn host_processor_sets(
     count: *mut c_uint,
 ) -> c_int {
     let Some(host) = NonNull::new(host) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { host::processor_sets(Some(host.as_ref())) } {
@@ -554,7 +545,7 @@ pub extern "C" fn host_processor_set_priv(
     pset: Option<&mut Option<NonNull<ProcessorSet>>>,
 ) -> c_int {
     let Some(out) = pset else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match processor_set_priv(host, pset_name) {
@@ -577,7 +568,7 @@ pub extern "C" fn host_processor_set_priv(
 /// thread lock itself.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn thread_depress_abort(thread: *mut Thread) -> c_int {
-    unsafe { syscall_subr::depress_abort(thread) }
+    kern_return(unsafe { syscall_subr::depress_abort(thread) })
 }
 
 /// `host_set_time()` of `kern/mach_clock.c`, the deprecated 32-bit entry.
@@ -687,7 +678,7 @@ pub unsafe extern "C" fn thread_wire(
     wired: c_int,
 ) -> c_int {
     if host.is_null() {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     }
 
     match unsafe { Thread::wire(thread, wired != 0) } {
@@ -731,10 +722,10 @@ pub unsafe extern "C" fn host_info(
 ) -> c_int {
     let (Some(host), Some(count)) = (NonNull::new(host), NonNull::new(count))
     else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
     let Some(info) = NonNull::new(info) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     let capacity = unsafe { count.as_ptr().read() as usize };
@@ -744,7 +735,7 @@ pub unsafe extern "C" fn host_info(
     let written = match flavor {
         HostFlavor::BASIC_INFO => {
             if capacity < HostBasicInfo::WORDS as usize {
-                return c_int::from(KernError::Failure);
+                return c_int::from(Error::Failure);
             }
             // SAFETY: the capacity check above covers the record, and the
             // MIG buffer is only `integer_t`-aligned.
@@ -757,14 +748,14 @@ pub unsafe extern "C" fn host_info(
         }
         HostFlavor::PROCESSOR_SLOTS => {
             if capacity < MAX_NCPUS {
-                return c_int::from(KernError::InvalidArgument);
+                return c_int::from(Error::InvalidArgument);
             }
             // SAFETY: the capacity check above holds `MAX_NCPUS` slots.
             unsafe { host_info::processor_slots(host, info.as_ptr()) }
         }
         HostFlavor::SCHED_INFO => {
             if capacity < HostSchedInfo::WORDS as usize {
-                return c_int::from(KernError::Failure);
+                return c_int::from(Error::Failure);
             }
             // SAFETY: the capacity check above covers the record, and the
             // MIG buffer is only `integer_t`-aligned.
@@ -777,7 +768,7 @@ pub unsafe extern "C" fn host_info(
         }
         HostFlavor::LOAD_INFO => {
             if capacity < HostLoadInfo::WORDS as usize {
-                return c_int::from(KernError::Failure);
+                return c_int::from(Error::Failure);
             }
             // SAFETY: the capacity check above covers the record, and the
             // MIG buffer is only `integer_t`-aligned.
@@ -788,7 +779,7 @@ pub unsafe extern "C" fn host_info(
             }
             HostLoadInfo::WORDS
         }
-        _ => return c_int::from(KernError::InvalidArgument),
+        _ => return c_int::from(Error::InvalidArgument),
     };
 
     unsafe { count.as_ptr().write(written) };
@@ -824,14 +815,14 @@ pub unsafe extern "C" fn processor_info(
     count: *mut c_uint,
 ) -> c_int {
     let Some(processor) = NonNull::new(processor) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     let capacity = unsafe { *count };
     if flavor != ProcessorFlavor::BASIC_INFO
         || capacity < ProcessorBasicInfo::WORDS
     {
-        return c_int::from(KernError::Failure);
+        return c_int::from(Error::Failure);
     }
 
     // SAFETY: the port holds a live processor, as the generated stub's port
@@ -880,14 +871,14 @@ pub unsafe extern "C" fn processor_set_info(
     count: *mut c_uint,
 ) -> c_int {
     let Some(pset) = NonNull::new(pset) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     let capacity = unsafe { *count };
     match flavor {
         ProcessorSetFlavor::BASIC_INFO => {
             if capacity < ProcessorSetBasicInfo::WORDS {
-                return c_int::from(KernError::Failure);
+                return c_int::from(Error::Failure);
             }
 
             // SAFETY: the port holds a live set, as the generated stub's
@@ -906,7 +897,7 @@ pub unsafe extern "C" fn processor_set_info(
         }
         ProcessorSetFlavor::SCHED_INFO => {
             if capacity < ProcessorSetSchedInfo::WORDS {
-                return c_int::from(KernError::Failure);
+                return c_int::from(Error::Failure);
             }
 
             // SAFETY: the port holds a live set, as the generated stub's
@@ -929,7 +920,7 @@ pub unsafe extern "C" fn processor_set_info(
             unsafe {
                 *host = ptr::null_mut();
             }
-            c_int::from(KernError::InvalidArgument)
+            c_int::from(Error::InvalidArgument)
         }
     }
 }
@@ -947,7 +938,7 @@ pub unsafe extern "C" fn processor_control(
     count: c_uint,
 ) -> c_int {
     let Some(pr) = NonNull::new(pr) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     let info: &[c_int] = if count == 0 {
@@ -1024,7 +1015,7 @@ pub extern "C" fn host_get_kernel_version(
     out_version: Option<&mut [u8; KERNEL_VERSION_MAX]>,
 ) -> c_int {
     let (Some(_), Some(out)) = (host, out_version) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     let (version, pad) = out.split_at_mut(KERNEL_VERSION.len());
@@ -1064,7 +1055,7 @@ pub extern "C" fn processor_set_processors(
     let (Some(pset), Some(out_list), Some(out_count)) =
         (pset, processor_list, countp)
     else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match processor_ports(pset) {

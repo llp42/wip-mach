@@ -8,12 +8,12 @@
 
 use crate::arch::types::VmOffset;
 use crate::kern::debug::kpanic;
+use crate::kern::error::Error;
 use crate::kern::ipc_host::pset_name_to_port;
 use crate::kern::machine;
 use crate::kern::processor::{self, ProcessorSet, PsetList, processor_at};
 use crate::kern::slab::{kalloc, kfree};
 use crate::kern::smp::CpuId;
-use crate::kern::types::KernError;
 use core::ffi::{c_uint, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr::{self, NonNull};
@@ -58,13 +58,13 @@ pub(crate) fn host_priv_self() -> *mut c_void {
 pub(crate) fn processor_set_priv(
     host: Option<NonNull<Host>>,
     name: Option<&mut ProcessorSet>,
-) -> Result<NonNull<ProcessorSet>, KernError> {
+) -> Result<NonNull<ProcessorSet>, Error> {
     match (host, name) {
         (Some(_), Some(set)) => {
             set.reference();
             Ok(NonNull::from(set))
         }
-        _ => Err(KernError::InvalidArgument),
+        _ => Err(Error::InvalidArgument),
     }
 }
 
@@ -73,7 +73,7 @@ pub(crate) fn processor_set_priv(
 /// to its name port.
 pub(crate) fn processor_ports(
     pset: &mut ProcessorSet,
-) -> Result<(NonNull<VmOffset>, c_uint), KernError> {
+) -> Result<(NonNull<VmOffset>, c_uint), Error> {
     pset.lock.lock();
 
     // The C read the `int` count into an `unsigned int`; the field is
@@ -89,7 +89,7 @@ pub(crate) fn processor_ports(
     // size is the C expression's.
     let Some(ports) = kalloc(size).map(NonNull::cast::<*mut c_void>) else {
         pset.lock.unlock();
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
     let list = ptr::addr_of_mut!(pset.processors);
     // SAFETY: the set lock is held, so the queue links are stable and every
@@ -124,9 +124,9 @@ pub(crate) fn processor_ports(
 /// CPU the machine reports.
 pub(crate) fn processors(
     host: Option<NonNull<Host>>,
-) -> Result<(NonNull<VmOffset>, c_uint), KernError> {
+) -> Result<(NonNull<VmOffset>, c_uint), Error> {
     if host.is_none() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let mut count: c_uint = 0;
@@ -149,7 +149,7 @@ pub(crate) fn processors(
 
     // `kalloc_init()` ran during the boot this MIG entry follows.
     let Some(ports) = kalloc(size).map(NonNull::cast::<VmOffset>) else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     let mut slot = 0;
@@ -184,9 +184,9 @@ pub(crate) fn processors(
 /// that converted the request port promises.
 pub(crate) unsafe fn processor_sets(
     host: Option<&Host>,
-) -> Result<(*mut *mut c_void, c_uint), KernError> {
+) -> Result<(*mut *mut c_void, c_uint), Error> {
     if host.is_none() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let lock = processor::all_psets_lock();
@@ -214,7 +214,7 @@ pub(crate) unsafe fn processor_sets(
         }
         size = needed;
         let Some(buffer) = kalloc(size) else {
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         };
         addr = buffer.as_ptr();
     }
@@ -250,7 +250,7 @@ pub(crate) unsafe fn processor_sets(
             }
             // SAFETY: `addr` came from `kalloc(size)`.
             unsafe { kfree(NonNull::new_unchecked(addr), size) };
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         };
         let newaddr = buffer.as_ptr();
 

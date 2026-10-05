@@ -11,11 +11,11 @@
 use crate::arch::types::VmOffset;
 use crate::ipc::{IpcPort, IpcSpace, ipc_port, ipc_space};
 use crate::kern::debug::kpanic;
+use crate::kern::error::Error;
 use crate::kern::host::{self, Host};
 use crate::kern::ipc_kobject::set;
 use crate::kern::processor::{self, Processor, ProcessorSet};
 use crate::kern::task::current_task;
-use crate::kern::types::KernError;
 use core::ffi::{c_uint, c_void};
 use core::ptr;
 use core::ptr::NonNull;
@@ -477,9 +477,9 @@ pub(crate) unsafe fn pset_name_to_port(
 /// dereferenced.
 pub(crate) unsafe fn set_default(
     host: *mut c_void,
-) -> Result<*mut ProcessorSet, KernError> {
+) -> Result<*mut ProcessorSet, Error> {
     if host.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let pset = processor::default_pset();

@@ -169,8 +169,7 @@ pub(crate) fn probeio() {
                 adapter,
                 c"atbus".as_ptr(),
             )
-        } != 0
-        {
+        } {
             adapter += 1;
         }
     }
@@ -200,8 +199,7 @@ pub(crate) fn probeio() {
                 adapter,
                 c"atbus".as_ptr(),
             )
-        } != 0
-        {
+        } {
             adapter += 1;
         }
     }

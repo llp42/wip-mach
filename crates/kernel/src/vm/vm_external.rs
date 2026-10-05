@@ -29,7 +29,7 @@ pub(crate) const VM_EXTERNAL_STATE_EXISTS: c_int = 1;
 /// `VM_EXTERNAL_STATE_UNKNOWN` of <`vm/vm_external.h`>.
 const VM_EXTERNAL_STATE_UNKNOWN: c_int = 2;
 /// `VM_EXTERNAL_STATE_ABSENT` of <`vm/vm_external.h`>.
-pub(crate) const VM_EXTERNAL_STATE_ABSENT: c_int = 3;
+const VM_EXTERNAL_STATE_ABSENT: c_int = 3;
 
 /// `vm_external_unsafe` in `vm/vm_external.c`: when set, every state query
 /// answers `UNKNOWN`.
@@ -37,7 +37,7 @@ static VM_EXTERNAL_UNSAFE: AtomicU32 = AtomicU32::new(0);
 
 /// The state a page may be recorded in; `vm_external_state_t` in C.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExternalState {
+pub(crate) enum ExternalState {
     /// `VM_EXTERNAL_STATE_EXISTS`: written to external storage.
     Exists,
     /// `VM_EXTERNAL_STATE_UNKNOWN`: the map does not say.
@@ -47,15 +47,6 @@ enum ExternalState {
 }
 
 impl ExternalState {
-    /// The C `vm_external_state_t` this state maps to.
-    const fn as_c(self) -> c_int {
-        match self {
-            Self::Exists => VM_EXTERNAL_STATE_EXISTS,
-            Self::Unknown => VM_EXTERNAL_STATE_UNKNOWN,
-            Self::Absent => VM_EXTERNAL_STATE_ABSENT,
-        }
-    }
-
     /// The state a C `vm_external_state_t` names, or `None` when the value is
     /// not one.
     const fn from_c(state: c_int) -> Option<Self> {
@@ -267,32 +258,20 @@ pub(crate) unsafe fn vm_external_destroy(e: *mut VmExternal) {
     }
 }
 
-/// `_vm_external_state_get()` in C; `vm_external_state_get()` is the macro
-/// over it.
+/// `vm_external_state_get()` of <`vm/vm_external.h>`: the state recorded
+/// for the page, or [`ExternalState::Unknown`] for a null map.
 ///
 /// # Safety
 ///
 /// A non-null `e` must be a live object from `vm_external_create()`; the call
 /// only reads it.
-pub(crate) unsafe fn vm_external_state_get(
+pub(crate) unsafe fn state_get(
     e: *mut VmExternal,
     offset: VmOffset,
-) -> c_int {
-    let Some(e) = NonNull::new(e) else {
-        return ExternalState::Unknown.as_c();
-    };
-    unsafe { e.as_ref() }.state_get(offset).as_c()
-}
-
-/// `vm_external_state_get()` of <`vm/vm_external.h>`: the macro's null test
-/// and the C state value, with `VM_EXTERNAL_STATE_UNKNOWN` for a null map.
-///
-/// # Safety
-///
-/// A non-null `e` must be a live object from `vm_external_create()`; the call
-/// only reads it.
-pub(crate) unsafe fn state_get(e: *mut VmExternal, offset: VmOffset) -> c_int {
-    unsafe { vm_external_state_get(e, offset) }
+) -> ExternalState {
+    NonNull::new(e).map_or(ExternalState::Unknown, |e| unsafe {
+        e.as_ref().state_get(offset)
+    })
 }
 
 /// `vm_external_state_set()` in C.

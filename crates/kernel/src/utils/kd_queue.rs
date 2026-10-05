@@ -8,7 +8,7 @@
 //! The keyboard/mouse event ring buffer, which `i386/i386at/kd_queue.c` used
 //! to define.
 
-use crate::glue::time_value::RpcTimeValue;
+use crate::mig::time_value::RpcTimeValue;
 use core::ffi::c_int;
 use core::mem::{offset_of, size_of};
 

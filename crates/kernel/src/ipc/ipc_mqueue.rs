@@ -9,12 +9,13 @@
 //! `ipc/ipc_mqueue.h` declares.
 
 use crate::arch::x86_64::per_cpu;
-use crate::ipc::ipc_kmsg::{self, Kmsg, MsgReturn};
+use crate::ipc::error::{ReceiveError, SendError};
+use crate::ipc::ipc_kmsg::{self, Kmsg};
 use crate::ipc::ipc_marequest;
 use crate::ipc::ipc_pset;
 use crate::ipc::ipc_space;
 use crate::ipc::ipc_thread;
-use crate::ipc::ipc_thread::IpcThreadQueue;
+use crate::ipc::ipc_thread::{IpcThreadQueue, IpcWait};
 use crate::ipc::{
     IpcMarequest, IpcMqueue, IpcPort, IpcSpace, IpcTarget,
     MACH_PORT_TYPE_PORT_SET, MACH_PORT_TYPE_RECEIVE,
@@ -26,7 +27,7 @@ use crate::kern::ipc_sched::{
 };
 use crate::kern::sched_prim::thread_block;
 use crate::kern::task::current_task;
-use crate::kern::thread::{IpcKmsgQueue, Thread};
+use crate::kern::thread::{Continuation, IpcKmsgQueue, Thread};
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::{self, with_exposed_provenance_mut};
 
@@ -63,8 +64,8 @@ pub(crate) enum Received {
     Kmsg { kmsg: Kmsg, seqno: c_uint },
     /// The receiver's buffer is too small; this is the size it needs.
     TooLarge { size: c_uint },
-    /// One of the `MACH_RCV_*` failures.
-    Failed { code: MsgReturn },
+    /// The receive failed.
+    Failed { error: ReceiveError },
 }
 
 /// Which object a copyin holds locked.
@@ -127,7 +128,7 @@ pub(crate) unsafe fn move_messages(
                     thread_go(th);
 
                     if message.msgh_size() <= (*th).data.msize {
-                        (*th).ith_state = MsgReturn::SUCCESS.raw();
+                        (*th).ith_state = IpcWait::Done;
                         (*th).data.kmsg = message.as_ptr();
                         (*th).ith_seqno = port.seqno();
                         port.set_seqno(port.seqno().wrapping_add(1));
@@ -135,7 +136,7 @@ pub(crate) unsafe fn move_messages(
                         break;
                     }
 
-                    (*th).ith_state = MsgReturn::RCV_TOO_LARGE.raw();
+                    (*th).ith_state = IpcWait::TooLarge;
                     (*th).data.msize = message.msgh_size();
                 }
 
@@ -149,12 +150,13 @@ pub(crate) unsafe fn move_messages(
     }
 }
 
-/// `ipc_mqueue_changed()` in C.
+/// `ipc_mqueue_changed()` in C: wake every receiver with `state`, the port
+/// dying or moving into a port set.
 ///
 /// # Safety
 ///
 /// `mqueue` must point at a live locked queue.
-pub(crate) unsafe fn changed(mqueue: *mut IpcMqueue, code: MsgReturn) {
+pub(crate) unsafe fn changed(mqueue: *mut IpcMqueue, state: IpcWait) {
     unsafe {
         let threads = (*mqueue).threads().cast::<IpcThreadQueue>();
 
@@ -165,7 +167,7 @@ pub(crate) unsafe fn changed(mqueue: *mut IpcMqueue, code: MsgReturn) {
             }
 
             let th = th.cast::<Thread>();
-            (*th).ith_state = code.raw();
+            (*th).ith_state = state;
             thread_go(th);
         }
     }
@@ -181,7 +183,7 @@ pub(crate) unsafe fn send(
     kmsg: *mut c_void,
     option: c_uint,
     time_out: c_uint,
-) -> MsgReturn {
+) -> Result<(), SendError> {
     let kmsg = unsafe { Kmsg::from_raw(kmsg) };
     // SAFETY: the message's destination right is live.
     let port = unsafe { IpcPort::from_raw(ptr_at(kmsg.remote_port())) };
@@ -202,7 +204,7 @@ pub(crate) unsafe fn send(
                 send(reply.as_ptr(), MACH_SEND_ALWAYS, MACH_MSG_TIMEOUT_NONE)
             };
         }
-        return MsgReturn::SUCCESS;
+        return Ok(());
     }
 
     let blocked = unsafe { wait_send_room(port, kmsg, option, time_out) };
@@ -216,7 +218,7 @@ pub(crate) unsafe fn send(
         unsafe { port.unlock() };
         // SAFETY: the message is live and owned by this call.
         unsafe { ipc_kmsg::destroy(kmsg) };
-        return MsgReturn::SUCCESS;
+        return Ok(());
     }
 
     // SAFETY: the port is live and locked.
@@ -265,7 +267,7 @@ pub(crate) unsafe fn send(
         if unsafe { kmsg.msgh_size() <= (*receiver).data.msize } {
             // SAFETY: the receiver is live and the queue is locked.
             unsafe {
-                (*receiver).ith_state = MsgReturn::SUCCESS.raw();
+                (*receiver).ith_state = IpcWait::Done;
                 (*receiver).data.kmsg = kmsg.as_ptr();
                 (*receiver).ith_seqno = port.seqno();
                 port.set_seqno(port.seqno().wrapping_add(1));
@@ -277,7 +279,7 @@ pub(crate) unsafe fn send(
 
         // SAFETY: the receiver is live and the queue is locked.
         unsafe {
-            (*receiver).ith_state = MsgReturn::RCV_TOO_LARGE.raw();
+            (*receiver).ith_state = IpcWait::TooLarge;
             (*receiver).data.msize = kmsg.msgh_size();
             thread_go(receiver);
         }
@@ -289,7 +291,7 @@ pub(crate) unsafe fn send(
         (*task).messages_sent = (*task).messages_sent.wrapping_add(1);
     }
 
-    MsgReturn::SUCCESS
+    Ok(())
 }
 
 /// The wait loop of [`send()`]: block until the destination queue has room.
@@ -306,7 +308,7 @@ unsafe fn wait_send_room(
     kmsg: Kmsg,
     option: c_uint,
     mut time_out: c_uint,
-) -> Option<MsgReturn> {
+) -> Option<Result<(), SendError>> {
     loop {
         // SAFETY: the port is live and locked.
         if !unsafe { port.is_active() } {
@@ -318,7 +320,7 @@ unsafe fn wait_send_room(
                 kmsg.set_remote_port(MACH_PORT_NULL);
                 ipc_kmsg::destroy(kmsg);
             }
-            return Some(MsgReturn::SUCCESS);
+            return Some(Ok(()));
         }
 
         // SAFETY: the port is live and locked.
@@ -338,7 +340,7 @@ unsafe fn wait_send_room(
             if time_out == 0 {
                 // SAFETY: the port is live and locked.
                 unsafe { port.unlock() };
-                return Some(MsgReturn::SEND_TIMED_OUT);
+                return Some(Err(SendError::TimedOut));
             }
             unsafe { thread_will_wait_with_timeout(self_, time_out) };
         } else {
@@ -349,7 +351,7 @@ unsafe fn wait_send_room(
         // serialized and the thread is not queued.
         unsafe {
             ipc_thread::ipc_thread_enqueue(port.blocked(), self_.cast());
-            (*self_).ith_state = MsgReturn::SEND_IN_PROGRESS.raw();
+            (*self_).ith_state = IpcWait::Sending;
             port.unlock();
         }
 
@@ -361,7 +363,7 @@ unsafe fn wait_send_room(
         unsafe { port.lock() };
 
         // SAFETY: the thread is live and the port lock is held.
-        if unsafe { (*self_).ith_state } == MsgReturn::SUCCESS.raw() {
+        if unsafe { (*self_).ith_state } == IpcWait::Done {
             continue;
         }
 
@@ -375,7 +377,7 @@ unsafe fn wait_send_room(
             THREAD_INTERRUPTED => {
                 // SAFETY: the port is live and locked.
                 unsafe { port.unlock() };
-                return Some(MsgReturn::SEND_INTERRUPTED);
+                return Some(Err(SendError::Interrupted));
             }
             THREAD_TIMED_OUT => {
                 time_out = 0;
@@ -393,7 +395,7 @@ unsafe fn wait_send_room(
 ///
 /// `kmsg` must be a live message the caller owns, holding a reference for the
 /// destination port; nothing may be locked.
-pub(crate) unsafe fn send_always(kmsg: *mut c_void) -> MsgReturn {
+pub(crate) unsafe fn send_always(kmsg: *mut c_void) -> Result<(), SendError> {
     unsafe { send(kmsg, MACH_SEND_ALWAYS, MACH_MSG_TIMEOUT_NONE) }
 }
 
@@ -406,21 +408,21 @@ pub(crate) unsafe fn send_always(kmsg: *mut c_void) -> MsgReturn {
 pub(crate) unsafe fn copyin(
     space: IpcSpace,
     name: c_uint,
-) -> Result<Copyin, MsgReturn> {
+) -> Result<Copyin, ReceiveError> {
     unsafe { space.lock_read() };
 
     // SAFETY: the space is live and locked.
     if !unsafe { space.is_active() } {
         // SAFETY: the space is live and locked.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::RCV_INVALID_NAME);
+        return Err(ReceiveError::InvalidName);
     }
 
     // SAFETY: the space is live and read-locked.
     let Some(entry) = (unsafe { space.entry_lookup(name) }) else {
         // SAFETY: the space is live and locked.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::RCV_INVALID_NAME);
+        return Err(ReceiveError::InvalidName);
     };
 
     // SAFETY: the entry is live.
@@ -448,7 +450,7 @@ pub(crate) unsafe fn copyin(
                     (*target).unlock();
                     port.unlock();
                 }
-                return Err(MsgReturn::RCV_IN_SET);
+                return Err(ReceiveError::InSet);
             }
 
             // SAFETY: the port is live and active, and the set is locked.
@@ -472,7 +474,7 @@ pub(crate) unsafe fn copyin(
     } else {
         // SAFETY: the space is live and locked.
         unsafe { space.lock_done() };
-        return Err(MsgReturn::RCV_INVALID_NAME);
+        return Err(ReceiveError::InvalidName);
     };
 
     match held {
@@ -513,7 +515,7 @@ pub(crate) unsafe fn receive(
     max_size: c_uint,
     time_out: c_uint,
     resume: bool,
-    continuation: Option<unsafe extern "C" fn()>,
+    continuation: Continuation,
 ) -> Received {
     let kmsgs = unsafe { (*mqueue).messages().cast::<IpcKmsgQueue>() };
     let self_ = per_cpu::thread();
@@ -561,7 +563,7 @@ pub(crate) unsafe fn receive(
                     // SAFETY: the queue is locked.
                     unsafe { (*mqueue).unlock() };
                     return Received::Failed {
-                        code: MsgReturn::RCV_TIMED_OUT,
+                        error: ReceiveError::TimedOut,
                     };
                 }
                 unsafe { thread_will_wait_with_timeout(self_, time_out) };
@@ -573,7 +575,7 @@ pub(crate) unsafe fn receive(
             // and the thread is not queued.
             unsafe {
                 ipc_thread::ipc_thread_enqueue(threads, self_.cast());
-                (*self_).ith_state = MsgReturn::RCV_IN_PROGRESS.raw();
+                (*self_).ith_state = IpcWait::Receiving;
                 (*self_).data.msize = max_size;
                 (*mqueue).unlock();
             }
@@ -590,46 +592,45 @@ pub(crate) unsafe fn receive(
         unsafe { (*mqueue).lock() };
 
         // SAFETY: the thread is live.
-        let state = unsafe { (*self_).ith_state };
-        if state == MsgReturn::SUCCESS.raw() {
-            // SAFETY: a successful handoff stores a live message.
-            let kmsg = unsafe { Kmsg::from_raw((*self_).data.kmsg) };
-            // SAFETY: the thread is live.
-            let seqno = unsafe { (*self_).ith_seqno };
-            // SAFETY: the message's destination right is live.
-            let port =
-                unsafe { IpcPort::from_raw(ptr_at(kmsg.remote_port())) };
-            // SAFETY: the queue is locked.
-            unsafe { (*mqueue).unlock() };
-            break (kmsg, port, seqno);
-        }
-
-        if state == MsgReturn::RCV_TOO_LARGE.raw() {
-            // SAFETY: the thread is live.
-            let size = unsafe { (*self_).data.msize };
-            // SAFETY: the queue is locked.
-            unsafe { (*mqueue).unlock() };
-            return Received::TooLarge { size };
-        }
-
-        if state == MsgReturn::RCV_PORT_DIED.raw()
-            || state == MsgReturn::RCV_PORT_CHANGED.raw()
-        {
-            let code = if state == MsgReturn::RCV_PORT_DIED.raw() {
-                MsgReturn::RCV_PORT_DIED
-            } else {
-                MsgReturn::RCV_PORT_CHANGED
-            };
-            // SAFETY: the queue is locked.
-            unsafe { (*mqueue).unlock() };
-            return Received::Failed { code };
-        }
-
-        if state != MsgReturn::RCV_IN_PROGRESS.raw() {
-            kpanic!(
+        match unsafe { (*self_).ith_state } {
+            IpcWait::Done => {
+                // SAFETY: a successful handoff stores a live message.
+                let kmsg = unsafe { Kmsg::from_raw((*self_).data.kmsg) };
+                // SAFETY: the thread is live.
+                let seqno = unsafe { (*self_).ith_seqno };
+                // SAFETY: the message's destination right is live.
+                let port =
+                    unsafe { IpcPort::from_raw(ptr_at(kmsg.remote_port())) };
+                // SAFETY: the queue is locked.
+                unsafe { (*mqueue).unlock() };
+                break (kmsg, port, seqno);
+            }
+            IpcWait::TooLarge => {
+                // SAFETY: the thread is live.
+                let size = unsafe { (*self_).data.msize };
+                // SAFETY: the queue is locked.
+                unsafe { (*mqueue).unlock() };
+                return Received::TooLarge { size };
+            }
+            IpcWait::PortDied => {
+                // SAFETY: the queue is locked.
+                unsafe { (*mqueue).unlock() };
+                return Received::Failed {
+                    error: ReceiveError::PortDied,
+                };
+            }
+            IpcWait::PortChanged => {
+                // SAFETY: the queue is locked.
+                unsafe { (*mqueue).unlock() };
+                return Received::Failed {
+                    error: ReceiveError::PortChanged,
+                };
+            }
+            IpcWait::Receiving => {}
+            IpcWait::Sending => kpanic!(
                 "ipc_mqueue_receive",
                 "ipc_mqueue_receive: strange ith_state"
-            );
+            ),
         }
 
         // SAFETY: the queue is locked and the thread is queued in it.
@@ -641,7 +642,7 @@ pub(crate) unsafe fn receive(
                 // SAFETY: the queue is locked.
                 unsafe { (*mqueue).unlock() };
                 return Received::Failed {
-                    code: MsgReturn::RCV_INTERRUPTED,
+                    error: ReceiveError::Interrupted,
                 };
             }
             THREAD_TIMED_OUT => {
@@ -697,8 +698,7 @@ unsafe fn finish_receive(
             // held.
             unsafe {
                 ipc_thread::ipc_thread_rmqueue(senders, sender);
-                (*sender.cast::<Thread>()).ith_state =
-                    MsgReturn::SUCCESS.raw();
+                (*sender.cast::<Thread>()).ith_state = IpcWait::Done;
                 thread_go(sender.cast::<Thread>());
             }
         }
@@ -714,87 +714,4 @@ unsafe fn finish_receive(
     }
 
     Received::Kmsg { kmsg, seqno }
-}
-
-/// `ipc_mqueue_send()` of `ipc/ipc_mqueue.c`.
-///
-/// # Safety
-///
-/// `kmsg` must be a live message the caller owns, holding a reference for the
-/// destination port; nothing may be locked.
-pub(crate) unsafe fn ipc_mqueue_send(
-    kmsg: *mut c_void,
-    option: c_uint,
-    time_out: c_uint,
-) -> c_int {
-    unsafe { send(kmsg, option, time_out) }.raw()
-}
-
-/// `ipc_mqueue_copyin()` of `ipc/ipc_mqueue.c`.
-///
-/// # Safety
-///
-/// `space` must be a live `ipc_space`, nothing may be locked, and `mqueuep`
-/// and `objectp` must be writable storage for one queue and one object
-/// pointer, written only on success.
-pub(crate) unsafe fn ipc_mqueue_copyin(
-    space: *mut c_void,
-    name: c_uint,
-    mqueuep: *mut *mut c_void,
-    objectp: *mut *mut c_void,
-) -> c_int {
-    let space = unsafe { IpcSpace::from_raw(space) };
-
-    match unsafe { copyin(space, name) } {
-        Ok(found) => {
-            unsafe {
-                mqueuep.write(found.mqueue.cast());
-                objectp.write(found.object);
-            }
-            0
-        }
-        Err(code) => code.raw(),
-    }
-}
-
-/// `ipc_mqueue_receive()` of `ipc/ipc_mqueue.c`.
-///
-/// # Safety
-///
-/// The message queue must be locked; the caller must hold a reference for the
-/// port or port set the queue belongs to, and `kmsgp` and `seqnop` must be
-/// writable storage for one message pointer and one sequence number.
-pub(crate) unsafe fn ipc_mqueue_receive(
-    mqueue: *mut c_void,
-    option: c_uint,
-    max_size: c_uint,
-    time_out: c_uint,
-    kmsgp: *mut *mut c_void,
-    seqnop: *mut c_uint,
-) -> c_int {
-    match unsafe {
-        receive(
-            mqueue.cast::<IpcMqueue>(),
-            option,
-            max_size,
-            time_out,
-            false,
-            None,
-        )
-    } {
-        Received::Kmsg { kmsg, seqno } => {
-            unsafe {
-                kmsgp.write(kmsg.as_ptr());
-                seqnop.write(seqno);
-            }
-            0
-        }
-        Received::TooLarge { size } => {
-            // The C wrote the size into the `kmsgp` slot, which the caller
-            // reads back through a `mach_msg_size_t` view.
-            unsafe { kmsgp.cast::<c_uint>().write(size) };
-            MsgReturn::RCV_TOO_LARGE.raw()
-        }
-        Received::Failed { code } => code.raw(),
-    }
 }

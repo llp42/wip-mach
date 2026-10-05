@@ -69,23 +69,6 @@ deletes its entry; a change that opens one adds it.
 - **Done when**: every counted object is held through a reference
   type outside the MIG seam.
 
-## `kern_return_t` is used inside the kernel
-
-- **ADR**: ADR 0015.
-- **Where**: about 477 kernel functions return `c_int` or a
-  `kern_return_t`.
-- **Done when**: only the trap entry and the MIG seam produce a C
-  integer result.
-
-## C-visible symbols are spread through the kernel
-
-- **ADR**: ADR 0027.
-- **Where**: 218 `#[no_mangle]` in 25 files, including the 14
-  `*_ffi.rs` modules under `arch/`, `device/`, `ipc/`, `kern/` and
-  `vm/`, plus `ffi/` and `glue/`.
-- **Done when**: every `#[no_mangle]` and `extern "C"` block sits in
-  the one MIG seam module or names a symbol inline assembly uses.
-
 ## `static mut` holds global state
 
 - **ADR**: ADR 0027.
@@ -176,7 +159,7 @@ deletes its entry; a change that opens one adds it.
 ## Old-style licence headers
 
 - **ADR**: ADR 0010.
-- **Where**: 147 files carry `Copyright (c)` lines, with a provenance
+- **Where**: 128 files carry `Copyright (c)` lines, with a provenance
   block that lacks `original files:`.
 - **Done when**: `grep -rlE '^//\s+Copyright \(c\)' crates` prints
   nothing.
@@ -184,19 +167,18 @@ deletes its entry; a change that opens one adds it.
 ## Original files under BSD-2-Clause
 
 - **ADR**: ADR 0010.
-- **Where**: 19 original files: `kernel/src/` `main.rs`, `panic.rs`,
-  `version.rs`, `arch.rs`, `arch/types.rs`, `arch/x86_64/mod.rs`,
-  `arch/x86_64/pio.rs`, `device/mod.rs`, `ffi/mod.rs`, `glue/mod.rs`,
-  `glue/mig.rs`, `ipc/mod.rs`, `kern/mod.rs`, `kern/console.rs`,
-  `utils/mod.rs`, `utils/cell.rs`, `utils/string.rs`, `vm/mod.rs`; and
-  `mach-mig-sys/src/lib.rs`.
+- **Where**: 15 original files: `kernel/src/` `main.rs`, `panic.rs`,
+  `arch.rs`, `arch/types.rs`, `arch/x86_64/mod.rs`,
+  `arch/x86_64/pio.rs`, `device/mod.rs`, `ipc/mod.rs`, `kern/mod.rs`,
+  `kern/console.rs`, `mig/mod.rs`, `utils/mod.rs`, `utils/cell.rs`,
+  `vm/mod.rs`; and `mach-mig-sys/src/lib.rs`.
 - **Done when**: every `BSD-2-Clause` file in `crates/` has a
   provenance block.
 
 ## Upstream names in docs and comments
 
 - **ADR**: ADR 0010; ADR 0025.
-- **Where**: about 177 files cite upstream source paths or upstream
+- **Where**: about 162 files cite upstream source paths or upstream
   internal names outside their provenance block.
 - **Done when**: outside `// Derived from` and `// original files:`
   lines, no comment in `crates/` names a `.c`, `.h` or `.S` file, and

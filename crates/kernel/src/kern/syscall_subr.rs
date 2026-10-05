@@ -12,6 +12,7 @@ use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
 use crate::ipc::{IpcPort, IpcSpace, ipc_object};
 use crate::kern::console::{CStrArg, kprint};
+use crate::kern::error::Error;
 use crate::kern::ipc_kobject::IKOT_THREAD;
 use crate::kern::ipc_sched::{
     ipc_timeout_to_ticks, thread_will_wait_with_timeout,
@@ -22,7 +23,7 @@ use crate::kern::sched_prim::{
     compute_priority, min_quantum, rem_runq, thread_block, thread_run,
 };
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
+use crate::mig::code::{KERN_SUCCESS, kern_return};
 use core::ffi::{c_char, c_int, c_uint, c_void};
 
 /// `SWITCH_OPTION_NONE` of <`mach/thread_switch.h`>.
@@ -119,13 +120,17 @@ pub(crate) unsafe fn depress_timeout(param: *mut c_void) {
 
 /// `thread_depress_abort()` in C.
 ///
+/// # Errors
+///
+/// Returns [`Error::InvalidArgument`] when `thread` is null.
+///
 /// # Safety
 ///
 /// `thread` must be null or a live thread; the routine takes splsched and the
 /// thread lock itself.
-pub(crate) unsafe fn depress_abort(thread: *mut Thread) -> c_int {
+pub(crate) unsafe fn depress_abort(thread: *mut Thread) -> Result<(), Error> {
     if thread.is_null() {
-        return c_int::from(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     // SAFETY: `splsched()` is the C spl call and returns the level to
@@ -148,7 +153,7 @@ pub(crate) unsafe fn depress_abort(thread: *mut Thread) -> c_int {
         spl::splx(s);
     }
 
-    0
+    Ok(())
 }
 
 /// `swtch_continue()` of `kern/syscall_subr.c`.
@@ -163,19 +168,20 @@ unsafe extern "C" fn swtch_continue() {
     };
 }
 
-/// `swtch()` in C.
+/// `swtch()` in C: yield the processor, and return whether another thread
+/// is still runnable.
 ///
 /// # Safety
 ///
 /// Must run on the current thread with no lock held and no wait state set.
-pub(crate) unsafe fn swtch() -> c_int {
+pub(crate) unsafe fn swtch() -> bool {
     if !per_cpu::processor().has_runnable() {
-        return 0;
+        return false;
     }
 
     unsafe { thread_block(Some(swtch_continue)) };
 
-    c_int::from(per_cpu::processor().has_runnable())
+    per_cpu::processor().has_runnable()
 }
 
 /// `swtch()` of <`kern/syscall_subr.h>`: the `swtch` trap entry.
@@ -184,7 +190,7 @@ pub(crate) unsafe fn swtch() -> c_int {
 ///
 /// Must run on the current thread with no lock held and no wait state set.
 pub(crate) unsafe extern "C" fn swtch_entry() -> c_int {
-    unsafe { swtch() }
+    c_int::from(unsafe { swtch() })
 }
 
 /// `swtch_pri_continue()` of `kern/syscall_subr.c`.
@@ -206,15 +212,17 @@ unsafe extern "C" fn swtch_pri_continue() {
     };
 }
 
-/// `swtch_pri()` in C.  The C ignores its priority argument.
+/// `swtch_pri()` in C: yield the processor at a depressed priority, and
+/// return whether another thread is still runnable.  The C ignores its
+/// priority argument.
 ///
 /// # Safety
 ///
 /// Must run on the current thread with no lock held and no wait state set.
-pub(crate) unsafe fn swtch_pri() -> c_int {
+pub(crate) unsafe fn swtch_pri() -> bool {
     let thread = per_cpu::thread();
     if !per_cpu::processor().has_runnable() {
-        return 0;
+        return false;
     }
 
     // The C converted the non-negative `min_quantum` to the depression time.
@@ -227,7 +235,7 @@ pub(crate) unsafe fn swtch_pri() -> c_int {
         }
     }
 
-    c_int::from(per_cpu::processor().has_runnable())
+    per_cpu::processor().has_runnable()
 }
 
 /// `swtch_pri()` of <`kern/syscall_subr.h>`: the `swtch_pri` trap entry.
@@ -236,7 +244,7 @@ pub(crate) unsafe fn swtch_pri() -> c_int {
 ///
 /// Must run on the current thread with no lock held and no wait state set.
 pub(crate) unsafe extern "C" fn swtch_pri_entry(_pri: c_int) -> c_int {
-    unsafe { swtch_pri() }
+    c_int::from(unsafe { swtch_pri() })
 }
 
 /// `thread_switch_continue()` of `kern/syscall_subr.c`.
@@ -248,12 +256,18 @@ unsafe extern "C" fn thread_switch_continue() {
             let _ = depress_abort(cur_thread);
         }
     }
-    // SAFETY: the machine's syscall return never comes back; the C returned
-    // `KERN_SUCCESS`.
-    unsafe { crate::arch::x86_64::locore::thread_syscall_return(0) };
+    // SAFETY: the machine's syscall return never comes back.
+    unsafe {
+        crate::arch::x86_64::locore::thread_syscall_return(KERN_SUCCESS);
+    }
 }
 
 /// `thread_switch()` in C.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidArgument`] when `option` is not one of the switch
+/// options.
 ///
 /// # Safety
 ///
@@ -262,7 +276,7 @@ pub(crate) unsafe fn thread_switch(
     thread_name: c_uint,
     option: c_int,
     option_time: c_uint,
-) -> c_int {
+) -> Result<(), Error> {
     let cur_thread = per_cpu::thread();
 
     match option {
@@ -273,7 +287,7 @@ pub(crate) unsafe fn thread_switch(
         SWITCH_OPTION_WAIT => unsafe {
             thread_will_wait_with_timeout(cur_thread, option_time);
         },
-        _ => return c_int::from(KernError::InvalidArgument),
+        _ => return Err(Error::InvalidArgument),
     }
 
     if let Some(thread) = unsafe { hint_thread(cur_thread, thread_name) } {
@@ -291,7 +305,7 @@ pub(crate) unsafe fn thread_switch(
                 let _ = depress_abort(cur_thread);
             }
         }
-        return 0;
+        return Ok(());
     }
 
     if per_cpu::processor().has_runnable() {
@@ -305,7 +319,7 @@ pub(crate) unsafe fn thread_switch(
         }
     }
 
-    0
+    Ok(())
 }
 
 /// `thread_switch()` of <`kern/syscall_subr.h>`: the `thread_switch` trap
@@ -319,7 +333,7 @@ pub(crate) unsafe extern "C" fn thread_switch_entry(
     option: c_int,
     option_time: c_uint,
 ) -> c_int {
-    unsafe { thread_switch(thread_name, option, option_time) }
+    kern_return(unsafe { thread_switch(thread_name, option, option_time) })
 }
 
 /// The thread-hint arm of `thread_switch()`: translate `thread_name`, check

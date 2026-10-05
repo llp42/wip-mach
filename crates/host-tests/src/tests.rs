@@ -5,16 +5,20 @@
 
 use crate::arch::types::RpcPhysAddr;
 use crate::arch::vm_param::{PAGE_MASK, PAGE_SHIFT, PAGE_SIZE};
-use crate::device::r#return::DeviceError;
-use crate::glue::time_value::{
+use crate::arch::x86_64::error::Error as MachineError;
+use crate::device::r#return::{DeviceError, Reply};
+use crate::ipc::error::{
+    Error as IpcError, MsgError, ReceiveError, SendError, Shortage,
+};
+use crate::kern::error::{Error as KernelError, RpcError};
+use crate::kern::policy::POLICY_TIMESHARE;
+use crate::mig::code::{MIG_NO_REPLY, io_return, kern_return, send_result};
+use crate::mig::time_value::{
     RpcTimeValue, TimeValue, TimeValue64, TimeValueError,
 };
-use crate::kern::policy::POLICY_TIMESHARE;
-use crate::kern::types::KernError;
 use crate::utils::cell::SyncCell;
 use crate::utils::kd_queue::{KdEvent, KdEventQueue};
-use crate::utils::string::{memcmp, memmove, strcmp, strcpy, strlen, strncpy};
-use crate::vm::error::{Error, error_from_kern_return, kern_return};
+use crate::vm::error::Error as VmError;
 use core::cell::UnsafeCell;
 use core::ffi::c_int;
 use core::time::Duration;
@@ -34,27 +38,130 @@ fn page_geometry_is_4k() {
 }
 
 #[test]
-fn kern_return_codes_round_trip() {
-    assert_eq!(kern_return(Ok(())), 0);
-    assert_eq!(Error::InvalidAddress.as_kern_return(), 1);
-    assert_eq!(error_from_kern_return(1), Err(Error::InvalidAddress));
+fn success_is_zero() {
+    assert_eq!(kern_return::<VmError>(Ok(())), 0);
+    assert_eq!(kern_return::<MsgError>(Ok(())), 0);
+}
+
+#[test]
+fn vm_errors_take_their_kern_return_codes() {
+    let codes = [
+        (VmError::InvalidAddress, 1),
+        (VmError::ProtectionFailure, 2),
+        (VmError::NoSpace, 3),
+        (VmError::InvalidArgument, 4),
+        (VmError::Failure, 5),
+        (VmError::ResourceShortage, 6),
+        (VmError::NoAccess, 8),
+        (VmError::MemoryError, 10),
+        (VmError::InvalidName, 15),
+        (VmError::InvalidTask, 16),
+        (VmError::InvalidHost, 22),
+        (VmError::MemoryPresent, 23),
+        (VmError::WriteProtectionFailure, 24),
+        (VmError::Interrupted, 0x1000_0007),
+    ];
+    for (error, code) in codes {
+        assert_eq!(c_int::from(error), code, "{error:?}");
+    }
+}
+
+#[test]
+fn ipc_errors_take_their_kern_return_codes() {
+    let codes = [
+        (IpcError::DeadSpace, 16),
+        (IpcError::InvalidName, 15),
+        (IpcError::InvalidRight, 17),
+        (IpcError::InvalidValue, 18),
+        (IpcError::UrefsOverflow, 19),
+        (IpcError::NameExists, 13),
+        (IpcError::RightExists, 21),
+        (IpcError::NotInSet, 12),
+        (IpcError::InvalidCapability, 20),
+        (IpcError::NoSpace, 3),
+        (IpcError::ResourceShortage, 6),
+        (IpcError::InvalidArgument, 4),
+        (IpcError::InvalidHost, 22),
+        (IpcError::InvalidAddress, 1),
+        (IpcError::Failure, 5),
+    ];
+    for (error, code) in codes {
+        assert_eq!(c_int::from(error), code, "{error:?}");
+    }
+}
+
+#[test]
+fn message_errors_take_their_mach_msg_codes() {
+    assert_eq!(c_int::from(SendError::InvalidData), 0x1000_0002);
+    assert_eq!(c_int::from(SendError::InvalidHeader), 0x1000_0010);
+    assert_eq!(c_int::from(ReceiveError::InvalidName), 0x1000_4002);
+    assert_eq!(c_int::from(ReceiveError::InSet), 0x1000_400a);
     assert_eq!(
-        error_from_kern_return(0x1000_0007),
-        Err(Error::SendInterrupted)
+        c_int::from(ReceiveError::Header(Shortage::IPC_SPACE)),
+        0x1000_400b | 0x2000
     );
-    assert_eq!(error_from_kern_return(4242), Err(Error::Failure));
+    assert_eq!(
+        c_int::from(ReceiveError::Body(
+            Shortage::VM_SPACE | Shortage::IPC_KERNEL
+        )),
+        0x1000_400c | 0x1000 | 0x0800
+    );
+    assert_eq!(
+        c_int::from(MsgError::Send(SendError::TimedOut, Shortage::VM_KERNEL)),
+        0x1000_0004 | 0x0400
+    );
 }
 
 #[test]
-fn kern_error_values_are_the_abi_ones() {
-    assert_eq!(KernError::InvalidAddress as u8, 1);
-    assert_eq!(KernError::Failure as u8, 5);
+fn kernel_send_results_read_back() {
+    for error in [
+        SendError::InvalidData,
+        SendError::InvalidDest,
+        SendError::TimedOut,
+        SendError::WillNotify,
+        SendError::NotifyInProgress,
+        SendError::Interrupted,
+        SendError::MsgTooSmall,
+        SendError::InvalidReply,
+        SendError::InvalidRight,
+        SendError::InvalidNotify,
+        SendError::InvalidMemory,
+        SendError::NoBuffer,
+        SendError::NoNotify,
+        SendError::InvalidType,
+        SendError::InvalidHeader,
+    ] {
+        assert_eq!(send_result(c_int::from(error)), Err(error));
+    }
+    assert_eq!(send_result(0), Ok(()));
+    assert_eq!(send_result(-307), Err(SendError::InvalidData));
 }
 
 #[test]
-fn device_error_values_are_the_abi_ones() {
-    assert_eq!(DeviceError::IoError as i32, 2500);
-    assert_eq!(DeviceError::WouldBlock as i32, 2501);
+fn device_results_take_their_io_return_codes() {
+    assert_eq!(c_int::from(DeviceError::IoError), 2500);
+    assert_eq!(c_int::from(DeviceError::ReadOnly), 2509);
+    assert_eq!(c_int::from(DeviceError::ResourceShortage), 6);
+    assert_eq!(c_int::from(DeviceError::InvalidValue), 18);
+    assert_eq!(c_int::from(DeviceError::Vm(VmError::NoSpace)), 3);
+    assert_eq!(io_return(Ok(Reply::Now)), 0);
+    assert_eq!(io_return(Ok(Reply::Withheld)), MIG_NO_REPLY);
+    assert_eq!(io_return(Err(DeviceError::NoSuchDevice)), 2502);
+}
+
+#[test]
+fn kernel_and_machine_errors_take_their_codes() {
+    assert_eq!(c_int::from(KernelError::InvalidArgument), 4);
+    assert_eq!(c_int::from(KernelError::TimedOut), 27);
+    assert_eq!(c_int::from(KernelError::NoEmulationTask), 0x8001);
+    assert_eq!(c_int::from(KernelError::Ipc(IpcError::DeadSpace)), 16);
+    assert_eq!(
+        c_int::from(KernelError::Machine(MachineError::PortsTaken)),
+        2
+    );
+    assert_eq!(c_int::from(MachineError::NoFpu), 5);
+    assert_eq!(c_int::from(RpcError::NotKernelObject), 0x1000_0007);
+    assert_eq!(c_int::from(RpcError::Device(DeviceError::DeviceDown)), 2504);
 }
 
 #[test]
@@ -139,36 +246,6 @@ fn mach_atoi_parses_the_leading_digits() {
         crate::utils::atoi::mach_atoi(c"".as_ptr().cast(), &mut value)
     };
     assert_eq!((used, value), (0, -1));
-}
-
-#[test]
-fn string_routines_round_trip() {
-    let src = c"hello";
-    let mut dst = [0u8; 16];
-    unsafe { strcpy(dst.as_mut_ptr().cast(), src.as_ptr()) };
-    assert_eq!(unsafe { strlen(dst.as_ptr().cast()) }, 5);
-    assert_eq!(unsafe { strcmp(dst.as_ptr().cast(), src.as_ptr()) }, 0);
-    assert_eq!(
-        unsafe { memcmp(dst.as_ptr().cast(), src.as_ptr().cast(), 6) },
-        0
-    );
-    assert!(
-        unsafe { memcmp(c"a".as_ptr().cast(), c"b".as_ptr().cast(), 1) } < 0
-    );
-
-    let mut padded = [0xAAu8; 8];
-    unsafe { strncpy(padded.as_mut_ptr().cast(), c"hi".as_ptr(), 8) };
-    assert_eq!(padded, *b"hi\0\0\0\0\0\0");
-
-    let mut overlap = *b"abcdef";
-    unsafe {
-        memmove(
-            overlap.as_mut_ptr().add(2).cast(),
-            overlap.as_ptr().cast(),
-            4,
-        );
-    }
-    assert_eq!(overlap, *b"ababcd");
 }
 
 #[test]

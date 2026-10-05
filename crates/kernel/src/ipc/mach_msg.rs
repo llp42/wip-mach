@@ -17,14 +17,16 @@
 
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::user_access;
-use crate::ipc::ipc_kmsg::{self, MsgReturn};
+use crate::ipc::error::{MsgError, ReceiveError, SendError};
+use crate::ipc::ipc_kmsg;
 use crate::ipc::ipc_marequest;
 use crate::ipc::ipc_mqueue::{self, Received};
 use crate::ipc::ipc_object;
-use crate::ipc::ipc_thread::{self, IpcThreadQueue};
+use crate::ipc::ipc_thread::{self, IpcThreadQueue, IpcWait};
 use crate::ipc::{IpcMqueue, IpcPort, IpcSpace, MachMsgHeader};
 use crate::kern::ipc_mig::{current_map, current_space};
 use crate::kern::thread::Thread;
+use crate::mig::code::kern_return;
 use crate::vm::vm_map::VmMap;
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
@@ -55,10 +57,6 @@ const MACH_MSG_TIMEOUT_NONE: c_uint = 0;
 const MACH_MSG_SIZE_MAX: c_uint = c_uint::MAX;
 /// `MACH_PORT_NULL` of <mach/port.h>.
 const MACH_PORT_NULL: c_uint = 0;
-/// `MACH_MSG_MASK` of <mach/message.h>: the class bits of a receive error.
-const MACH_MSG_MASK: c_int = 0x0000_3c00;
-/// `MACH_RCV_BODY_ERROR` of <mach/message.h>.
-const MACH_RCV_BODY_ERROR: c_int = 0x1000_400c;
 /// `sizeof(mach_msg_user_header_t)`: the user header's size.
 const MESSAGE_HEADER_SIZE: c_uint = size_of::<MachMsgHeader>() as c_uint;
 
@@ -106,16 +104,16 @@ unsafe fn complete_receive(
     notify: c_uint,
     space: IpcSpace,
     map: *mut VmMap,
-) -> MsgReturn {
+) -> Result<(), ReceiveError> {
     let (kmsg, seqno) = match received {
         Received::Kmsg { kmsg, seqno } => (kmsg, seqno),
         Received::TooLarge { size } => {
             if option & MACH_RCV_LARGE != 0 {
                 unsafe { write_back_size(user, size) };
             }
-            return MsgReturn::RCV_TOO_LARGE;
+            return Err(ReceiveError::TooLarge);
         }
-        Received::Failed { code } => return code,
+        Received::Failed { error } => return Err(error),
     };
 
     // SAFETY: the message is live and this call owns it.
@@ -128,12 +126,12 @@ unsafe fn complete_receive(
             ipc_kmsg::copyout_dest(kmsg, space);
             let _ = ipc_kmsg::put(user, kmsg, MESSAGE_HEADER_SIZE);
         }
-        return MsgReturn::RCV_TOO_LARGE;
+        return Err(ReceiveError::TooLarge);
     }
 
-    let mr = if option & MACH_RCV_NOTIFY != 0 {
+    let copied = if option & MACH_RCV_NOTIFY != 0 {
         if notify == MACH_PORT_NULL {
-            MsgReturn::RCV_INVALID_NOTIFY
+            Err(ReceiveError::InvalidNotify)
         } else {
             // SAFETY: the message holds the rights the copyout consumes, and
             // the space and map are live and unlocked.
@@ -143,8 +141,8 @@ unsafe fn complete_receive(
         unsafe { ipc_kmsg::copyout(kmsg, space, &mut *map, MACH_PORT_NULL) }
     };
 
-    if mr != MsgReturn::SUCCESS {
-        if mr.raw() & !MACH_MSG_MASK == MACH_RCV_BODY_ERROR {
+    if let Err(error) = copied {
+        if matches!(error, ReceiveError::Body(_)) {
             // SAFETY: the message is live and this call owns it.
             let size = unsafe { kmsg.header_size() };
             let _ = unsafe { ipc_kmsg::put(user, kmsg, size) };
@@ -155,7 +153,7 @@ unsafe fn complete_receive(
             }
         }
 
-        return mr;
+        return Err(error);
     }
 
     // SAFETY: the message is live and this call owns it.
@@ -176,21 +174,18 @@ pub(crate) unsafe fn send(
     send_size: c_uint,
     time_out: c_uint,
     notify: c_uint,
-) -> MsgReturn {
+) -> Result<(), MsgError> {
     // The C option word is an `int` whose low bits the masks below select;
     // reading its pattern as unsigned keeps the same bits.
     let bits = option as c_uint;
     let space = unsafe { current_space() };
     let map = unsafe { current_map() };
 
-    let kmsg = match unsafe { ipc_kmsg::get(user, send_size) } {
-        Ok(kmsg) => kmsg,
-        Err(error) => return error,
-    };
+    let kmsg = unsafe { ipc_kmsg::get(user, send_size) }?;
 
     let copied = if bits & MACH_SEND_CANCEL != 0 {
         if notify == MACH_PORT_NULL {
-            Err(MsgReturn::SEND_INVALID_NOTIFY)
+            Err(SendError::InvalidNotify)
         } else {
             // SAFETY: the message is live; the space and map are live and
             // unlocked.
@@ -202,10 +197,10 @@ pub(crate) unsafe fn send(
     if let Err(error) = copied {
         // SAFETY: the message is live and this call owns it.
         unsafe { ipc_kmsg::free(kmsg) };
-        return error;
+        return Err(error.into());
     }
 
-    let mut mr = if bits & MACH_SEND_NOTIFY != 0 {
+    let sent = if bits & MACH_SEND_NOTIFY != 0 {
         // The C passes the timeout bit unconditionally: without
         // `MACH_SEND_TIMEOUT` the send is one non-blocking attempt, and a
         // full queue leaves `kmsg` for the msg-accepted request below.
@@ -215,7 +210,7 @@ pub(crate) unsafe fn send(
             MACH_MSG_TIMEOUT_NONE
         };
         // SAFETY: the message holds the rights the queue consumes.
-        let mut mr = unsafe {
+        let mut sent = unsafe {
             ipc_mqueue::send(
                 kmsg.as_ptr(),
                 MACH_SEND_TIMEOUT,
@@ -223,9 +218,9 @@ pub(crate) unsafe fn send(
             )
         };
 
-        if mr == MsgReturn::SEND_TIMED_OUT {
+        if sent == Err(SendError::TimedOut) {
             if notify == MACH_PORT_NULL {
-                mr = MsgReturn::SEND_INVALID_NOTIFY;
+                sent = Err(SendError::InvalidNotify);
             } else {
                 // SAFETY: the message's destination right is live.
                 let dest =
@@ -236,20 +231,21 @@ pub(crate) unsafe fn send(
                     Ok(marequest) => {
                         // SAFETY: the message is live and uniquely owned.
                         unsafe { kmsg.set_marequest(marequest.cast()) };
-                        mr = MsgReturn::SUCCESS;
+                        sent = Ok(());
                     }
-                    Err(error) => mr = error,
+                    Err(error) => sent = Err(error),
                 }
             }
 
-            if mr == MsgReturn::SUCCESS {
-                // SAFETY: the message holds the rights the queue consumes.
-                unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
-                return MsgReturn::SEND_WILL_NOTIFY;
+            if sent.is_ok() {
+                // SAFETY: the message holds the rights the queue consumes;
+                // an unlimited send always queues it.
+                let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
+                return Err(SendError::WillNotify.into());
             }
         }
 
-        mr
+        sent
     } else {
         // SAFETY: the message holds the rights the queue consumes.
         unsafe {
@@ -257,18 +253,19 @@ pub(crate) unsafe fn send(
         }
     };
 
-    if mr != MsgReturn::SUCCESS {
+    if let Err(error) = sent {
         // SAFETY: the message is live, the space is live and unlocked,
         // and the map is the running task's.
-        mr |= unsafe { ipc_kmsg::copyout_pseudo(kmsg, space, &mut *map) };
+        let lost = unsafe { ipc_kmsg::copyout_pseudo(kmsg, space, &mut *map) };
 
         // SAFETY: the message is live and this call owns it; the size is
         // read after the pseudo-copyout, as the C read `msgh_size`.
         let size = unsafe { kmsg.header_size() };
         let _ = unsafe { ipc_kmsg::put(user, kmsg, size) };
+        return Err(MsgError::Send(error, lost));
     }
 
-    mr
+    Ok(())
 }
 
 /// `mach_msg_receive()` in C.
@@ -285,7 +282,7 @@ pub(crate) unsafe fn receive(
     rcv_name: c_uint,
     time_out: c_uint,
     notify: c_uint,
-) -> MsgReturn {
+) -> Result<(), ReceiveError> {
     // The C option word is an `int` whose low bits the masks below select;
     // reading its pattern as unsigned keeps the same bits.
     let bits = option as c_uint;
@@ -295,10 +292,7 @@ pub(crate) unsafe fn receive(
 
     // SAFETY: the space is live and unlocked; on success the copyin holds a
     // reference for the returned object and leaves its queue locked.
-    let copyin = match unsafe { ipc_mqueue::copyin(space, rcv_name) } {
-        Ok(copyin) => copyin,
-        Err(error) => return error,
-    };
+    let copyin = unsafe { ipc_mqueue::copyin(space, rcv_name) }?;
 
     // The stack may be discarded if the receive blocks, so the state the
     // continuation needs is saved in the thread first.
@@ -391,12 +385,16 @@ pub(crate) unsafe extern "C" fn mach_msg_receive_continue() {
     // the one the copyin in `mach_msg_receive()` took.
     unsafe { ipc_object::release(object) };
 
-    let mr = unsafe {
+    let completed = unsafe {
         complete_receive(received, user, bits, rcv_size, notify, space, map)
     };
     // SAFETY: `thread_syscall_return` returns to user space and never
     // returns to this continuation.
-    unsafe { crate::arch::x86_64::locore::thread_syscall_return(mr.raw()) }
+    unsafe {
+        crate::arch::x86_64::locore::thread_syscall_return(kern_return(
+            completed,
+        ));
+    }
 }
 
 /// `mach_msg_trap()` in C.
@@ -414,7 +412,7 @@ pub(crate) unsafe fn trap(
     rcv_name: c_uint,
     time_out: c_uint,
     notify: c_uint,
-) -> MsgReturn {
+) -> Result<(), MsgError> {
     // The C option word is an `int` whose low bits the masks below select;
     // reading its pattern as unsigned keeps the same bits.
     let bits = option as c_uint;
@@ -422,23 +420,20 @@ pub(crate) unsafe fn trap(
     if bits == 0 {
         // The C returned through `thread_syscall_return()`; the trap's
         // normal return reaches user space with the same code.
-        return MsgReturn::SUCCESS;
+        return Ok(());
     }
 
     if bits & MACH_SEND_MSG != 0 {
-        let mr = unsafe { send(user, option, send_size, time_out, notify) };
-        if mr != MsgReturn::SUCCESS {
-            return mr;
-        }
+        unsafe { send(user, option, send_size, time_out, notify) }?;
     }
 
     if bits & MACH_RCV_MSG != 0 {
-        return unsafe {
+        unsafe {
             receive(user, option, rcv_size, rcv_name, time_out, notify)
-        };
+        }?;
     }
 
-    MsgReturn::SUCCESS
+    Ok(())
 }
 
 /// `mach_msg_continue()` in C.
@@ -481,7 +476,7 @@ pub(crate) unsafe extern "C" fn mach_msg_continue() {
 
     // SAFETY: the combined path copies out with no options and no notify
     // name; the message is owned on success.
-    let mr = unsafe {
+    let completed = unsafe {
         complete_receive(
             received,
             user,
@@ -494,7 +489,11 @@ pub(crate) unsafe extern "C" fn mach_msg_continue() {
     };
     // SAFETY: `thread_syscall_return` returns to user space and never
     // returns to this continuation.
-    unsafe { crate::arch::x86_64::locore::thread_syscall_return(mr.raw()) }
+    unsafe {
+        crate::arch::x86_64::locore::thread_syscall_return(kern_return(
+            completed,
+        ));
+    }
 }
 
 /// `mach_msg_interrupt()` in C.
@@ -511,7 +510,7 @@ pub(crate) unsafe fn interrupt(thread: *mut Thread) -> bool {
     unsafe { (*mqueue).lock() };
 
     // SAFETY: the thread is live.
-    if unsafe { (*thread).ith_state } != MsgReturn::RCV_IN_PROGRESS.raw() {
+    if unsafe { (*thread).ith_state } != IpcWait::Receiving {
         // SAFETY: the queue is live and locked.
         unsafe { (*mqueue).unlock() };
         return false;
@@ -534,7 +533,7 @@ pub(crate) unsafe fn interrupt(thread: *mut Thread) -> bool {
     unsafe {
         crate::arch::x86_64::pcb::thread_set_syscall_return(
             thread,
-            MsgReturn::RCV_INTERRUPTED.raw(),
+            c_int::from(ReceiveError::Interrupted),
         );
         (*thread).swap_func =
             Some(crate::arch::x86_64::locore::thread_exception_return);
@@ -557,8 +556,7 @@ pub(crate) unsafe extern "C" fn mach_msg_trap(
     time_out: c_uint,
     notify: c_uint,
 ) -> c_int {
-    unsafe {
+    kern_return(unsafe {
         trap(msg, option, send_size, rcv_size, rcv_name, time_out, notify)
-    }
-    .raw()
+    })
 }

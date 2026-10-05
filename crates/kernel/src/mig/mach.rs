@@ -17,19 +17,19 @@
 //! The cores stay in the `crate::kern` and `crate::vm` modules.
 
 use crate::arch::types::{VmOffset, VmSize};
-use crate::ffi::task_info::{
-    TaskBasicInfo, TaskEventsInfo, TaskThreadTimesInfo,
-};
-use crate::ffi::thread_info::{ThreadBasicInfo, ThreadSchedInfo};
 use crate::ipc::IpcPort;
+use crate::kern::error::Error;
 use crate::kern::host::Host;
 use crate::kern::ipc_tt::{self, TaskSpecialPort, ThreadSpecialPort};
 use crate::kern::slab::kfree;
 use crate::kern::syscall_emulation;
 use crate::kern::task::{self, MapSource, TASK_PORT_REGISTER_MAX, Task};
 use crate::kern::thread::Thread;
-use crate::kern::types::KernError;
-use crate::vm::error::{KERN_INVALID_ARGUMENT, KERN_SUCCESS, kern_return};
+use crate::mig::code::{KERN_INVALID_ARGUMENT, KERN_SUCCESS, kern_return};
+use crate::mig::task_info::{
+    TaskBasicInfo, TaskEventsInfo, TaskThreadTimesInfo,
+};
+use crate::mig::thread_info::{ThreadBasicInfo, ThreadSchedInfo};
 use crate::vm::memory_object::{self, Return};
 use crate::vm::types::{VmInherit, VmObject, VmProt, VmStatistics};
 use crate::vm::vm_map::{VmMap, VmMapCopy};
@@ -53,7 +53,7 @@ pub unsafe extern "C" fn task_create(
     child_task: *mut *mut c_void,
 ) -> c_int {
     let Some(parent_task) = NonNull::new(parent_task) else {
-        return c_int::from(KernError::InvalidTask);
+        return c_int::from(Error::InvalidTask);
     };
 
     let source = if inherit_memory != 0 {
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn task_get_emulation_vector(
             }
             0
         }
-        Err(error) => error,
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -126,14 +126,14 @@ pub unsafe extern "C" fn task_set_emulation_vector(
     emulation_vector: *mut VmOffset,
     emulation_vector_count: c_uint,
 ) -> c_int {
-    unsafe {
+    kern_return(unsafe {
         syscall_emulation::set_vector(
             task,
             vector_start,
             emulation_vector,
             emulation_vector_count,
         )
-    }
+    })
 }
 
 /// `task_threads()` of kern/task.c.
@@ -193,20 +193,20 @@ pub unsafe extern "C" fn task_info(
     task_info_count: *mut c_uint,
 ) -> c_int {
     let Some(task) = NonNull::new(task.cast::<Task>()) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
     let Some(count) = NonNull::new(task_info_count) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
     let Some(out) = NonNull::new(task_info_out) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     let capacity = unsafe { count.as_ptr().read() };
     let written = match flavor {
         TaskFlavor::BASIC_INFO => {
             if (capacity as usize) < TaskBasicInfo::LEGACY_WORDS {
-                return c_int::from(KernError::InvalidArgument);
+                return c_int::from(Error::InvalidArgument);
             }
 
             // SAFETY: `task` is live and non-null, as the caller promises.
@@ -237,7 +237,7 @@ pub unsafe extern "C" fn task_info(
         }
         TaskFlavor::EVENTS_INFO => {
             if capacity < TaskEventsInfo::WORDS {
-                return c_int::from(KernError::InvalidArgument);
+                return c_int::from(Error::InvalidArgument);
             }
 
             // SAFETY: `task` is live and non-null, as the caller promises.
@@ -254,7 +254,7 @@ pub unsafe extern "C" fn task_info(
         TaskFlavor::THREAD_TIMES_INFO => {
             // The count is a `natural_t`, which widens to `usize`.
             if (capacity as usize) < TaskThreadTimesInfo::LEGACY_WORDS {
-                return c_int::from(KernError::InvalidArgument);
+                return c_int::from(Error::InvalidArgument);
             }
 
             // SAFETY: `task` is live and non-null, as the caller promises.
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn task_info(
                 capacity
             }
         }
-        _ => return c_int::from(KernError::InvalidArgument),
+        _ => return c_int::from(Error::InvalidArgument),
     };
 
     unsafe { count.as_ptr().write(written) };
@@ -377,20 +377,20 @@ pub unsafe extern "C" fn thread_info(
     thread_info_count: *mut c_uint,
 ) -> c_int {
     if thread.is_null() {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     }
     let Some(count) = NonNull::new(thread_info_count) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
     let Some(info) = NonNull::new(thread_info) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     let capacity = unsafe { count.as_ptr().read() };
     let written = match flavor {
         ThreadFlavor::BASIC_INFO => {
             if (capacity as usize) < ThreadBasicInfo::LEGACY_WORDS {
-                return c_int::from(KernError::InvalidArgument);
+                return c_int::from(Error::InvalidArgument);
             }
 
             // SAFETY: `thread` is live and non-null, as the caller promises.
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn thread_info(
         }
         ThreadFlavor::SCHED_INFO => {
             if capacity < ThreadSchedInfo::WORDS - 1 {
-                return c_int::from(KernError::InvalidArgument);
+                return c_int::from(Error::InvalidArgument);
             }
 
             // SAFETY: `thread` is live and non-null.
@@ -435,7 +435,7 @@ pub unsafe extern "C" fn thread_info(
             }
             ThreadSchedInfo::WORDS
         }
-        _ => return c_int::from(KernError::InvalidArgument),
+        _ => return c_int::from(Error::InvalidArgument),
     };
 
     unsafe { count.as_ptr().write(written) };
@@ -556,7 +556,7 @@ pub unsafe extern "C" fn vm_read(
             }
             KERN_SUCCESS
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -641,7 +641,7 @@ pub unsafe extern "C" fn vm_region(
             }
             KERN_SUCCESS
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -679,7 +679,7 @@ pub unsafe extern "C" fn mach_ports_register(
     // `mach_msg_type_number_t` is a `u32`, and `usize` holds it on both
     // targets.
     if ports_cnt as usize > TASK_PORT_REGISTER_MAX {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     }
     let count = ports_cnt as usize;
 
@@ -767,7 +767,7 @@ pub unsafe extern "C" fn memory_object_get_attributes(
             }
             0
         }
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -785,7 +785,7 @@ pub unsafe extern "C" fn vm_set_default_memory_manager(
     match unsafe { memory_object::default_manager::set(host, default_manager) }
     {
         Ok(()) => 0,
-        Err(error) => error.as_kern_return(),
+        Err(error) => c_int::from(error),
     }
 }
 
@@ -861,7 +861,7 @@ pub unsafe extern "C" fn task_get_special_port(
     portp: *mut *mut c_void,
 ) -> c_int {
     let Some(which) = TaskSpecialPort::from_int(which) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { ipc_tt::task_get_special_port(task, which) } {
@@ -889,7 +889,7 @@ pub unsafe extern "C" fn task_set_special_port(
     port: *mut c_void,
 ) -> c_int {
     let Some(which) = TaskSpecialPort::from_int(which) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { ipc_tt::task_set_special_port(task, which, port) } {
@@ -972,7 +972,7 @@ pub unsafe extern "C" fn thread_get_special_port(
     portp: *mut *mut c_void,
 ) -> c_int {
     let Some(which) = ThreadSpecialPort::from_int(which) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { ipc_tt::thread_get_special_port(thread, which) } {
@@ -1000,7 +1000,7 @@ pub unsafe extern "C" fn thread_set_special_port(
     port: *mut c_void,
 ) -> c_int {
     let Some(which) = ThreadSpecialPort::from_int(which) else {
-        return c_int::from(KernError::InvalidArgument);
+        return c_int::from(Error::InvalidArgument);
     };
 
     match unsafe { ipc_tt::thread_set_special_port(thread, which, port) } {
@@ -1023,14 +1023,14 @@ pub unsafe extern "C" fn task_set_emulation(
     routine_number: c_int,
 ) -> c_int {
     let mut routine = routine_entry_pt;
-    unsafe {
+    kern_return(unsafe {
         syscall_emulation::set_vector_internal(
             task,
             routine_number,
             &raw mut routine,
             1,
         )
-    }
+    })
 }
 
 /// `task_ras_control()` of kern/task.c.
@@ -1046,7 +1046,7 @@ pub unsafe extern "C" fn task_ras_control(
     _endpc: VmOffset,
     _flavor: c_int,
 ) -> c_int {
-    c_int::from(KernError::Failure)
+    c_int::from(Error::Failure)
 }
 
 /// `vm_map()` of `vm/vm_user.c`.

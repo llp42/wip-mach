@@ -8,9 +8,9 @@
 //! The translation-entry routines, which `ipc/ipc_entry.c` used to define and
 //! `ipc/ipc_entry.h` declares.
 
+use crate::ipc::error::Error;
 use crate::ipc::{IE_BITS_TYPE_MASK, IpcEntry, IpcSpace};
 use crate::kern::slab::{KmemCache, kmem_cache_init};
-use crate::kern::types::KernError;
 use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
@@ -98,11 +98,11 @@ impl IpcEntry {
     }
 }
 
-/// The [`KernError`] a radix-tree error stands for.
-const fn map_error(error: kmem::RadixTreeError) -> KernError {
+/// The [`Error`] a radix-tree error stands for.
+const fn map_error(error: kmem::RadixTreeError) -> Error {
     match error {
-        kmem::RadixTreeError::Busy => KernError::InvalidArgument,
-        kmem::RadixTreeError::NoMemory => KernError::ResourceShortage,
+        kmem::RadixTreeError::Busy => Error::InvalidArgument,
+        kmem::RadixTreeError::NoMemory => Error::ResourceShortage,
     }
 }
 
@@ -221,9 +221,9 @@ unsafe fn unlink_free(space: IpcSpace, entry: *mut IpcEntry) {
 /// The space must be live and write-locked, and may allocate memory.
 pub(crate) unsafe fn alloc(
     space: IpcSpace,
-) -> Result<(c_uint, *mut IpcEntry), KernError> {
+) -> Result<(c_uint, *mut IpcEntry), Error> {
     if !unsafe { space.is_active() } {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     }
 
     if let Some(found) = unsafe { entry_get(space) } {
@@ -231,7 +231,7 @@ pub(crate) unsafe fn alloc(
     }
 
     let Some(entry) = ie_alloc() else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
 
     let inserted = unsafe {
@@ -245,7 +245,7 @@ pub(crate) unsafe fn alloc(
             // Names are 32 bits wide, so a key above them is never handed out.
             // SAFETY: the key was just allocated for this entry.
             unsafe { (*space.record()).map.remove(key) };
-            KernError::NoSpace
+            Error::NoSpace
         }),
         Err(error) => Err(map_error(error)),
     };
@@ -279,9 +279,9 @@ pub(crate) unsafe fn alloc(
 pub(crate) unsafe fn alloc_name(
     space: IpcSpace,
     name: c_uint,
-) -> Result<*mut IpcEntry, KernError> {
+) -> Result<*mut IpcEntry, Error> {
     if !unsafe { space.is_active() } {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     }
 
     let existing = unsafe { (*space.record()).map.get(u64::from(name)) }
@@ -289,7 +289,7 @@ pub(crate) unsafe fn alloc_name(
 
     let Some(entry) = existing else {
         let Some(fresh) = ie_alloc() else {
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         };
 
         // SAFETY: the fresh entry belongs to this call.

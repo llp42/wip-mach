@@ -7,11 +7,10 @@
 
 //! The interrupt stacks and the per-processor descriptor tables, which
 //! `i386/i386/mp_desc.c` used to define and `i386/i386/mp_desc.h` declares.
-//!
-//! The `extern "C"` edge is in [`mp_desc_ffi`].
 
 use crate::arch::types::{AtomicVmOffset, VmOffset};
 use crate::arch::x86_64::apic;
+use crate::arch::x86_64::error::Error;
 use crate::arch::x86_64::fpu;
 use crate::arch::x86_64::model_dep;
 use crate::arch::x86_64::pcb::{RealDescriptor, TaskTss};
@@ -23,9 +22,8 @@ use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
 use crate::kern::smp as kern_smp;
 use crate::kern::smp::CpuId;
-use crate::kern::types::KernError;
 use core::arch::asm;
-use core::ffi::{CStr, c_int, c_uint, c_ulong, c_void};
+use core::ffi::{CStr, c_int, c_uint, c_ulong};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -178,6 +176,11 @@ pub(crate) fn simple_lock_pause() {
 /// The machine-dependent processor control hook, which
 /// `i386/i386/mp_desc.h` declares.
 ///
+/// # Errors
+///
+/// Always returns [`Error::NotSupported`]: this machine has no processor
+/// control.
+///
 /// # Safety
 ///
 /// `info` must be valid for `count` reads.
@@ -185,14 +188,14 @@ pub(crate) unsafe fn cpu_control(
     cpu: CpuId,
     info: *const c_int,
     count: c_uint,
-) -> c_int {
+) -> Result<(), Error> {
     kprint!(
         "cpu_control({}, {:x}, {}) not implemented\n",
         cpu,
         info.expose_provenance(),
         count,
     );
-    c_int::from(KernError::Failure)
+    Err(Error::NotSupported)
 }
 
 /// Interrupts processor `cpu` to make it flush its pmap.
@@ -234,7 +237,7 @@ pub(crate) fn mp_desc_init(mycpu: c_int) -> c_int {
     };
     let mpt = ptr::with_exposed_provenance_mut::<MpDescTable>(phystokv(mem));
 
-    // SAFETY: `mpt` is the table set `init_alloc_aligned` just took from the
+    // SAFETY: `mpt` is the table set `alloc_aligned` just took from the
     // boot allocator, and `mycpu` is the CPU this call initializes.
     unsafe {
         MP_DESC_TABLE[mycpu as usize] = mpt;
@@ -327,8 +330,8 @@ fn cpu_setup(cpu: c_int) -> ! {
     unsafe { crate::kern::startup::cpu_launch_first_thread(ptr::null_mut()) }
 }
 
-/// `cpu_ap_main()` of <`i386/mp_desc.h`>, the entry `cpuboot.S` calls.
-pub(crate) fn cpu_ap_main() -> ! {
+/// `cpu_ap_main()`: the entry the application-processor boot code calls.
+pub(crate) extern "C" fn cpu_ap_main() -> ! {
     cpu_setup(cpu_id().bits() as c_int)
 }
 
@@ -344,10 +347,9 @@ fn copy_apboot() {
     // this copy, `apboot`/`apbootend` bracket the image, and this runs on one
     // CPU before any AP starts.
     unsafe {
-        let source = ptr::with_exposed_provenance::<c_void>(phystokv(begin));
-        crate::utils::string::memcpy(
-            ptr::with_exposed_provenance_mut::<c_void>(target),
-            source,
+        ptr::copy_nonoverlapping(
+            ptr::with_exposed_provenance::<u8>(phystokv(begin)),
+            ptr::with_exposed_provenance_mut::<u8>(target),
             length,
         );
     }

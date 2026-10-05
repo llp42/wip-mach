@@ -12,6 +12,28 @@ use core::ffi::c_void;
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 
+/// What a thread blocked in a message transfer was left with, the
+/// `ith_state` of the C.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpcWait {
+    /// Woken with the outcome: a sender has room in the queue, or a
+    /// receiver has its message in `data.kmsg`.  Zero, the state a fresh
+    /// thread starts in.
+    Done = 0,
+    /// Blocked in a send, waiting for room in the queue.
+    Sending,
+    /// Blocked in a receive, waiting for a message.
+    Receiving,
+    /// The receiver's buffer was too small; the message's size is in
+    /// `data.msize`.
+    TooLarge,
+    /// The port the receiver waited on died.
+    PortDied,
+    /// The port the receiver waited on moved into a port set.
+    PortChanged,
+}
+
 /// `ipc_thread_t`: a reference to a thread, opaque to this module.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

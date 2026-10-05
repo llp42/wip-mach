@@ -10,6 +10,7 @@
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
+use crate::ipc::error::Error;
 use crate::ipc::ipc_init;
 use crate::ipc::ipc_object::{self, copyin_type};
 use crate::ipc::ipc_port;
@@ -20,8 +21,7 @@ use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::{kpanic, soft_debugger};
 use crate::kern::ipc_kobject::set_locked;
 use crate::kern::task::current_task;
-use crate::kern::types::KernError;
-use crate::vm::error::Error;
+use crate::vm::error::Error as VmError;
 use crate::vm::types::VmProt;
 use crate::vm::vm_kern;
 use crate::vm::vm_map::{VmMapCopy, round_page};
@@ -198,14 +198,14 @@ const fn timestamp_order(one: c_uint, two: c_uint) -> bool {
     (one.wrapping_sub(two) as c_int) < 0
 }
 
-/// The [`KernError`] a VM map error stands for.
-const fn map_error(error: Error) -> KernError {
+/// The [`Error`] a VM map error stands for.
+const fn map_error(error: VmError) -> Error {
     match error {
-        Error::InvalidAddress => KernError::InvalidAddress,
-        Error::NoSpace => KernError::NoSpace,
-        Error::InvalidArgument => KernError::InvalidArgument,
-        Error::ResourceShortage => KernError::ResourceShortage,
-        _ => KernError::Failure,
+        VmError::InvalidAddress => Error::InvalidAddress,
+        VmError::NoSpace => Error::NoSpace,
+        VmError::InvalidArgument => Error::InvalidArgument,
+        VmError::ResourceShortage => Error::ResourceShortage,
+        _ => Error::Failure,
     }
 }
 
@@ -263,7 +263,7 @@ unsafe fn report_bogus_port(space: IpcSpace, name: c_uint, action: &CStr) {
 unsafe fn lookup_write(
     space: IpcSpace,
     name: c_uint,
-) -> Result<*mut IpcEntry, KernError> {
+) -> Result<*mut IpcEntry, Error> {
     unsafe { ipc_right::lookup_write(space, name) }
 }
 
@@ -337,7 +337,7 @@ unsafe fn names_push(
 unsafe fn names_buffers(
     space: IpcSpace,
     map: *mut crate::vm::vm_map::VmMap,
-) -> Result<(VmSize, VmOffset, VmOffset, c_uint), KernError> {
+) -> Result<(VmSize, VmOffset, VmOffset, c_uint), Error> {
     static FIRST_NO_ROOM: AtomicBool = AtomicBool::new(false);
     static SECOND_NO_ROOM: AtomicBool = AtomicBool::new(false);
 
@@ -362,7 +362,7 @@ unsafe fn names_buffers(
                         .unwrap_or_else(|_| kpanic!("kmem_free", "kmem_free"));
                 }
             }
-            return Err(KernError::InvalidTask);
+            return Err(Error::DeadSpace);
         }
 
         // The C's `bound` is a 32-bit `ipc_entry_num_t`, so `is_size`
@@ -397,7 +397,7 @@ unsafe fn names_buffers(
             .is_err()
         {
             printf_once(&FIRST_NO_ROOM, c"no more room in ipc_kernel_map\n");
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         }
 
         if unsafe { vm_user::allocate(&mut *map, &mut addr2, size, true) }
@@ -409,7 +409,7 @@ unsafe fn names_buffers(
                 vm_kern::kmem_free(&mut *map, addr1, size)
                     .unwrap_or_else(|_| kpanic!("kmem_free", "kmem_free"));
             }
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         }
 
         // The C ignored both statuses; the regions were just allocated from
@@ -445,9 +445,9 @@ unsafe fn names_buffers(
 /// returned copies hold their own references.
 pub(crate) unsafe fn names(
     space: Option<IpcSpace>,
-) -> Result<PortNames, KernError> {
+) -> Result<PortNames, Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let map = ipc_init::ipc_kernel_map();
@@ -562,9 +562,9 @@ pub(crate) unsafe fn names(
 pub(crate) unsafe fn port_type(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<c_uint, KernError> {
+) -> Result<c_uint, Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let entry = unsafe { lookup_write(space, name) }?;
@@ -588,13 +588,13 @@ pub(crate) unsafe fn allocate_name(
     space: Option<IpcSpace>,
     right: c_uint,
     name: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     if !port_name_valid(name) {
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
 
     match PortRight::from_u32(right) {
@@ -617,7 +617,7 @@ pub(crate) unsafe fn allocate_name(
             ipc_object::alloc_dead_name(space, name)
         },
         Some(PortRight::Send | PortRight::SendOnce) | None => {
-            Err(KernError::InvalidValue)
+            Err(Error::InvalidValue)
         }
     }
 }
@@ -630,9 +630,9 @@ pub(crate) unsafe fn allocate_name(
 pub(crate) unsafe fn allocate(
     space: Option<IpcSpace>,
     right: c_uint,
-) -> Result<c_uint, KernError> {
+) -> Result<c_uint, Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     match PortRight::from_u32(right) {
@@ -653,7 +653,7 @@ pub(crate) unsafe fn allocate(
         }
         Some(PortRight::DeadName) => unsafe { ipc_object::alloc_dead(space) },
         Some(PortRight::Send | PortRight::SendOnce) | None => {
-            Err(KernError::InvalidValue)
+            Err(Error::InvalidValue)
         }
     }
 }
@@ -666,9 +666,9 @@ pub(crate) unsafe fn allocate(
 pub(crate) unsafe fn destroy(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let entry = match unsafe { lookup_write(space, name) } {
@@ -695,9 +695,9 @@ pub(crate) unsafe fn destroy(
 pub(crate) unsafe fn deallocate(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let entry = match unsafe { lookup_write(space, name) } {
@@ -724,12 +724,12 @@ pub(crate) unsafe fn get_refs(
     space: Option<IpcSpace>,
     name: c_uint,
     right: c_uint,
-) -> Result<c_uint, KernError> {
+) -> Result<c_uint, Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
     let Some(right) = PortRight::from_u32(right) else {
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     };
 
     let entry = unsafe { lookup_write(space, name) }?;
@@ -761,12 +761,12 @@ pub(crate) unsafe fn mod_refs(
     name: c_uint,
     right: c_uint,
     delta: c_int,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
     if PortRight::from_u32(right).is_none() {
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
 
     let entry = match unsafe { lookup_write(space, name) } {
@@ -825,12 +825,12 @@ pub(crate) unsafe fn set_qlimit(
     space: Option<IpcSpace>,
     name: c_uint,
     qlimit: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
     if qlimit > MACH_PORT_QLIMIT_MAX {
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
 
     let port = unsafe { translate_receive(space, name) }?;
@@ -857,9 +857,9 @@ pub(crate) unsafe fn set_mscount(
     space: Option<IpcSpace>,
     name: c_uint,
     mscount: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let port = unsafe { translate_receive(space, name) }?;
@@ -886,9 +886,9 @@ pub(crate) unsafe fn set_seqno(
     space: Option<IpcSpace>,
     name: c_uint,
     seqno: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let port = unsafe { translate_receive(space, name) }?;
@@ -949,9 +949,9 @@ unsafe fn get_set_status_helper(
 pub(crate) unsafe fn get_set_status(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<SetStatus, KernError> {
+) -> Result<SetStatus, Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let map = ipc_init::ipc_kernel_map();
@@ -967,7 +967,7 @@ pub(crate) unsafe fn get_set_status(
         {
             static NO_ROOM: AtomicBool = AtomicBool::new(false);
             printf_once(&NO_ROOM, c"no more room in ipc_kernel_map\n");
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         }
 
         // The C ignored the status; the region was just allocated from the
@@ -1005,7 +1005,7 @@ pub(crate) unsafe fn get_set_status(
                 vm_kern::kmem_free(&mut *map, addr, size)
                     .unwrap_or_else(|_| kpanic!("kmem_free", "kmem_free"));
             }
-            return Err(KernError::InvalidRight);
+            return Err(Error::InvalidRight);
         }
 
         // SAFETY: a port-set entry names a live port set.
@@ -1141,9 +1141,9 @@ pub(crate) unsafe fn move_member(
     space: Option<IpcSpace>,
     member: c_uint,
     after: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let entry = unsafe { lookup_write(space, member) }?;
@@ -1152,7 +1152,7 @@ pub(crate) unsafe fn move_member(
     if unsafe { (*entry).bits() } & MACH_PORT_TYPE_RECEIVE == 0 {
         // SAFETY: the space is live and write-locked.
         unsafe { space.lock_done() };
-        return Err(KernError::InvalidRight);
+        return Err(Error::InvalidRight);
     }
 
     let port = unsafe { (*entry).object() };
@@ -1164,14 +1164,14 @@ pub(crate) unsafe fn move_member(
         let Some(entry) = (unsafe { space.entry_lookup(after) }) else {
             // SAFETY: the space is live and write-locked.
             unsafe { space.lock_done() };
-            return Err(KernError::InvalidName);
+            return Err(Error::InvalidName);
         };
 
         // SAFETY: a looked-up entry is live.
         if unsafe { (*entry).bits() } & MACH_PORT_TYPE_PORT_SET == 0 {
             // SAFETY: the space is live and write-locked.
             unsafe { space.lock_done() };
-            return Err(KernError::InvalidRight);
+            return Err(Error::InvalidRight);
         }
 
         // SAFETY: a port-set entry names a live port set.
@@ -1198,9 +1198,9 @@ pub(crate) unsafe fn move_member(
 pub(crate) unsafe fn get_receive_status(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<MachPortStatus, KernError> {
+) -> Result<MachPortStatus, Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let port = unsafe { translate_receive(space, name) }?;
@@ -1269,9 +1269,9 @@ pub(crate) unsafe fn set_protected_payload(
     space: Option<IpcSpace>,
     name: c_uint,
     payload: usize,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let port = unsafe { translate_receive(space, name) }?;
@@ -1298,9 +1298,9 @@ pub(crate) unsafe fn set_protected_payload(
 pub(crate) unsafe fn clear_protected_payload(
     space: Option<IpcSpace>,
     name: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     let port = unsafe { translate_receive(space, name) }?;
@@ -1329,12 +1329,12 @@ pub(crate) unsafe fn set_ktype(
     name: c_uint,
     right: c_uint,
     ktype: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
     if ktype != MACH_PORT_KTYPE_NONE && ktype != MACH_PORT_KTYPE_USER_DEVICE {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let object = unsafe { ipc_object::translate(space, name, right) }?;
@@ -1361,7 +1361,7 @@ pub(crate) unsafe fn set_ktype(
         }
         Ok(())
     } else {
-        Err(KernError::InvalidArgument)
+        Err(Error::InvalidArgument)
     };
 
     // SAFETY: the port is live, active, and locked; the C's `ip_unlock`.
@@ -1379,13 +1379,13 @@ pub(crate) unsafe fn rename(
     space: Option<IpcSpace>,
     oname: c_uint,
     nname: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     if !port_name_valid(nname) {
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
 
     unsafe { ipc_object::rename(space, oname, nname) }
@@ -1403,19 +1403,19 @@ pub(crate) unsafe fn insert_right(
     name: c_uint,
     poly: *mut c_void,
     poly_poly: c_uint,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     if !port_name_valid(name)
         || !(MOVE_RECEIVE..=MOVE_SEND_ONCE).contains(&poly_poly)
     {
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
 
     if !io_valid(poly) {
-        return Err(KernError::InvalidCapability);
+        return Err(Error::InvalidCapability);
     }
 
     unsafe { ipc_object::copyout_name(space, poly, poly_poly, false, name) }
@@ -1430,13 +1430,13 @@ pub(crate) unsafe fn extract_right(
     space: Option<IpcSpace>,
     name: c_uint,
     msgt_name: c_uint,
-) -> Result<(*mut c_void, c_uint), KernError> {
+) -> Result<(*mut c_void, c_uint), Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     if !(MOVE_RECEIVE..=MAKE_SEND_ONCE).contains(&msgt_name) {
-        return Err(KernError::InvalidValue);
+        return Err(Error::InvalidValue);
     }
 
     let object = unsafe { ipc_object::copyin(space, name, msgt_name) }?;
@@ -1452,7 +1452,7 @@ pub(crate) unsafe fn extract_right(
 unsafe fn translate_receive(
     space: IpcSpace,
     name: c_uint,
-) -> Result<*mut c_void, KernError> {
+) -> Result<*mut c_void, Error> {
     unsafe { ipc_object::translate(space, name, MACH_PORT_RIGHT_RECEIVE) }
 }
 
@@ -1468,19 +1468,19 @@ pub(crate) unsafe fn request_notification(
     id: c_int,
     sync: c_uint,
     notify: Option<NonNull<c_void>>,
-) -> Result<Option<IpcPort>, KernError> {
+) -> Result<Option<IpcPort>, Error> {
     let Some(space) = space else {
-        return Err(KernError::InvalidTask);
+        return Err(Error::DeadSpace);
     };
 
     if notify.is_some_and(|notify| ptr::eq(notify.as_ptr(), IO_DEAD)) {
-        return Err(KernError::InvalidCapability);
+        return Err(Error::InvalidCapability);
     }
 
     match id {
         MACH_NOTIFY_PORT_DESTROYED => {
             if sync != 0 {
-                return Err(KernError::InvalidValue);
+                return Err(Error::InvalidValue);
             }
 
             let port = unsafe { translate_receive(space, name) }?;
@@ -1511,6 +1511,6 @@ pub(crate) unsafe fn request_notification(
 
             Ok(IpcPort::new(previous))
         }
-        _ => Err(KernError::InvalidValue),
+        _ => Err(Error::InvalidValue),
     }
 }

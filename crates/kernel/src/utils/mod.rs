@@ -7,4 +7,3 @@ pub mod atoi;
 pub(crate) mod cell;
 pub mod delay;
 pub mod kd_queue;
-pub mod string;

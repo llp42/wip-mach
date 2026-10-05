@@ -12,7 +12,7 @@ use crate::kern::machine;
 use crate::kern::smp as kern_smp;
 use crate::kern::smp::CpuId;
 use core::arch::asm;
-use core::ffi::{c_int, c_uint, c_ulong};
+use core::ffi::{c_uint, c_ulong};
 
 /// `STARTUP_VECTOR_SHIFT` of <i386/smp.h>: where a startup IPI carries its
 /// target address.
@@ -106,7 +106,7 @@ fn wait_for_ipi() {
 }
 
 /// `smp_send_ipi_init()` in C.
-fn send_ipi_init(bsp_apic_id: u32) -> c_int {
+fn send_ipi_init(bsp_apic_id: u32) {
     clear_error_status();
     let _ = error_status();
 
@@ -136,11 +136,11 @@ fn send_ipi_init(bsp_apic_id: u32) -> c_int {
     if error != 0 {
         kprint!("ESR error upon INIT 0x{:x}\n", error);
     }
-    0
 }
 
-/// `smp_send_ipi_startup_twice()` in C.
-fn send_ipi_startup_twice(bsp_apic_id: u32, vector: c_uint) -> c_int {
+/// `smp_send_ipi_startup_twice()` in C: whether both startup IPIs went out
+/// and were accepted.
+fn send_ipi_startup_twice(bsp_apic_id: u32, vector: c_uint) -> bool {
     let mut send_err = 0;
     let mut accept_err = 0;
 
@@ -178,8 +178,7 @@ fn send_ipi_startup_twice(bsp_apic_id: u32, vector: c_uint) -> c_int {
         kprint!("ESR error: delivery 0x{:x}\n", accept_err);
     }
 
-    // Every defined error-status bit fits a byte, so the conversion is exact.
-    (send_err | accept_err) as c_int
+    send_err == 0 && accept_err == 0
 }
 
 /// Interrupts `cpu` so that it runs the AST check.
@@ -193,7 +192,7 @@ pub(crate) fn pmap_update(cpu: CpuId) {
 }
 
 /// `smp_startup_cpus()` in C.
-pub(crate) fn startup_cpus(bsp_apic_id: u32, start_eip: c_ulong) -> c_int {
+pub(crate) fn startup_cpus(bsp_apic_id: u32, start_eip: c_ulong) {
     // SAFETY: `wbinvd` touches no registers and the stack stays balanced; the
     // memory clobber of the C macro is the default.
     unsafe { asm!("wbinvd", options(nostack, preserves_flags)) };
@@ -204,8 +203,7 @@ pub(crate) fn startup_cpus(bsp_apic_id: u32, start_eip: c_ulong) -> c_int {
     // The C passed the shifted address through an `int`; only the vector
     // byte reaches the ICR, and that is what the shift leaves here.
     let vector = (start_eip >> STARTUP_VECTOR_SHIFT) as c_uint;
-    let error = send_ipi_startup_twice(bsp_apic_id, vector);
-    if error != 0 {
+    if !send_ipi_startup_twice(bsp_apic_id, vector) {
         kprint!("FATAL: APs failed to start\n");
         loop {
             pause();
@@ -213,11 +211,9 @@ pub(crate) fn startup_cpus(bsp_apic_id: u32, start_eip: c_ulong) -> c_int {
     }
 
     kprint!("done\n");
-    0
 }
 
 /// `smp_init()` in C.
-pub(crate) fn init() -> c_int {
+pub(crate) fn init() {
     data_init();
-    0
 }

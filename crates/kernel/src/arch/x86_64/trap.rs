@@ -17,13 +17,13 @@ use crate::arch::x86_64::pcb::I386SavedState;
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
 use crate::arch::x86_64::user_access;
-use crate::glue;
 use crate::kern::ast;
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
 use crate::kern::exception as exception_core;
 use crate::kern::thread::Thread;
-use crate::vm::error::KERN_SUCCESS;
+use crate::mig;
+use crate::vm::error::Error;
 use crate::vm::types::VmProt;
 use crate::vm::vm_fault;
 use crate::vm::vm_kern;
@@ -297,8 +297,8 @@ fn general_protection(
 ) {
     if retry(
         regs,
-        ptr::addr_of!(glue::__start_mach_recover),
-        ptr::addr_of!(glue::__stop_mach_recover),
+        ptr::addr_of!(mig::__start_mach_recover),
+        ptr::addr_of!(mig::__stop_mach_recover),
     ) {
         return;
     }
@@ -335,8 +335,8 @@ fn page_fault(
         let map = unsafe { KERNEL_MAP }.cast::<VmMap>();
         subcode = lintokv(subcode);
 
-        let image_start = ptr::addr_of!(glue::_start).addr();
-        let image_end = ptr::addr_of!(glue::etext).addr();
+        let image_start = ptr::addr_of!(mig::_start).addr();
+        let image_end = ptr::addr_of!(mig::etext).addr();
         if trunc_page(subcode) == 0
             || (image_start <= subcode && subcode < image_end)
         {
@@ -373,7 +373,7 @@ fn page_fault(
 
     // SAFETY: `map` is live, either the kernel map or the faulting thread's,
     // and `vm_fault()` handles the fault at the page `trunc_page()` names.
-    let result = unsafe {
+    let faulted = unsafe {
         vm_fault::fault(
             map,
             trunc_page(subcode),
@@ -384,11 +384,11 @@ fn page_fault(
         )
     };
 
-    if result == KERN_SUCCESS {
+    if faulted.is_ok() {
         let _ = retry(
             regs,
-            ptr::addr_of!(glue::__start_mach_retry),
-            ptr::addr_of!(glue::__stop_mach_retry),
+            ptr::addr_of!(mig::__start_mach_retry),
+            ptr::addr_of!(mig::__stop_mach_retry),
         );
         return;
     }
@@ -464,17 +464,25 @@ fn emulated_syscall(regs: &mut I386SavedState, thread: *mut Thread) -> bool {
 ///
 /// `vm_fault()` calls this with the result its fault attempt finished
 /// with.
-unsafe fn user_page_fault_continue(kr: c_int) {
+unsafe fn user_page_fault_continue(result: Result<(), Error>) {
     let thread = per_cpu::thread();
     // SAFETY: the trap path runs on a live thread whose pcb is set up.
     let regs = unsafe { &mut (*(*thread).pcb).iss };
 
-    if kr == KERN_SUCCESS {
+    match result {
         // SAFETY: the routine returns to user mode and never comes back.
-        unsafe { crate::arch::x86_64::locore::thread_exception_return() };
+        Ok(()) => unsafe {
+            crate::arch::x86_64::locore::thread_exception_return();
+        },
+        // The exception message carries the fault's error as its code.
+        Err(error) => unsafe {
+            i386_exception(
+                EXC_BAD_ACCESS,
+                c_int::from(error),
+                regs.cr2 as c_long,
+            )
+        },
     }
-
-    unsafe { i386_exception(EXC_BAD_ACCESS, kr, regs.cr2 as c_long) };
 }
 
 /// Dispatches a user-mode trap to its handler or exception.
@@ -555,8 +563,9 @@ pub(crate) unsafe fn user_trap(regs: &mut I386SavedState) -> c_int {
                 VmProt::READ
             };
             // SAFETY: the trap path runs on a live thread whose task map is
-            // live; the continuation resumes the faulting thread.
-            unsafe {
+            // live; the continuation resumes the faulting thread with the
+            // result.
+            let _ = unsafe {
                 vm_fault::fault(
                     (*(*thread).task).map.cast::<VmMap>(),
                     trunc_page(subcode),

@@ -15,6 +15,7 @@ use crate::arch::x86_64::{per_cpu, smp};
 use crate::config::MAX_NCPUS;
 use crate::ipc::IpcPort;
 use crate::kern::debug::kpanic;
+use crate::kern::error::Error;
 use crate::kern::ipc_host;
 use crate::kern::ipc_tt::{convert_task_to_port, convert_thread_to_port};
 use crate::kern::lock::SimpleLock;
@@ -28,7 +29,6 @@ use crate::kern::slab::{CacheInitFlags, KmemCache, kalloc, kfree};
 use crate::kern::smp::{CpuId, ncpus};
 use crate::kern::task::{self as task, PsetTaskList, Task};
 use crate::kern::thread::{PsetThreadList, Thread, ThreadQueue};
-use crate::kern::types::KernError;
 use crate::utils::cell::SyncCell;
 use collections::simple_queue::{self, SimpleQueue};
 use core::cell::UnsafeCell;
@@ -544,12 +544,6 @@ unsafe fn init_runq(runq: *mut RunQueue) {
     }
 }
 
-/// The [`KernError`] a C `kern_return_t` stands for.
-fn kern_error(code: c_int) -> Result<(), KernError> {
-    u8::try_from(code)
-        .map_or_else(|_| Err(KernError::Failure), KernError::from_u8)
-}
-
 impl Processor {
     /// Initialize the processor of CPU `cpu`.
     ///
@@ -583,10 +577,10 @@ impl Processor {
     ///
     /// # Errors
     ///
-    /// Always returns [`KernError::Failure`]: starting the boot processor is
+    /// Always returns [`Error::Failure`]: starting the boot processor is
     /// not supported.
-    pub const fn start(&mut self) -> Result<(), KernError> {
-        Err(KernError::Failure)
+    pub const fn start(&mut self) -> Result<(), Error> {
+        Err(Error::Failure)
     }
 
     /// `processor_exit()` of kern/processor.c.
@@ -595,7 +589,7 @@ impl Processor {
     ///
     /// Returns the error the machine shutdown routine reports when it cannot
     /// stop the processor.
-    pub fn exit(&mut self) -> Result<(), KernError> {
+    pub fn exit(&mut self) -> Result<(), Error> {
         // SAFETY: `self` is a live processor, and the machine routine takes
         // the processor lock it needs itself.
         unsafe { machine::shutdown(ptr::from_mut(self)) }
@@ -605,31 +599,32 @@ impl Processor {
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when the control data does not
+    /// Returns [`Error::InvalidArgument`] when the control data does not
     /// fit the C `natural_t` count, and otherwise the error `cpu_control()`
     /// reports.
-    pub fn control(&mut self, info: &[c_int]) -> Result<(), KernError> {
+    pub fn control(&mut self, info: &[c_int]) -> Result<(), Error> {
         let Ok(count) = c_uint::try_from(info.len()) else {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         };
 
         // SAFETY: the slice's pointer and length agree, so `info` is valid for
         // `count` reads; the hook only prints the pointer.
-        kern_error(unsafe { cpu_control(self.cpu_id, info.as_ptr(), count) })
+        unsafe { cpu_control(self.cpu_id, info.as_ptr(), count) }
+            .map_err(Error::from)
     }
 
     /// `processor_get_assignment()` of kern/processor.c.
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::Failure`] when the processor is shut down or
+    /// Returns [`Error::Failure`] when the processor is shut down or
     /// off-line, as the C did.
-    pub fn get_assignment(&self) -> Result<*mut ProcessorSet, KernError> {
+    pub fn get_assignment(&self) -> Result<*mut ProcessorSet, Error> {
         let state = self.state.load(Ordering::Acquire);
         if state == ProcessorState::Shutdown
             || state == ProcessorState::OffLine
         {
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
 
         let pset = self.processor_set.load(Ordering::Acquire);
@@ -990,11 +985,11 @@ impl ProcessorSet {
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `policy` is not one of the
+    /// Returns [`Error::InvalidArgument`] when `policy` is not one of the
     /// policies the scheduler supports.
-    pub fn policy_enable(&mut self, policy: c_int) -> Result<(), KernError> {
+    pub fn policy_enable(&mut self, policy: c_int) -> Result<(), Error> {
         if invalid_policy(policy) {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         self.lock.lock();
@@ -1008,15 +1003,15 @@ impl ProcessorSet {
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `policy` is timesharing or
+    /// Returns [`Error::InvalidArgument`] when `policy` is timesharing or
     /// not one of the policies the scheduler supports.
     pub fn policy_disable(
         &mut self,
         policy: c_int,
         change_threads: c_int,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if policy == POLICY_TIMESHARE || invalid_policy(policy) {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         self.lock.lock();
@@ -1054,15 +1049,15 @@ impl ProcessorSet {
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] when `max_priority` is outside
+    /// Returns [`Error::InvalidArgument`] when `max_priority` is outside
     /// the range the scheduler supports.
     pub fn max_priority(
         &mut self,
         max_priority: c_int,
         change_threads: c_int,
-    ) -> Result<(), KernError> {
+    ) -> Result<(), Error> {
         if invalid_pri(max_priority) {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         self.lock.lock();
@@ -1137,23 +1132,23 @@ impl ProcessorSet {
     ///
     /// # Errors
     ///
-    /// Returns [`KernError::InvalidArgument`] for the default set and
-    /// [`KernError::Failure`] when the set is not active.
+    /// Returns [`Error::InvalidArgument`] for the default set and
+    /// [`Error::Failure`] when the set is not active.
     ///
     /// # Safety
     ///
     /// `self` must be a live set the caller holds a reference to, and the set
     /// must not be the default one.
-    pub unsafe fn destroy(&mut self) -> Result<(), KernError> {
+    pub unsafe fn destroy(&mut self) -> Result<(), Error> {
         let default = default_pset();
         if ptr::eq(self, default) {
-            return Err(KernError::InvalidArgument);
+            return Err(Error::InvalidArgument);
         }
 
         self.lock.lock();
         if self.active == 0 {
             self.lock.unlock();
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
 
         self.active = 0;
@@ -1212,7 +1207,7 @@ impl ProcessorSet {
     unsafe fn things(
         &mut self,
         kind: Thing,
-    ) -> Result<(*mut c_void, c_uint), KernError> {
+    ) -> Result<(*mut c_void, c_uint), Error> {
         let mut size: usize = 0;
         let mut addr: *mut u8 = ptr::null_mut();
 
@@ -1220,7 +1215,7 @@ impl ProcessorSet {
             self.lock.lock();
             if self.active == 0 {
                 self.lock.unlock();
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
 
             let count = match kind {
@@ -1230,7 +1225,7 @@ impl ProcessorSet {
             // A live list's count is never negative.
             let Ok(actual) = usize::try_from(count) else {
                 self.lock.unlock();
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             };
 
             let needed = actual.wrapping_mul(size_of::<*mut c_void>());
@@ -1247,7 +1242,7 @@ impl ProcessorSet {
             size = needed;
 
             let Some(buffer) = kalloc(size) else {
-                return Err(KernError::ResourceShortage);
+                return Err(Error::ResourceShortage);
             };
             addr = buffer.as_ptr();
         };
@@ -1315,7 +1310,7 @@ impl ProcessorSet {
         size_needed: usize,
         actual: usize,
         kind: Thing,
-    ) -> Result<(*mut c_void, c_uint), KernError> {
+    ) -> Result<(*mut c_void, c_uint), Error> {
         let mut addr = addr;
         if size_needed < size {
             let Some(buffer) = kalloc(size_needed) else {
@@ -1325,7 +1320,7 @@ impl ProcessorSet {
                     Self::release_slots(addr, actual, kind);
                     kfree(NonNull::new_unchecked(addr), size);
                 }
-                return Err(KernError::ResourceShortage);
+                return Err(Error::ResourceShortage);
             };
             // SAFETY: both buffers are live, and `size_needed` is the byte
             // count of the references `addr` holds.
@@ -1434,15 +1429,15 @@ pub(crate) unsafe fn bootstrap() {
 /// may reach the new set before this returns.
 pub(crate) unsafe fn create(
     host: *mut c_void,
-) -> Result<*mut ProcessorSet, KernError> {
+) -> Result<*mut ProcessorSet, Error> {
     if host.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     // SAFETY: the cache was initialized by `pset_sys_init()`, and the object
     // is unshared until it is linked below.
     let Some(mem) = (unsafe { (*pset_cache()).alloc() }) else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
     let pset = mem.as_ptr().cast::<ProcessorSet>();
 
@@ -1517,9 +1512,9 @@ pub(crate) unsafe fn system_init() {
 /// `pset` must be null or point at a live processor set.
 pub(crate) unsafe fn tasks(
     pset: *mut ProcessorSet,
-) -> Result<(*mut c_void, c_uint), KernError> {
+) -> Result<(*mut c_void, c_uint), Error> {
     let Some(pset) = NonNull::new(pset) else {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     };
     unsafe { (*pset.as_ptr()).things(Thing::Task) }
 }
@@ -1531,9 +1526,9 @@ pub(crate) unsafe fn tasks(
 /// `pset` must be null or point at a live processor set.
 pub(crate) unsafe fn threads(
     pset: *mut ProcessorSet,
-) -> Result<(*mut c_void, c_uint), KernError> {
+) -> Result<(*mut c_void, c_uint), Error> {
     let Some(pset) = NonNull::new(pset) else {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     };
     unsafe { (*pset.as_ptr()).things(Thing::Thread) }
 }

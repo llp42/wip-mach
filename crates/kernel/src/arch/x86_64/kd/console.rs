@@ -29,11 +29,10 @@ const KD_BELLOFF: c_int = 0;
 /// # Safety
 ///
 /// `cp` is the console table's entry; the hardware is assumed present.
-pub(crate) unsafe fn kdcnprobe(cp: *mut ConsDev) -> c_int {
+pub(crate) unsafe fn kdcnprobe(cp: *mut ConsDev) {
     let cp = unsafe { &mut *cp };
     cp.cn_dev = 0;
     cp.cn_pri = CN_INTERNAL;
-    0
 }
 
 /// `kdcninit()` in C.
@@ -41,9 +40,8 @@ pub(crate) unsafe fn kdcnprobe(cp: *mut ConsDev) -> c_int {
 /// # Safety
 ///
 /// Called once from `cninit()`.
-pub(crate) unsafe fn kdcninit(_cp: *mut ConsDev) -> c_int {
+pub(crate) unsafe fn kdcninit(_cp: *mut ConsDev) {
     kdinit();
-    0
 }
 
 /// `kdcngetc()` in C.
@@ -65,21 +63,20 @@ pub(crate) unsafe fn kdcngetc(_dev: u16, wait: c_int) -> c_int {
     }
 }
 
-/// `kdcnputc()` in C.
+/// `kdcnputc()` in C: a character before `kdinit()` is dropped.
 ///
 /// # Safety
 ///
 /// The caller must hold `SPLKD`.
-pub(crate) unsafe fn kdcnputc(_dev: u16, c: c_int) -> c_int {
+pub(crate) unsafe fn kdcnputc(_dev: u16, c: c_int) {
     if !state().kd_initialized {
-        return -1;
+        return;
     }
     // Tab is handled in kd_putc.
     if c == c_int::from(b'\n') {
         esc::putc(b'\r');
     }
     esc::putc_esc(c as u8);
-    0
 }
 
 /// `kdcnmaygetc()` in C.

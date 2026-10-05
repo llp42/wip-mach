@@ -14,6 +14,7 @@
 
 use crate::ipc::mach_msg::mach_msg_trap;
 use crate::kern::debug::soft_debugger;
+use crate::kern::error::Error;
 use crate::kern::eventcount::{evc_wait, evc_wait_clear};
 use crate::kern::ipc_host::mach_host_self_entry;
 use crate::kern::ipc_mig::{
@@ -31,7 +32,6 @@ use crate::kern::ipc_tt::{
 use crate::kern::syscall_subr::{
     mach_print, swtch_entry, swtch_pri_entry, thread_switch_entry,
 };
-use crate::kern::types::KernError;
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of, transmute};
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -90,7 +90,7 @@ unsafe extern "C" fn kern_invalid() -> c_int {
         // prints it.
         unsafe { soft_debugger(c"kern_invalid mach trap".as_ptr()) };
     }
-    c_int::from(KernError::InvalidArgument)
+    c_int::from(Error::InvalidArgument)
 }
 
 /// The `MACH_TRAP`/`MACH_TRAP_STACK` macros of <`kern/syscall_sw.h>`: one table

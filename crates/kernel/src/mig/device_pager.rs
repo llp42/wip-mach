@@ -13,11 +13,9 @@ use crate::arch::types::{VmOffset, VmSize};
 use crate::device::dev_pager;
 use crate::ipc::IpcPort;
 use crate::kern::debug::kpanic;
+use crate::mig::code::KERN_SUCCESS;
 use crate::vm::types::VmProt;
 use core::ffi::{c_int, c_uint};
-
-/// `KERN_SUCCESS` of <`mach/kern_return.h`>.
-const KERN_SUCCESS: c_int = 0;
 
 /// `device_pager_data_request()` of `device/dev_pager.c`, the MIG
 /// `memory_object_data_request` server entry.

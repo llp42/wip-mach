@@ -15,13 +15,12 @@ use crate::arch::x86_64::pmap::pmap_collect;
 use crate::arch::x86_64::pmap::pmap_create;
 use crate::arch::x86_64::pmap::pmap_destroy;
 use crate::arch::x86_64::spl;
-use crate::glue;
-use crate::glue::time_value::{TIME_NANOS_MAX, TimeValue64};
 use crate::ipc::ipc_space;
 use crate::ipc::{IpcPort, IpcSpace};
 use crate::kern::ast::{self, AstReason};
 use crate::kern::console::{CStrArg, write_cstr};
 use crate::kern::debug::kpanic;
+use crate::kern::error::Error;
 use crate::kern::host_time;
 use crate::kern::ipc_tt::{
     convert_task_to_port, convert_thread_to_port, ipc_task_disable,
@@ -39,7 +38,8 @@ use crate::kern::sched_prim::{
 use crate::kern::slab::{CacheInitFlags, KmemCache, kalloc, kfree};
 use crate::kern::syscall_emulation::EmlDispatch;
 use crate::kern::thread::{TaskThreadList, Thread};
-use crate::kern::types::KernError;
+use crate::mig;
+use crate::mig::time_value::{TIME_NANOS_MAX, TimeValue64};
 use crate::vm::types::Pmap;
 use crate::vm::vm_kern::KERNEL_MAP;
 use crate::vm::vm_map::{VmMap, round_page, trunc_page};
@@ -463,9 +463,9 @@ unsafe fn task_processor_set(
 pub(crate) unsafe fn create_kernel_task(
     parent: Option<NonNull<Task>>,
     source: MapSource,
-) -> Result<*mut Task, KernError> {
+) -> Result<*mut Task, Error> {
     let Some(buf) = (unsafe { (*addr_of_mut!(TASK_CACHE)).alloc() }) else {
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     };
     let task = buf.as_ptr().cast::<Task>();
 
@@ -480,7 +480,7 @@ pub(crate) unsafe fn create_kernel_task(
         MapSource::Kernel => unsafe { KERNEL_MAP }.cast::<VmMap>(),
         MapSource::Inherit => {
             let Some(parent) = parent else {
-                return Err(KernError::InvalidArgument);
+                return Err(Error::InvalidArgument);
             };
             let parent_map = unsafe {
                 NonNull::new_unchecked((*parent.as_ptr()).map.cast::<VmMap>())
@@ -496,7 +496,7 @@ pub(crate) unsafe fn create_kernel_task(
         unsafe {
             (*addr_of_mut!(TASK_CACHE)).free(buf);
         }
-        return Err(KernError::ResourceShortage);
+        return Err(Error::ResourceShortage);
     }
 
     // SAFETY: the task is unshared storage and the map is live; each field
@@ -575,7 +575,7 @@ pub(crate) unsafe fn create_kernel_task(
         if !notification.is_null() {
             reference(task);
             reference(parent.map_or(null_mut(), NonNull::as_ptr));
-            glue::mach_notify_new_task(
+            let _ = mig::mach_notify_new_task(
                 notification,
                 convert_task_to_port(task).map_or(null_mut(), IpcPort::as_ptr),
                 parent.map_or(null_mut(), |parent| {
@@ -670,9 +670,9 @@ pub(crate) unsafe fn reference(task: *mut Task) {
 ///
 /// `task` must be null or point at a live task, and the caller must hold no
 /// locks: the routine blocks and deallocates.
-pub(crate) unsafe fn terminate(task: *mut Task) -> Result<(), KernError> {
+pub(crate) unsafe fn terminate(task: *mut Task) -> Result<(), Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let cur_task = unsafe { current_task() };
@@ -683,7 +683,7 @@ pub(crate) unsafe fn terminate(task: *mut Task) -> Result<(), KernError> {
             (*task).lock.lock();
             if !(*task).active() {
                 (*task).lock.unlock();
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
             let s = spl::splsched();
             (*cur_thread).lock.lock();
@@ -692,7 +692,7 @@ pub(crate) unsafe fn terminate(task: *mut Task) -> Result<(), KernError> {
                 spl::splx(s);
                 (*task).lock.unlock();
                 let _ = Thread::terminate(cur_thread);
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
             hold_locked(task);
             (*task).set_active(false);
@@ -724,7 +724,7 @@ pub(crate) unsafe fn terminate(task: *mut Task) -> Result<(), KernError> {
                 (*task).lock.unlock();
                 (*cur_task).lock.unlock();
                 let _ = Thread::terminate(cur_thread);
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
             (*cur_thread).lock.unlock();
             spl::splx(s);
@@ -732,7 +732,7 @@ pub(crate) unsafe fn terminate(task: *mut Task) -> Result<(), KernError> {
 
             if !(*task).active() {
                 (*task).lock.unlock();
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
             hold_locked(task);
             (*task).set_active(false);
@@ -876,12 +876,12 @@ pub(crate) unsafe fn hold_locked(task: *mut Task) {
 ///
 /// `task` must be null or point at a live task, and the caller must hold no
 /// locks.
-pub(crate) unsafe fn hold(task: *mut Task) -> Result<(), KernError> {
+pub(crate) unsafe fn hold(task: *mut Task) -> Result<(), Error> {
     unsafe {
         (*task).lock.lock();
         if !(*task).active() {
             (*task).lock.unlock();
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
         hold_locked(task);
         (*task).lock.unlock();
@@ -898,7 +898,7 @@ pub(crate) unsafe fn hold(task: *mut Task) -> Result<(), KernError> {
 pub(crate) unsafe fn dowait(
     task: *mut Task,
     must_wait: bool,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let cur_thread = per_cpu::thread();
     let list = unsafe { addr_of_mut!((*task).thread_list) };
     let mut prev_thread: *mut Thread = null_mut();
@@ -911,7 +911,7 @@ pub(crate) unsafe fn dowait(
             let current = current.as_ptr();
 
             if !(*task).active() && !must_wait {
-                result = Err(KernError::Failure);
+                result = Err(Error::Failure);
                 break;
             }
 
@@ -946,12 +946,12 @@ pub(crate) unsafe fn dowait(
 ///
 /// `task` must be null or point at a live task, and the caller must hold no
 /// locks.
-pub(crate) unsafe fn release(task: *mut Task) -> Result<(), KernError> {
+pub(crate) unsafe fn release(task: *mut Task) -> Result<(), Error> {
     unsafe {
         (*task).lock.lock();
         if !(*task).active() {
             (*task).lock.unlock();
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
 
         (*task).suspend_count = (*task).suspend_count.wrapping_sub(1);
@@ -979,9 +979,9 @@ pub(crate) unsafe fn release(task: *mut Task) -> Result<(), KernError> {
 /// locks: the routine allocates.
 pub(crate) unsafe fn threads(
     task: *mut Task,
-) -> Result<(Option<NonNull<VmOffset>>, c_uint), KernError> {
+) -> Result<(Option<NonNull<VmOffset>>, c_uint), Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let mut size: VmSize = 0;
@@ -994,7 +994,7 @@ pub(crate) unsafe fn threads(
             (*task).lock.lock();
             if !(*task).active() {
                 (*task).lock.unlock();
-                return Err(KernError::Failure);
+                return Err(Error::Failure);
             }
 
             // The C read the `int` count into an `unsigned int`; it is the
@@ -1019,7 +1019,7 @@ pub(crate) unsafe fn threads(
         // SAFETY: `kalloc_init()` ran during the boot this MIG entry
         // follows.
         let Some(buf) = kalloc(size) else {
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         };
         addr = Some(buf);
     }
@@ -1074,7 +1074,7 @@ pub(crate) unsafe fn threads(
                 }
                 kfree(buf, size);
             }
-            return Err(KernError::ResourceShortage);
+            return Err(Error::ResourceShortage);
         };
 
         // SAFETY: both buffers are live and distinct, the copy fits the
@@ -1108,9 +1108,9 @@ pub(crate) unsafe fn threads(
 ///
 /// `task` must be null or point at a live task, and the caller must hold no
 /// locks.
-pub(crate) unsafe fn suspend(task: *mut Task) -> Result<(), KernError> {
+pub(crate) unsafe fn suspend(task: *mut Task) -> Result<(), Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let first_stop = unsafe {
@@ -1150,9 +1150,9 @@ pub(crate) unsafe fn suspend(task: *mut Task) -> Result<(), KernError> {
 ///
 /// `task` must be null or point at a live task, and the caller must hold no
 /// locks.
-pub(crate) unsafe fn resume(task: *mut Task) -> Result<(), KernError> {
+pub(crate) unsafe fn resume(task: *mut Task) -> Result<(), Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     let release_now = unsafe {
@@ -1164,7 +1164,7 @@ pub(crate) unsafe fn resume(task: *mut Task) -> Result<(), KernError> {
             release_now
         } else {
             (*task).lock.unlock();
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
     };
 
@@ -1185,7 +1185,7 @@ pub(crate) unsafe fn resume(task: *mut Task) -> Result<(), KernError> {
 unsafe fn assign_task_threads(
     task: *mut Task,
     new_pset: *mut ProcessorSet,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     // SAFETY: the task lock is held; every queue entry is a live thread,
     // and the reference keeps the one between iterations alive.
     unsafe {
@@ -1197,7 +1197,7 @@ unsafe fn assign_task_threads(
             let current = current.as_ptr();
 
             if !(*task).active() {
-                result = Err(KernError::Failure);
+                result = Err(Error::Failure);
                 break;
             }
 
@@ -1252,9 +1252,9 @@ pub(crate) unsafe fn assign(
     task: *mut Task,
     new_pset: *mut ProcessorSet,
     assign_threads: bool,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if task.is_null() || new_pset.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
@@ -1359,14 +1359,14 @@ pub(crate) unsafe fn assign(
 /// `task` must be null or point at a live task.
 pub(crate) unsafe fn get_assignment(
     task: *mut Task,
-) -> Result<*mut ProcessorSet, KernError> {
+) -> Result<*mut ProcessorSet, Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
         if !(*task).active() {
-            return Err(KernError::Failure);
+            return Err(Error::Failure);
         }
         let pset = (*task).processor_set;
         (*pset).reference();
@@ -1384,16 +1384,16 @@ pub(crate) unsafe fn priority(
     task: *mut Task,
     priority: c_int,
     change_threads: bool,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if task.is_null() || invalid_pri(priority) {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
         (*task).lock.lock();
         if (*task).max_priority > priority {
             (*task).lock.unlock();
-            return Err(KernError::NoAccess);
+            return Err(Error::NoAccess);
         }
         (*task).priority = priority;
 
@@ -1405,7 +1405,7 @@ pub(crate) unsafe fn priority(
                 cursor.move_next();
                 let thread = thread.as_ptr();
                 if Thread::priority(thread, priority, false).is_err() {
-                    result = Err(KernError::Failure);
+                    result = Err(Error::Failure);
                 }
             }
         }
@@ -1422,9 +1422,9 @@ pub(crate) unsafe fn priority(
 pub(crate) unsafe fn set_name(
     task: *mut Task,
     name: &[u8],
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
@@ -1447,9 +1447,9 @@ pub(crate) unsafe fn set_name(
 pub(crate) unsafe fn set_essential(
     task: *mut Task,
     essential: bool,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     if task.is_null() {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe { (*task).set_essential(essential) };
@@ -1623,11 +1623,11 @@ pub(crate) unsafe fn max_priority(
     max_priority: c_int,
     set_priority: bool,
     change_threads: bool,
-) -> Result<(), KernError> {
+) -> Result<(), Error> {
     let ikot_host = unsafe { extract_host_type(host) };
 
     if ikot_host == IKOT_NONE || task.is_null() || invalid_pri(max_priority) {
-        return Err(KernError::InvalidArgument);
+        return Err(Error::InvalidArgument);
     }
 
     unsafe {
@@ -1635,7 +1635,7 @@ pub(crate) unsafe fn max_priority(
 
         if max_priority < (*task).max_priority && ikot_host != IKOT_HOST_PRIV {
             (*task).lock.unlock();
-            return Err(KernError::NoAccess);
+            return Err(Error::NoAccess);
         }
 
         (*task).max_priority = max_priority;
