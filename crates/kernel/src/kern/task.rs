@@ -290,22 +290,22 @@ static TASK_COLLECT_MAX_RATE: AtomicU32 = AtomicU32::new(0);
 
 /// Returns the running thread's task.
 ///
-/// The task is live for as long as the thread runs. The pointer stays raw:
-/// other threads write the task's fields concurrently.
+/// The task is live for as long as the thread runs. It comes as a pointer,
+/// not a reference: other threads write the task's fields concurrently.
 ///
 /// # Panics
 ///
 /// If the CPU runs no thread: early in boot, before its first one, or after
 /// its processor shut down.
-pub(crate) fn current_task() -> *mut Task {
+pub(crate) fn current_task() -> NonNull<Task> {
     let thread = per_cpu::thread();
     assert!(!thread.is_null(), "current_task: no current thread");
     // SAFETY: a non-null per-CPU thread is the one this CPU runs or is
     // switching to, and a thread is freed only once stopped, so it is live.
-    // Its `task` is written once, before it first runs, and it holds a
-    // reference to that task until it is freed: the task is live while the
-    // thread runs.
-    unsafe { (*thread).task }
+    // Its `task` is written once, before it first runs, with a task that
+    // `Thread::create` checked is not null, and it holds a reference to that
+    // task until it is freed: the task is live while the thread runs.
+    unsafe { NonNull::new_unchecked((*thread).task) }
 }
 
 /// The pages the pmap has resident.
@@ -679,7 +679,7 @@ pub(crate) unsafe fn terminate(task: *mut Task) -> Result<(), Error> {
         return Err(Error::InvalidArgument);
     }
 
-    let cur_task = current_task();
+    let cur_task = current_task().as_ptr();
     let cur_thread = per_cpu::thread();
 
     if task == cur_task {
@@ -1131,7 +1131,7 @@ pub(crate) unsafe fn suspend(task: *mut Task) -> Result<(), Error> {
     unsafe { hold(task) }?;
     unsafe { dowait(task, false) }?;
 
-    if current_task() == task {
+    if current_task().as_ptr() == task {
         let thread = per_cpu::thread();
         // SAFETY: the current thread is live.
         unsafe { Thread::hold(thread) };
@@ -1235,7 +1235,7 @@ unsafe fn assign_task_threads(
             Thread::deallocate(prev_thread);
         }
 
-        if current_task() == task {
+        if current_task().as_ptr() == task {
             Thread::doassign(per_cpu::thread(), new_pset, true);
         }
 
@@ -1336,7 +1336,7 @@ pub(crate) unsafe fn assign(
         return Ok(());
     }
 
-    if current_task() == task {
+    if current_task().as_ptr() == task {
         // SAFETY: the task lock is held, and the current thread is live.
         unsafe {
             (*task).lock.unlock();

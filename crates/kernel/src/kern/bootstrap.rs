@@ -903,7 +903,7 @@ unsafe extern "C" fn user_bootstrap() {
     }
 
     // SAFETY: the current task is live, and nothing is locked.
-    let _ = unsafe { task::suspend(current_task()) };
+    let _ = unsafe { task::suspend(current_task().as_ptr()) };
 
     unsafe {
         (*info).lock.lock();

@@ -302,7 +302,9 @@ pub(crate) unsafe fn insert_intr_entry(
             new.as_ptr().expose_provenance(),
             // SAFETY: the current task is live and its name is
             // NUL-terminated.
-            unsafe { CStrArg::from_ptr((*current_task()).name.as_ptr()) },
+            unsafe {
+                CStrArg::from_ptr((*current_task().as_ptr()).name.as_ptr())
+            },
         );
         // SAFETY: the lock is held, and the entry is unlinked and leaked, so it
         // stays live and in place.

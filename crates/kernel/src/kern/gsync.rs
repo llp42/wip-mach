@@ -395,7 +395,7 @@ pub(crate) fn wait(
         return Err(Error::InvalidAddress);
     }
 
-    let remote = task.as_ptr() != current_task();
+    let remote = task != current_task();
     let mut args = VmArgs {
         object: ptr::null_mut(),
         offset: 0,
@@ -516,7 +516,7 @@ pub(crate) fn wake(
     let (key, bucket_index) =
         prepare_key(unsafe { &*task.as_ptr() }, addr, flags, &mut args)?;
 
-    let remote = current_task() != task.as_ptr();
+    let remote = current_task() != task;
     if remote && flags.contains(Flags::MUTATE) {
         // See `gsync_wait()` on why the reference is taken.
         // SAFETY: the lookup returned `args.object` locked.

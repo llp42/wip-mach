@@ -86,7 +86,7 @@ pub(crate) fn current_space() -> IpcSpace {
     // SAFETY: the running thread's task is live. Task creation sets its
     // `itk_space` to a fresh, non-null space before the task has a thread,
     // and nothing writes the field again.
-    unsafe { IpcSpace::from_raw((*task::current_task()).itk_space) }
+    unsafe { IpcSpace::from_raw((*task::current_task().as_ptr()).itk_space) }
 }
 
 /// Returns the running task's address space.
@@ -101,7 +101,7 @@ pub(crate) fn current_map() -> *mut VmMap {
     // SAFETY: the running thread's task is live. Task creation sets its
     // `map` before the task has a thread, and nothing writes the field
     // again.
-    unsafe { (*task::current_task()).map.cast() }
+    unsafe { (*task::current_task().as_ptr()).map.cast() }
 }
 
 /// The port an invalid name stands for.  A valid name is impossible at every

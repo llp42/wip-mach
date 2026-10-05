@@ -913,7 +913,7 @@ unsafe fn entry_lookup_failed(header: *mut MachMsgHeader, port_name: c_uint) {
         return;
     }
 
-    let task = task::current_task();
+    let task = task::current_task().as_ptr();
     // SAFETY: the task is live and its name array is NUL-terminated within
     // the size the format's precision reads.
     let (name_len, task_name) = unsafe {

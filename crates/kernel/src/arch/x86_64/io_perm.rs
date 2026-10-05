@@ -364,7 +364,7 @@ pub(crate) unsafe fn modify(
     // The C warned that no other CPU running a thread of the task is told of
     // the bitmap change; that gap remains.  The running CPU updates its own
     // TSS, and a context switch to another CPU's thread refreshes that one.
-    if target_task.as_ptr() == task::current_task() {
+    if target_task == task::current_task() {
         // SAFETY: the lock is held, `iopb` is the non-null bitmap the block
         // above established, and `iopb_size` is the byte count
         // `update_ktss_iopb()` copies.

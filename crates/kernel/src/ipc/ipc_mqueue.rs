@@ -285,7 +285,7 @@ pub(crate) unsafe fn send(
         }
     }
 
-    let task = current_task();
+    let task = current_task().as_ptr();
     // SAFETY: the current task is live.
     unsafe { (*task).messages_sent = (*task).messages_sent.wrapping_add(1) };
 
@@ -706,7 +706,7 @@ unsafe fn finish_receive(
     // SAFETY: the port is live and locked.
     unsafe { port.unlock() };
 
-    let task = current_task();
+    let task = current_task().as_ptr();
     // SAFETY: the current task is live.
     unsafe {
         (*task).messages_received = (*task).messages_received.wrapping_add(1);

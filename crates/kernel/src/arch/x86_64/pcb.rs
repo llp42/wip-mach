@@ -834,7 +834,9 @@ pub(crate) unsafe fn pcb_init(parent_task: *mut Task, thread: *mut Thread) {
 
         (*thread).pcb = pcb;
 
-        if !per_cpu::thread().is_null() && parent_task == current_task() {
+        if !per_cpu::thread().is_null()
+            && parent_task == current_task().as_ptr()
+        {
             fpu::fpinherit(per_cpu::thread(), thread);
         }
     }

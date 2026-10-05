@@ -390,7 +390,7 @@ pub(crate) unsafe fn retrieve_thread_self_fast(
 ///
 /// Must be called with nothing locked.
 pub(crate) unsafe fn mach_task_self() -> c_uint {
-    let task = current_task();
+    let task = current_task().as_ptr();
     let sright = unsafe { retrieve_task_self_fast(task) };
 
     // SAFETY: the current task's space is live, and `copyout_send` handles
@@ -448,7 +448,7 @@ pub(crate) unsafe extern "C" fn mach_thread_self_entry() -> c_uint {
 ///
 /// Must be called with nothing locked.
 pub(crate) unsafe fn mach_reply_port() -> c_uint {
-    let task = current_task();
+    let task = current_task().as_ptr();
     let Some(space) = IpcSpace::new(unsafe { (*task).itk_space }) else {
         return MACH_PORT_NULL;
     };

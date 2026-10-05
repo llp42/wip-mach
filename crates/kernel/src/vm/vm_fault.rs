@@ -340,7 +340,7 @@ pub(crate) unsafe fn wire_fast(
 ) -> bool {
     unsafe {
         VM_STAT.faults += 1;
-        (*current_task()).faults += 1;
+        (*current_task().as_ptr()).faults += 1;
     }
 
     if unsafe { (*entry).is_sub_map() } {
@@ -611,7 +611,7 @@ impl FaultState {
                 VM_PAGE_QUEUE_LOCK.lock();
                 if (*self.m).is_inactive() {
                     VM_STAT.reactivations += 1;
-                    (*current_task()).reactivations += 1;
+                    (*current_task().as_ptr()).reactivations += 1;
                 }
                 vm_page::queues_remove(self.m);
                 VM_PAGE_QUEUE_LOCK.unlock();
@@ -686,7 +686,7 @@ impl FaultState {
                 (*self.object).lock.unlock();
                 vm_resident::zero_fill(real_m);
                 VM_STAT.zero_fill_count += 1;
-                (*current_task()).zero_fills += 1;
+                (*current_task().as_ptr()).zero_fills += 1;
                 (*self.object).lock.lock();
                 pmap_clear_modify((*self.m).phys_addr);
             }
@@ -960,7 +960,7 @@ impl FaultState {
 
         unsafe {
             VM_STAT.pageins += 1;
-            (*current_task()).pageins += 1;
+            (*current_task().as_ptr()).pageins += 1;
         }
         // SAFETY: the pager port and its request are live, and the busy
         // page holds the object's paging reference.
@@ -1092,7 +1092,7 @@ impl FaultState {
                 (*self.object).lock.unlock();
                 vm_resident::zero_fill(NonNull::new_unchecked(self.m));
                 VM_STAT.zero_fill_count += 1;
-                (*current_task()).zero_fills += 1;
+                (*current_task().as_ptr()).zero_fills += 1;
                 (*self.object).lock.lock();
                 pmap_clear_modify((*self.m).phys_addr);
             }
@@ -1162,7 +1162,7 @@ impl FaultState {
 
             unsafe {
                 VM_STAT.cow_faults += 1;
-                (*current_task()).cow_faults += 1;
+                (*current_task().as_ptr()).cow_faults += 1;
             }
             self.object = self.first_object;
             self.offset = self.first_offset;
@@ -1461,7 +1461,7 @@ pub(crate) unsafe fn fault_page(
     } else {
         unsafe {
             VM_STAT.faults += 1;
-            (*current_task()).faults += 1;
+            (*current_task().as_ptr()).faults += 1;
         }
 
         if VM_FAULT_DIRTY_HANDLING != 0 && !fault_type.contains(VmProt::WRITE)

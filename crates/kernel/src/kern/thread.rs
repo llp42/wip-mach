@@ -1655,7 +1655,7 @@ impl Thread {
 
             let cur_thread = per_cpu::thread();
             if !cur_thread.is_null() {
-                let cur_task = current_task();
+                let cur_task = current_task().as_ptr();
                 if cur_task != kernel_task()
                     && parent_task == cur_task
                     && (*cur_thread).vm_privilege != 0
@@ -1888,7 +1888,7 @@ impl Thread {
         }
 
         unsafe {
-            let cur_task = current_task();
+            let cur_task = current_task().as_ptr();
             (*cur_task).lock.lock();
             let s = spl::splsched();
             if thread.addr() < cur_thread.addr() {

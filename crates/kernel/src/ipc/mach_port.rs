@@ -214,7 +214,7 @@ fn printf_once(printed: &AtomicBool, message: &CStr) {
 ///
 /// `space` must be live.
 unsafe fn report_bogus_port(space: IpcSpace, name: c_uint, action: &CStr) {
-    let task = current_task();
+    let task = current_task().as_ptr();
     if !port_name_valid(name) || space.as_ptr() != unsafe { (*task).itk_space }
     {
         return;
@@ -757,7 +757,7 @@ pub(crate) unsafe fn mod_refs(
     let entry = match unsafe { lookup_write(space, name) } {
         Ok(entry) => entry,
         Err(error) => {
-            let task = current_task();
+            let task = current_task().as_ptr();
             if port_name_valid(name)
                 && space.as_ptr() == unsafe { (*task).itk_space }
             {
