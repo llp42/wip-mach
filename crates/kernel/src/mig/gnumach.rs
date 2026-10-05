@@ -176,33 +176,23 @@ pub unsafe extern "C" fn gsync_wake(
     }
 }
 
-/// Moves the waiters on `src_addr` to `dst_addr`, waking one first when
-/// `wake_one` is set.
+/// Fails: moving waiters from one address to another is not implemented.
+///
+/// The call is a simple routine, so no caller sees the error.
 ///
 /// # Safety
 ///
-/// `task` must be null or a live task, as MIG's server entry passes it.
+/// The MIG server calls this with the task it converted from the request
+/// port; nothing here reads or writes any argument.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gsync_requeue(
-    task: *mut Task,
-    src_addr: VmOffset,
-    dst_addr: VmOffset,
-    wake_one: c_int,
-    flags: c_int,
+    _task: *mut Task,
+    _src_addr: VmOffset,
+    _dst_addr: VmOffset,
+    _wake_one: c_int,
+    _flags: c_int,
 ) -> c_int {
-    let Some(task) = NonNull::new(task) else {
-        return c_int::from(Error::InvalidTask);
-    };
-    match gsync::requeue(
-        task,
-        src_addr,
-        dst_addr,
-        wake_one != 0,
-        Flags::from_bits(flags),
-    ) {
-        Ok(()) => 0,
-        Err(error) => c_int::from(error),
-    }
+    c_int::from(Error::NotImplemented)
 }
 
 /// Wires the present or future mappings of `map`, per `flags`.

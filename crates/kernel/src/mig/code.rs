@@ -375,7 +375,7 @@ impl From<KernelError> for c_int {
     fn from(error: KernelError) -> Self {
         match error {
             KernelError::InvalidArgument => KERN_INVALID_ARGUMENT,
-            KernelError::Failure => KERN_FAILURE,
+            KernelError::Failure | KernelError::NotImplemented => KERN_FAILURE,
             KernelError::ResourceShortage => KERN_RESOURCE_SHORTAGE,
             KernelError::InvalidHost => KERN_INVALID_HOST,
             KernelError::InvalidTask => KERN_INVALID_TASK,

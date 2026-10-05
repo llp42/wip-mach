@@ -12,6 +12,15 @@ deletes its entry; a change that opens one adds it.
 - **Done when**: those three files are gone, and no `spl` identifier
   remains in `crates/`.
 
+## `gsync_requeue` is not implemented
+
+- **ADR**: ADR 0002.
+- **Where**: `gsync_requeue` in `mig/gnumach.rs` in `crates/kernel/src`
+  fails with `Error::NotImplemented` and moves no waiter. The call is a
+  simple routine, so its caller never sees the error.
+- **Done when**: `gsync_requeue` moves the waiters as GNU Mach does,
+  holding at most one bucket lock at a time (ADR 0036).
+
 ## A waker cancels the sleeper's timeout
 
 - **ADR**: ADR 0028.

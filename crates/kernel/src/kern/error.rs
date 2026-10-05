@@ -22,6 +22,8 @@ pub enum Error {
     InvalidArgument,
     /// The object's current state does not allow the call.
     Failure,
+    /// The kernel does not implement the call.
+    NotImplemented,
     /// A kernel resource could not be allocated.
     ResourceShortage,
     /// The host argument is not the host, or not the privileged host.
