@@ -116,12 +116,7 @@ pub(crate) unsafe fn kbdopen(
     _flags: c_int,
     _ior: *mut IoReq,
 ) -> IoResult {
-    // SAFETY: the keyboard device is opened with `spltty` raised.
-    let sp = unsafe { spl::spltty() };
-    // The kd driver initializes at `spltty`.
     crate::arch::x86_64::kd::kdinit();
-    // SAFETY: `sp` is this function's `spltty()` result.
-    unsafe { spl::splx(sp) };
     kbdinit();
     Ok(DeviceSuccess::Success)
 }

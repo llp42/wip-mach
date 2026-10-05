@@ -15,15 +15,14 @@ use super::{
     ALT_STATE, Ack, CTRL_STATE, K_ACKSC, K_ALTSC, K_AUX_OBUF_FUL, K_CLCKSC,
     K_CMD, K_CMD_LEDS, K_CTLSC, K_DELSC, K_DONE, K_EXTEND, K_HOMESC,
     K_IBUF_FUL, K_LSHSC, K_NLCKSC, K_OBUF_FUL, K_RDWR, K_RESEND, K_RSHSC,
-    K_SCAN, K_SLCKSC, K_STATUS, K_UP, KB_EVENT, KC_CMD_WRITE, KS_ALTED,
-    KS_CLKED, KS_CTLED, KS_NLKED, KS_NORMAL, KS_SHIFTED, KbEntry, NORM_STATE,
-    NUMKEYS, NUMOUTPUT, SHIFT_ALT, SHIFT_STATE, charidx, kb_mode, kd,
-    kdreboot, state, tty,
+    K_SCAN, K_SLCKSC, K_STATUS, K_UP, KB_EVENT, KC_CMD_WRITE, KEYBOARD,
+    KS_ALTED, KS_CLKED, KS_CTLED, KS_NLKED, KS_NORMAL, KS_SHIFTED, KbEntry,
+    NORM_STATE, NUMKEYS, NUMOUTPUT, SHIFT_ALT, SHIFT_STATE, charidx, kb_mode,
+    kd, kdreboot, state, tty,
 };
 use crate::arch::x86_64::kd_event::kd_enqsc;
 use crate::arch::x86_64::kd_mouse;
 use crate::arch::x86_64::pio::Port;
-use crate::arch::x86_64::spl;
 use crate::kern::console::kprint;
 use core::ffi::{c_int, c_uint};
 use core::sync::atomic::Ordering;
@@ -112,20 +111,22 @@ pub(crate) const fn state2idx(state_in: c_uint, extended: bool) -> usize {
     charidx(state_idx)
 }
 
-/// Wait for the input buffer and send a byte to the keyboard.
+/// Wait for the input buffer and send a byte to the keyboard.  The caller
+/// holds [`KEYBOARD`].
 pub(crate) fn senddata(ch: u8) {
     while Port::new(K_STATUS).read_u8() & K_IBUF_FUL != 0 {}
     Port::new(K_RDWR).write_u8(ch);
     state().last_sent = ch;
 }
 
-/// Wait for the input buffer and send a command to the keyboard.
+/// Wait for the input buffer and send a command to the keyboard.  The caller
+/// holds [`KEYBOARD`].
 pub(crate) fn sendcmd(ch: u8) {
     while Port::new(K_STATUS).read_u8() & K_IBUF_FUL != 0 {}
     Port::new(K_CMD).write_u8(ch);
 }
 
-/// Wait for a data byte from the keyboard.
+/// Wait for a data byte from the keyboard.  The caller holds [`KEYBOARD`].
 pub(crate) fn getdata() -> u8 {
     while Port::new(K_STATUS).read_u8() & K_OBUF_FUL == 0 {}
     Port::new(K_RDWR).read_u8()
@@ -154,8 +155,9 @@ pub(crate) fn resend() {
     }
 }
 
-/// Start setting the LEDs.
+/// Start setting the LEDs; the interrupt handler finishes on the ACK.
 pub(crate) fn set_leds1(val: u8) {
+    let _keyboard = KEYBOARD.lock();
     if state().kd_ack != Ack::NotWaiting {
         return;
     }
@@ -169,7 +171,8 @@ pub(crate) fn set_leds2() {
     senddata(state().kd_nextled);
 }
 
-/// Sets the LEDs without interrupts.
+/// Sets the LEDs, polling for each ACK.  The caller holds [`KEYBOARD`], which
+/// keeps the interrupt handler from taking the ACKs.
 pub(crate) fn cn_set_leds(val: u8) {
     senddata(K_CMD_LEDS);
     let _ = getdata(); // assume ACK
@@ -177,7 +180,7 @@ pub(crate) fn cn_set_leds(val: u8) {
     let _ = getdata(); // assume ACK
 }
 
-/// Reads a key map entry.
+/// Reads a key map entry.  The caller holds [`KEYBOARD`].
 fn map_get(row: usize, col: usize) -> [u8; NUMOUTPUT] {
     // SAFETY: the caller checks the indexes.
     unsafe {
@@ -189,7 +192,7 @@ fn map_get(row: usize, col: usize) -> [u8; NUMOUTPUT] {
     }
 }
 
-/// Writes a key map entry.
+/// Writes a key map entry.  The caller holds [`KEYBOARD`].
 fn map_set(row: usize, col: usize, value: [u8; NUMOUTPUT]) {
     // SAFETY: the caller checks the indexes.
     unsafe {
@@ -286,6 +289,7 @@ fn checkmagic(scancode: u8) -> bool {
 
 /// Reads the keyboard controller and queues what it read.
 fn intr() {
+    let _keyboard = KEYBOARD.lock();
     if !state().kd_initialized {
         return;
     }
@@ -386,20 +390,20 @@ fn intr() {
 ///
 /// # Safety
 ///
-/// Entered from the interrupt path at `spltty`.
+/// Entered from the interrupt path.
 pub(crate) unsafe extern "C" fn kdintr(_vec: c_int) {
     intr();
 }
 
 /// Wait for the input buffer and write the controller command register, which
-/// `kd_mouse.rs` uses for its PS/2 sequences.
+/// `kd_mouse.rs` uses for its PS/2 sequences.  The caller holds [`KEYBOARD`].
 pub(crate) fn cmdreg_write(val: c_int) {
     sendcmd(KC_CMD_WRITE);
     senddata(val as u8);
 }
 
 /// Drain pending keyboard bytes, printing them; `kd_mouse.rs` closes a PS/2
-/// mouse with this.
+/// mouse with this.  The caller holds [`KEYBOARD`].
 pub(crate) fn mouse_drain() {
     while Port::new(K_STATUS).read_u8() & K_IBUF_FUL != 0 {}
     let mut i = Port::new(K_STATUS).read_u8();
@@ -416,27 +420,17 @@ pub(crate) fn mouse_drain() {
 
 /// Reads a key map entry into `kb`.
 pub(crate) fn entry_get(kb: &mut KbEntry) {
-    // SAFETY: the caller runs in kernel mode with `%gs` based at the
-    // running CPU's per-CPU area.
-    let o_pri = unsafe { spl::spltty() };
+    let _keyboard = KEYBOARD.lock();
     kb.kb_value =
         map_get(kb.kb_index as usize, charidx(c_int::from(kb.kb_state)));
-    // SAFETY: the caller runs in kernel mode with `%gs` based at the
-    // running CPU's per-CPU area.
-    unsafe { spl::splx(o_pri) };
 }
 
 /// Writes a key map entry from `kb`.
 pub(crate) fn entry_set(kb: KbEntry) {
-    // SAFETY: the caller runs in kernel mode with `%gs` based at the
-    // running CPU's per-CPU area.
-    let o_pri = unsafe { spl::spltty() };
+    let _keyboard = KEYBOARD.lock();
     map_set(
         kb.kb_index as usize,
         charidx(c_int::from(kb.kb_state)),
         kb.kb_value,
     );
-    // SAFETY: the caller runs in kernel mode with `%gs` based at the
-    // running CPU's per-CPU area.
-    unsafe { spl::splx(o_pri) };
 }

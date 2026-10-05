@@ -12,8 +12,8 @@
 use super::keymap::KEY_MAP;
 use super::{
     CN_INTERNAL, ConsDev, K_ACKSC, K_AUX_OBUF_FUL, K_CR, K_ESC, K_EXTEND,
-    K_LF, K_OBUF_FUL, K_RDWR, K_RESEND, K_SCAN, K_STATUS, K_UP, NUMKEYS, esc,
-    kd, kd_belloff, kd_bellon, kdinit, keyboard, state,
+    K_LF, K_OBUF_FUL, K_RDWR, K_RESEND, K_SCAN, K_STATUS, K_UP, KEYBOARD,
+    NUMKEYS, esc, kd, kd_belloff, kd_bellon, kdinit, keyboard, state,
 };
 use crate::arch::x86_64::pio::Port;
 use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
@@ -48,9 +48,11 @@ pub(crate) unsafe fn kdcninit(_cp: *mut ConsDev) {
 ///
 /// # Safety
 ///
-/// The caller must hold the console lock and interrupts must be off while the
-/// controller is polled.
+/// The caller must hold the console lock.  The keyboard lock keeps the
+/// interrupt handler from taking the character while the controller is
+/// polled.
 pub(crate) unsafe fn kdcngetc(_dev: u16, wait: c_int) -> c_int {
+    let _keyboard = KEYBOARD.lock();
     if wait != 0 {
         loop {
             let c = maygetc();
@@ -80,6 +82,7 @@ pub(crate) unsafe fn kdcnputc(_dev: u16, c: c_int) {
 }
 
 /// Reads a character from the keyboard controller without waiting, or `-1`.
+/// The caller holds [`KEYBOARD`].
 pub(crate) fn maygetc() -> c_int {
     if !state().kd_initialized {
         return -1;

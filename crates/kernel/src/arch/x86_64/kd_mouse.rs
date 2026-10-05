@@ -14,6 +14,7 @@ use super::io_req::{
 use crate::arch::x86_64::com;
 use crate::arch::x86_64::ioapic;
 use crate::arch::x86_64::irq;
+use crate::arch::x86_64::kd::{KEYBOARD, keyboard};
 use crate::arch::x86_64::pio::Port;
 use crate::arch::x86_64::spl;
 use crate::device::ds_routines::{device_read_alloc, ds_read_done, iodone};
@@ -231,10 +232,7 @@ fn kd_open(s: &mut State, mouse_pic: c_int) {
     // SAFETY: raising to `splhigh` has no precondition.
     let sp = unsafe { spl::splhi() };
     s.oldvect = irq::handler(mouse_pic);
-    irq::set_handler(
-        mouse_pic,
-        Some(crate::arch::x86_64::kd::keyboard::kdintr),
-    );
+    irq::set_handler(mouse_pic, Some(keyboard::kdintr));
     ioapic::unmask(mouse_pic);
     // SAFETY: `sp` is the level `splhi()` returned.
     unsafe { spl::splx(sp) };
@@ -265,8 +263,9 @@ fn kd_close(s: &State, mouse_pic: c_int) {
     unsafe { spl::splx(sp) };
 }
 
-/// Sends a byte to the PS/2 mouse.
+/// Sends a byte to the PS/2 mouse, through the keyboard controller.
 fn write_char(ch: u8) {
+    let _keyboard = KEYBOARD.lock();
     while Port::new(K_STATUS).read_u8() & K_IBUF_FUL != 0 {
         core::hint::spin_loop();
     }
@@ -310,8 +309,11 @@ fn ps2_open(s: &mut State, _dev: DevT) {
     let sp = unsafe { spl::spltty() };
     s.lastbuttons = 0;
     s.mouse_char_cmd = true;
-    crate::arch::x86_64::kd::keyboard::sendcmd(0xa8);
-    crate::arch::x86_64::kd::keyboard::cmdreg_write(0x47);
+    {
+        let _keyboard = KEYBOARD.lock();
+        keyboard::sendcmd(0xa8);
+        keyboard::cmdreg_write(0x47);
+    }
     read_reset(s);
     write_char(0xff);
     if read_char(s) != 0xfa {
@@ -352,8 +354,11 @@ fn ps2_close(s: &mut State, _dev: DevT) {
         let _ = read_char(s);
         let _ = read_char(s);
     }
-    crate::arch::x86_64::kd::keyboard::sendcmd(0xa7);
-    crate::arch::x86_64::kd::keyboard::cmdreg_write(0x65);
+    {
+        let _keyboard = KEYBOARD.lock();
+        keyboard::sendcmd(0xa7);
+        keyboard::cmdreg_write(0x65);
+    }
     // SAFETY: `sp` is the level `spltty()` returned.
     unsafe { spl::splx(sp) };
 }
@@ -622,7 +627,8 @@ pub(crate) unsafe fn mouseclose(dev: DevT, _flags: c_int) {
                 i -= 1;
                 core::hint::black_box(i);
             }
-            crate::arch::x86_64::kd::keyboard::mouse_drain();
+            let _keyboard = KEYBOARD.lock();
+            keyboard::mouse_drain();
         }
         _ => {}
     }

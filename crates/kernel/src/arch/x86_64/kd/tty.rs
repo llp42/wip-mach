@@ -9,7 +9,7 @@
 //! The console tty and the kd device entry points: open/close/read/write,
 //! get/set status, mmap and the line-discipline start.
 
-use super::{KbEntry, console, esc, kd, kdinit, keyboard};
+use super::{KEYBOARD, KbEntry, console, esc, kd, kdinit, keyboard};
 use crate::arch::types::VmOffset;
 use crate::arch::vm_param::PAGE_SHIFT;
 use crate::arch::x86_64::io_req::{DevT, IoReq};
@@ -54,20 +54,24 @@ fn ldisc(tp: &Tty) -> Option<&'static LdiscSwitch> {
     LINESW.get(line)
 }
 
-/// Feed one character to the line discipline.
+/// Feed one character to the line discipline, under the tty lock.
 pub(crate) fn line_rint(c: u8) {
     let tp = tty();
     let Some(rint) = ldisc(tp).and_then(|d| d.l_rint) else {
         return;
     };
-    // SAFETY: the discipline is `chario::input()`, and the tty is up once the
-    // console is open.
-    unsafe { rint(c_uint::from(c), tp) };
+    tp.t_lock.lock();
+    // SAFETY: the discipline is `chario::input()`, the tty is up once the
+    // console is open, and its lock is held for the call and released after.
+    unsafe {
+        rint(c_uint::from(c), tp);
+        tp.t_lock.unlock();
+    }
 }
 
 /// Allocate the character buffers through `ttychars()`.
 pub(crate) fn ttychars_init() {
-    // SAFETY: called from kdinit() at SPLKD.
+    // SAFETY: called from kdinit() with no lock held, as the allocation needs.
     unsafe { ttychars(tty()) };
 }
 
@@ -85,6 +89,9 @@ pub(crate) unsafe fn kdopen(
     flag: c_int,
     ior: *mut IoReq,
 ) -> IoResult {
+    // The keyboard comes up before the tty lock is taken: the keyboard
+    // interrupt hands characters to the tty under that lock.
+    kdinit();
     let tp = tty();
     tp.t_lock.lock();
     if tp.t_state & (TS_ISOPEN | TS_WOPEN) == 0 {
@@ -99,7 +106,6 @@ pub(crate) unsafe fn kdopen(
         tp.t_ospeed = B115200;
         tp.t_ispeed = B115200;
         tp.t_flags = KD_TTY_FLAGS;
-        kdinit();
     }
     tp.t_state |= TS_CARR_ON;
     // SAFETY: the tty lock was taken above.
@@ -200,8 +206,12 @@ pub(crate) unsafe fn kdgetstat(
         if unsafe { *count } < 1 {
             return Err(DeviceError::InvalidOperation);
         }
+        let bits = {
+            let _keyboard = KEYBOARD.lock();
+            kd().state_bits()
+        };
         unsafe {
-            *data = kd().state_bits();
+            *data = bits;
             *count = 1;
         }
         Ok(())

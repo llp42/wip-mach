@@ -19,10 +19,12 @@ pub mod tty;
 use crate::arch::x86_64::ioapic;
 use crate::arch::x86_64::locore;
 use crate::arch::x86_64::pio::Port;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::utils::delay::delay;
 use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_short};
 use core::mem::{align_of, offset_of, size_of};
+use lock::IrqSpinLock;
 
 /// The number of scancodes the key map covers.
 pub(crate) const NUMKEYS: usize = 89;
@@ -324,6 +326,13 @@ impl Kd {
 
 static KD: SyncCell<Kd> = SyncCell(UnsafeCell::new(Kd::new()));
 
+/// Guards the keyboard controller's ports, the key map and the keyboard
+/// state: the scan-code decoding, the modifier bits, the keyboard mode and
+/// the pending command.  The interrupt handler holds it while it decodes a
+/// scan code and hands the result on.
+pub(crate) static KEYBOARD: IrqSpinLock<(), MachPlatform> =
+    IrqSpinLock::new(());
+
 /// The one state object.
 pub(crate) fn kd() -> &'static mut Kd {
     // SAFETY: the driver runs at SPLKD; nothing else accesses `KD`.
@@ -335,46 +344,51 @@ pub(crate) fn state() -> &'static mut State {
     &mut kd().st
 }
 
-/// The current keyboard mode.
+/// The current keyboard mode.  The caller holds [`KEYBOARD`].
 pub(crate) fn kb_mode() -> c_int {
     kd().kb_mode()
 }
 
 /// Set the keyboard mode.
 pub(crate) fn set_kb_mode(mode: c_int) {
+    let _keyboard = KEYBOARD.lock();
     kd().set_kb_mode(mode);
 }
 
-/// Sets up the display and the keyboard; interrupts are assumed disabled, and
-/// the call is idempotent.
+/// Sets up the display and the keyboard; the call is idempotent.  The
+/// keyboard lock keeps the interrupt handler off the controller while it is
+/// programmed.
 pub(crate) fn kdinit() {
-    if state().kd_initialized {
-        return;
-    }
     {
-        let s = state();
-        s.esc_spt = 0;
-        s.kd_attr = KA_NORMAL;
-        s.kd_attrflags = 0;
-        s.kd_color = KA_NORMAL;
+        let _keyboard = KEYBOARD.lock();
+        if state().kd_initialized {
+            return;
+        }
+        {
+            let s = state();
+            s.esc_spt = 0;
+            s.kd_attr = KA_NORMAL;
+            s.kd_attrflags = 0;
+            s.kd_color = KA_NORMAL;
+        }
+        display::xga_init();
+
+        if Port::new(K_STATUS).read_u8() & K_OBUF_FUL != 0 {
+            let _ = Port::new(K_RDWR).read_u8();
+        }
+
+        keyboard::sendcmd(KC_CMD_READ);
+        let mut k_comm = keyboard::getdata();
+        k_comm &= !K_CB_DISBLE;
+        k_comm |= K_CB_ENBLIRQ;
+        keyboard::sendcmd(KC_CMD_WRITE);
+        keyboard::senddata(k_comm);
+        ioapic::unmask(KBD_IRQ);
+        state().kd_initialized = true;
+
+        kd().set_state_bits(KS_NORMAL);
+        keyboard::cn_set_leds(KS_NORMAL as u8);
     }
-    display::xga_init();
-
-    if Port::new(K_STATUS).read_u8() & K_OBUF_FUL != 0 {
-        let _ = Port::new(K_RDWR).read_u8();
-    }
-
-    keyboard::sendcmd(KC_CMD_READ);
-    let mut k_comm = keyboard::getdata();
-    k_comm &= !K_CB_DISBLE;
-    k_comm |= K_CB_ENBLIRQ;
-    keyboard::sendcmd(KC_CMD_WRITE);
-    keyboard::senddata(k_comm);
-    ioapic::unmask(KBD_IRQ);
-    state().kd_initialized = true;
-
-    kd().set_state_bits(KS_NORMAL);
-    keyboard::cn_set_leds(KS_NORMAL as u8);
 
     tty::ttychars_init();
 }
