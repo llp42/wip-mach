@@ -45,10 +45,8 @@ use crate::kern::syscall_subr::depress_abort;
 use crate::kern::task::{Task, add_time64, current_task, kernel_task};
 use crate::kern::timer::{TIMER_RATE, Timer, TimerSave, read_times};
 use crate::mig::time_value::TimeValue64;
-use crate::utils::cell::SyncCell;
 use crate::vm::vm_map::{VmMap, round_page};
 use collections::tail_queue::{self, TailQueue};
-use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_long, c_uint, c_void};
 use core::mem::{MaybeUninit, offset_of};
 use core::pin::Pin;
@@ -412,8 +410,7 @@ impl Thread {
         thread
     }
 
-    /// Sets up the thread and stack caches, the template, and the stack
-    /// lock.
+    /// Sets up the thread and stack caches and the template.
     ///
     /// # Safety
     ///
@@ -436,7 +433,6 @@ impl Thread {
                 CacheInitFlags::EMPTY,
             );
             (*ptr::addr_of_mut!(THREAD_TEMPLATE)).write(Self::new());
-            STACK_LOCK_DATA.init();
             crate::arch::x86_64::pcb::pcb_module_init();
         }
     }
@@ -1276,10 +1272,9 @@ impl Thread {
         &mut self,
         resume: StackResume,
     ) -> bool {
-        STACK_LOCK_DATA.lock();
-        // SAFETY: the caller is at splsched and the list lock is held.
-        let stack = unsafe { stack_free_list().pop() };
-        STACK_LOCK_DATA.unlock();
+        // SAFETY: every stack on the list is a live cache object, as `push`
+        // requires.
+        let stack = unsafe { STACK_FREE.lock().pop() };
 
         let stack = if stack != 0 {
             stack
@@ -1313,15 +1308,9 @@ impl Thread {
     /// The caller must hold no spin lock, because the cache allocation may
     /// block, and `resume` must be a stack continuation.
     pub(crate) unsafe fn stack_alloc(&mut self, resume: StackResume) {
-        // SAFETY: the free list is touched only between `splsched()` and the
-        // matching `splx()`.
-        let s = unsafe { spl::splsched() };
-        STACK_LOCK_DATA.lock();
-        // SAFETY: the level is splsched and the list lock is held.
-        let stack = unsafe { stack_free_list().pop() };
-        STACK_LOCK_DATA.unlock();
-        // SAFETY: `s` is the level `splsched()` returned.
-        unsafe { spl::splx(s) };
+        // SAFETY: every stack on the list is a live cache object, as `push`
+        // requires.
+        let stack = unsafe { STACK_FREE.lock().pop() };
 
         let stack = if stack == 0 {
             let fresh =
@@ -1358,11 +1347,8 @@ impl Thread {
         };
 
         if stack != privilege {
-            STACK_LOCK_DATA.lock();
-            // SAFETY: the caller is at splsched, the list lock is held, and
-            // the detached stack is on no list.
-            unsafe { stack_free_list().push(stack) };
-            STACK_LOCK_DATA.unlock();
+            // SAFETY: the detached stack is a live cache object on no list.
+            unsafe { STACK_FREE.lock().push(stack) };
         }
     }
 
@@ -1372,35 +1358,24 @@ impl Thread {
     ///
     /// The caller must hold no spin lock.
     pub(crate) unsafe fn stack_collect() {
-        // SAFETY: `splsched()` is the real asm routine; at that level the lock
-        // serializes the list, and `stack_finalize()` and `kmem_cache_free()`
-        // run with both the lock and the raised level released, so they may
-        // block.
-        unsafe {
-            let mut s = spl::splsched();
-            STACK_LOCK_DATA.lock();
-            while stack_free_list().count
-                > STACK_FREE_LIMIT.load(Ordering::Relaxed)
-            {
-                // A count above the limit means the list is not empty.
-                let stack = stack_free_list().pop();
-                STACK_LOCK_DATA.unlock();
-                spl::splx(s);
-
-                stack_finalize(stack);
-                // SAFETY: `THREAD_STACK_CACHE` is the cache the stack came
-                // from, and nothing references it after the finalize.
-                if let Some(stack) =
-                    NonNull::new(with_exposed_provenance_mut::<u8>(stack))
-                {
-                    (*ptr::addr_of_mut!(THREAD_STACK_CACHE)).free(stack);
+        let mut stacks = STACK_FREE.lock();
+        while stacks.count > STACK_FREE_LIMIT.load(Ordering::Relaxed) {
+            // SAFETY: every stack on the list is a live cache object, and a
+            // count above the limit means the list is not empty.
+            let stack = unsafe { stacks.pop() };
+            // The list's lock is released for the free, which may block.
+            stacks.unlocked(|| {
+                // SAFETY: the stack is off the list, a whole object of
+                // `THREAD_STACK_CACHE`, and nothing else references it.
+                unsafe {
+                    stack_finalize(stack);
+                    if let Some(stack) =
+                        NonNull::new(with_exposed_provenance_mut::<u8>(stack))
+                    {
+                        (*ptr::addr_of_mut!(THREAD_STACK_CACHE)).free(stack);
+                    }
                 }
-
-                s = spl::splsched();
-                STACK_LOCK_DATA.lock();
-            }
-            STACK_LOCK_DATA.unlock();
-            spl::splx(s);
+            });
         }
     }
 
@@ -1548,24 +1523,10 @@ fn reaper_event() -> *mut c_void {
     ptr::from_ref(&REAPER_QUEUE).cast_mut().cast()
 }
 
-/// Protects the cached-stack free list, at splsched.
-static STACK_LOCK_DATA: SimpleLock = SimpleLock::new();
-
-/// The cached stacks, under [`STACK_LOCK_DATA`] at splsched.
-static STACK_FREE: SyncCell<StackFreeList> =
-    SyncCell(UnsafeCell::new(StackFreeList { head: 0, count: 0 }));
-
-/// The live cached-stack free list.
-///
-/// # Safety
-///
-/// The caller must hold `STACK_LOCK_DATA` at splsched for as long as it uses
-/// the list.
-unsafe fn stack_free_list() -> &'static mut StackFreeList {
-    // SAFETY: the lock the caller holds keeps anything else from reaching the
-    // list.
-    unsafe { &mut *STACK_FREE.0.get() }
-}
+/// The cached stacks, under an irq spin lock, since the scheduler frees a
+/// stack at splsched.
+static STACK_FREE: IrqSpinLock<StackFreeList, MachPlatform> =
+    IrqSpinLock::new(StackFreeList { head: 0, count: 0 });
 
 /// The cached-stack high-water mark a debugger may lower or raise.
 static STACK_FREE_LIMIT: AtomicU32 = AtomicU32::new(1);
@@ -2662,38 +2623,6 @@ pub(crate) unsafe fn stack_finalize(stack: VmOffset) {
     STACK_MAX_USAGE.fetch_max(used, Ordering::Relaxed);
 }
 
-/// Walks the cached stacks, raising `maxusage`.
-///
-/// # Safety
-///
-/// The caller must hold no lock: the routine takes `STACK_LOCK_DATA` at
-/// splsched.
-unsafe fn stack_statistics(mut maxusage: VmSize) -> (c_uint, VmSize) {
-    // SAFETY: `STACK_LOCK_DATA` is the lock `Thread::init` built; the free
-    // list holds only whole cache objects.
-    unsafe {
-        let s = spl::splsched();
-        STACK_LOCK_DATA.lock();
-        let list = stack_free_list();
-
-        if STACK_CHECK_USAGE.load(Ordering::Relaxed) != 0 {
-            let mut stack = list.head;
-            while stack != 0 {
-                let usage = stack_usage(stack);
-                if usage > maxusage {
-                    maxusage = usage;
-                }
-                stack = stack_next(stack);
-            }
-        }
-
-        let total = list.count;
-        STACK_LOCK_DATA.unlock();
-        spl::splx(s);
-        (total, maxusage)
-    }
-}
-
 /// Fills a fresh stack with the usage marker when the check is on.
 ///
 /// # Safety
@@ -2728,8 +2657,24 @@ pub(crate) unsafe fn host_stack_usage(
         return Err(Error::InvalidHost);
     }
 
-    let maxusage = STACK_MAX_USAGE.load(Ordering::Relaxed);
-    let (total, maxusage) = unsafe { stack_statistics(maxusage) };
+    let mut maxusage = STACK_MAX_USAGE.load(Ordering::Relaxed);
+    let stacks = STACK_FREE.lock();
+    if STACK_CHECK_USAGE.load(Ordering::Relaxed) != 0 {
+        let mut stack = stacks.head;
+        while stack != 0 {
+            // SAFETY: every stack on the list is a live cache object, as
+            // `push` requires.
+            unsafe {
+                let usage = stack_usage(stack);
+                if usage > maxusage {
+                    maxusage = usage;
+                }
+                stack = stack_next(stack);
+            }
+        }
+    }
+    let total = stacks.count;
+    drop(stacks);
 
     // The C multiplied the `unsigned` count by a `vm_size_t`; the count fits
     // `usize` and the product wraps in the C too.
