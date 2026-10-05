@@ -105,7 +105,8 @@ number is never reused, so the list has gaps.
 - [0033 — No priority inheritance, no priority ordering](docs/adr/0033-no-priority-inheritance-no-priority-ordering.md)
   — without preemption, inversion can hardly happen.
 - [0034 — The lock set follows Zircon](docs/adr/0034-the-lock-set-follows-zircon.md)
-  — no RCU, sequence or spinning reader-writer locks in the crate.
+  — no RCU, sequence or spinning reader-writer locks, in the crate or
+  the kernel.
 - [0035 — One generic lock and guard over raw-lock traits](docs/adr/0035-one-generic-lock-and-guard.md)
   — `Lock<R, T>`; the guard is the only way to the data.
 - [0036 — A thread holds at most one lock of a class at a time](docs/adr/0036-a-thread-holds-at-most-one-lock-of-a-class.md)

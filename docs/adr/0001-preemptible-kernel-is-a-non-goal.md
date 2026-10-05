@@ -18,9 +18,9 @@ not kernel preemption.
 
 ## Consequences
 
-- Locks, RCU quiescent states, callouts and irq-quiet sections are
-  sized for a CPU that keeps its kernel context until the thread blocks
-  or an interrupt returns.
+- Locks, callouts and irq-quiet sections are sized for a CPU that
+  keeps its kernel context until the thread blocks or an interrupt
+  returns.
 - The lock crate has no no-preempt sections, no preemption hooks in its
   `Platform` and no preemption-aware lock variants, not even as no-ops
   kept for later; spin locks hold no section at all. Adaptive spinning
@@ -30,6 +30,5 @@ not kernel preemption.
   configuration change. It reopens the lock crate — spin locks would
   need a section that holds off preemption, and a mutex that defers its
   holder's preemption, like Zircon's `CriticalMutex`, would come back
-  into question — the RCU quiescent-state definition, and every
-  assumption that there is no preemption point between a load and its
-  use.
+  into question — and every assumption that there is no preemption
+  point between a load and its use.

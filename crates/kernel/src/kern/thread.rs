@@ -30,7 +30,6 @@ use crate::kern::lock::SimpleLock;
 use crate::kern::machine;
 use crate::kern::policy::{POLICY_FIXEDPRI, POLICY_TIMESHARE, invalid_policy};
 use crate::kern::processor::{self, Processor, ProcessorRef, ProcessorSet};
-use crate::kern::rcu::{RcuHead, call_rcu};
 use crate::kern::sched::{
     BASEPRI_SYSTEM, RUN_QUEUE_NULL, RunQueue, SCHED_SCALE, invalid_pri,
 };
@@ -328,9 +327,6 @@ pub struct Thread {
     /// The locks the thread holds, for the `lock` order checker.
     #[cfg(debug_assertions)]
     pub(crate) held_locks: HeldLocks,
-    /// Defers the record's return to its cache past a grace period, so a
-    /// late `lock` unpark still finds it.
-    rcu_head: RcuHead,
 }
 
 tail_queue::adapter!(
@@ -397,8 +393,8 @@ impl Thread {
             ptr::addr_of_mut!((*base).held_locks).write(HeldLocks::new());
         }
         // SAFETY: every field is now initialized: zeros accept the
-        // pointers, unions, locks, park token and RCU head, and the
-        // callouts and held-lock record were written.
+        // pointers, unions, locks and park token, and the callouts and
+        // held-lock record were written.
         let mut thread = unsafe { slot.assume_init() };
 
         thread.runq = RUN_QUEUE_NULL;
@@ -1882,18 +1878,11 @@ impl Thread {
         unsafe { eventcount::notify_abort(thread) };
         unsafe { crate::arch::x86_64::pcb::pcb_terminate(thread) };
 
-        // A `lock` unpark may still be on its way to the record, so it
-        // returns to the cache only once a grace period has passed.
-        // SAFETY: the thread is dead and unreferenced, so nothing else
-        // queues its RCU head; the callback gets that head back, inside the
-        // record that came from `THREAD_CACHE`, once no reader can see it.
+        // SAFETY: the thread came from `THREAD_CACHE`, and the entry check
+        // makes its pointer non-null, so the free is sound.
         unsafe {
-            call_rcu(&raw mut (*thread).rcu_head, |head| {
-                let thread =
-                    head.byte_sub(offset_of!(Self, rcu_head)).cast::<u8>();
-                (*ptr::addr_of_mut!(THREAD_CACHE))
-                    .free(NonNull::new_unchecked(thread));
-            });
+            (*ptr::addr_of_mut!(THREAD_CACHE))
+                .free(NonNull::new_unchecked(thread.cast::<u8>()));
         }
     }
 

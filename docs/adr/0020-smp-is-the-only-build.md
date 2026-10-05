@@ -3,8 +3,8 @@
 The kernel is built one way for any number of CPUs. The CPU count comes
 from the ACPI tables at boot, capped by one constant; a uniprocessor
 machine is the case N = 1, with no uniprocessor configuration and no
-`cfg` for it. Every subsystem is designed for N CPUs, as `lock`, the
-single ticker CPU of `clock` and the RCU already are.
+`cfg` for it. Every subsystem is designed for N CPUs, as `lock` and the
+single ticker CPU of `clock` already are.
 
 ## Considered Options
 

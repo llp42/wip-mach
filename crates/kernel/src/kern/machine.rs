@@ -27,7 +27,6 @@ use crate::kern::processor::{
     Processor, ProcessorQueue, ProcessorSet, ProcessorState, boot_processor,
     default_pset, processor_at, slave_pset,
 };
-use crate::kern::rcu;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, thread_bind, thread_block,
     thread_wakeup_prim,
@@ -180,11 +179,6 @@ pub(crate) unsafe fn tick_accounting(
         // SAFETY: the interrupted thread is live and this CPU is the only
         // writer of its timer.
         unsafe { (*thread).system_timer.bump(usec) };
-    }
-
-    if usermode {
-        // A tick from user mode interrupted no RCU read section.
-        rcu::note_qs();
     }
 
     let state = if usermode {

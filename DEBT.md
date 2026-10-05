@@ -26,7 +26,7 @@ deletes its entry; a change that opens one adds it.
 - **ADR**: ADR 0014.
 - **Where**: `ipc/`, `vm/` above the pmap, and the task, thread,
   scheduler and device-dispatch modules of `kern/` and `device/`; the
-  mechanisms `kern/rcu.rs` and `kern/boot_script.rs`.
+  mechanism `kern/boot_script.rs`.
 - **Done when**: `crates/wip-mach` exists and holds the
   machine-independent core, and each mechanism has moved to its own
   crate or has been found to fail the split test.

@@ -169,11 +169,8 @@ unsafe impl Platform for MachPlatform {
     fn unpark(thread: ThreadRef) {
         let thread = thread.as_ptr().as_ptr().cast::<Thread>();
         // SAFETY: `thread` waited in a wait table, so it is a thread
-        // record, not a boot context.  A dead thread's record goes back to
-        // its cache only a grace period after its death, and this CPU
-        // reaches no quiescent state from the caller reading `thread` off
-        // a wait queue, where it was live, to the end of this call, since
-        // neither blocks.
+        // record, not a boot context; the wait has not returned, so the
+        // thread has not exited and its record is live.
         unsafe {
             (*thread).park_token.store(true, Ordering::Release);
             let _ = thread_wakeup_prim(park_event(thread), 0, THREAD_AWAKENED);

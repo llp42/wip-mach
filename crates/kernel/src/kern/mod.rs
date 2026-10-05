@@ -28,7 +28,6 @@ pub mod policy;
 pub mod printf;
 pub mod priority;
 pub mod processor;
-pub mod rcu;
 pub mod sched;
 pub mod sched_prim;
 pub mod slab;

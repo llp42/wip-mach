@@ -963,10 +963,6 @@ pub(crate) unsafe fn thread_invoke(
     continuation: crate::kern::thread::Continuation,
     new_thread: *mut Thread,
 ) -> bool {
-    // The old thread is giving up the CPU, which a non-preemptible kernel
-    // does only outside RCU read sections.
-    crate::kern::rcu::note_qs();
-
     if old_thread == new_thread {
         unsafe {
             (*new_thread).lock.lock();
@@ -1253,9 +1249,6 @@ unsafe extern "C" fn idle_thread_continue() {
                     ast::taken();
                 }
             }
-            // The idle thread holds no RCU references, and each clock tick
-            // brings a halted CPU back here, so idle CPUs keep up.
-            crate::kern::rcu::note_qs();
             machine_idle(mycpu.bits() as c_int);
         }
 

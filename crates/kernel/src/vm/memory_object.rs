@@ -1138,9 +1138,10 @@ pub(crate) unsafe fn data_unavailable(
 
 /// Types and functions for the default memory manager.
 ///
-/// The default manager's port lives in an [`Rcu`]: the pageout path reads it
-/// for every page it considers, and only `vm_set_default_memory_manager()`
-/// changes it, about once per boot. Readers take no lock.
+/// The default manager's port lives under a spin lock: the pageout path
+/// reads it for every page it considers, holding an object or the
+/// page-queue lock, and only `vm_set_default_memory_manager()` changes it,
+/// about once per boot.
 ///
 /// # Safety
 ///
@@ -1148,75 +1149,27 @@ pub(crate) unsafe fn data_unavailable(
 pub(crate) mod default_manager {
     use super::{Error, Host, IpcPort, c_void, ipc_port, null_mut};
     use crate::arch::x86_64::per_cpu;
-    use crate::kern::debug::kpanic;
-    use crate::kern::kheap::Kalloc;
-    use crate::kern::rcu::Rcu;
+    use crate::arch::x86_64::platform::MachPlatform;
     use crate::kern::sched_prim::{
         THREAD_AWAKENED, assert_wait, clear_wait, thread_block,
         thread_wakeup_prim,
     };
+    use core::mem;
     use core::ptr::{self, NonNull};
-    use core::sync::atomic::{AtomicPtr, Ordering};
-    use kmem::KBox;
+    use lock::SpinLock;
 
     /// A published default-manager port, `IP_NULL` before the default
-    /// pager registers.
-    ///
-    /// Beyond the send right the kernel keeps for the manager, each value
-    /// holds an object reference of its own, dropped with the value. So a
-    /// port stays live for readers that saw it until a grace period after
-    /// it is replaced, even when the send right handed back to
-    /// `vm_set_default_memory_manager()`'s caller goes at once.
+    /// pager registers.  The kernel holds a send right for it, which keeps
+    /// the port live while it is published.
     struct ManagerPort(*mut c_void);
 
-    // SAFETY: the value is a port pointer plus a reference; ports are
-    // shared between CPUs, and the reference may be dropped on any thread.
+    // SAFETY: the value is a port pointer, and ports are shared between
+    // CPUs.
     unsafe impl Send for ManagerPort {}
-    // SAFETY: the value is a port pointer plus a reference; ports are shared
-    // between CPUs, and the reference may be dropped on any thread;
-    // readers only read the pointer.
-    unsafe impl Sync for ManagerPort {}
 
-    impl ManagerPort {
-        /// Publishable `port`, taking the value's reference on it.
-        ///
-        /// # Safety
-        ///
-        /// `port` must be `IP_NULL`, `IP_DEAD`, or a live port.
-        unsafe fn new(port: *mut c_void) -> Self {
-            if let Some(live) = IpcPort::valid(port) {
-                unsafe { live.reference() };
-            }
-            Self(port)
-        }
-
-        /// Whether the port is neither `IP_NULL` nor `IP_DEAD`.
-        fn is_valid(&self) -> bool {
-            IpcPort::valid(self.0).is_some()
-        }
-    }
-
-    impl Drop for ManagerPort {
-        fn drop(&mut self) {
-            if let Some(live) = IpcPort::valid(self.0) {
-                // SAFETY: `new()` took this reference.
-                unsafe { live.release() };
-            }
-        }
-    }
-
-    /// The published default-manager port: null until `init()` stores a
-    /// leaked box, which is never freed.
-    static DEFAULT_MANAGER: AtomicPtr<Rcu<ManagerPort>> =
-        AtomicPtr::new(null_mut());
-
-    /// The `Rcu`, or `None` before `init()`.
-    fn manager() -> Option<&'static Rcu<ManagerPort>> {
-        let manager = DEFAULT_MANAGER.load(Ordering::Acquire);
-        // SAFETY: a non-null pointer is the leaked box `init()` stored with
-        // release, never freed.
-        unsafe { manager.as_ref() }
-    }
+    /// The published default-manager port.
+    static DEFAULT_MANAGER: SpinLock<ManagerPort, MachPlatform> =
+        SpinLock::new(ManagerPort(null_mut()));
 
     /// The event `reference()` sleeps on until a manager registers.
     fn registered_event() -> *mut c_void {
@@ -1236,36 +1189,28 @@ pub(crate) mod default_manager {
         if host.is_null() {
             return Err(Error::InvalidHost);
         }
-        let Some(manager) = manager() else {
-            return Err(Error::ResourceShortage);
-        };
 
         let new_manager = unsafe { *default_manager };
 
         let returned = if new_manager.is_null() {
-            let current = manager.read();
-            // SAFETY: the value's reference keeps the port live while the
-            // read section is open, and `copy_send()` does not block.
+            let current = DEFAULT_MANAGER.lock();
+            // SAFETY: the kernel's send right keeps the port live while it
+            // is published, and `copy_send()` does not block.
             unsafe { ipc_port::copy_send(current.0) }
         } else {
             // The kernel takes over the caller's send right for the new
             // manager and hands back its right for the old one, as the C
-            // did; the old value keeps the port live for readers.
-            let mut old = null_mut();
-            let new = unsafe { ManagerPort::new(new_manager) };
-            let result = manager.try_update(|current| {
-                old = current.0;
-                new
-            });
-            if result.is_err() {
-                return Err(Error::ResourceShortage);
-            }
+            // did.
+            let old = mem::replace(
+                &mut *DEFAULT_MANAGER.lock(),
+                ManagerPort(new_manager),
+            );
 
             // SAFETY: the event is a static's address, used only as a key.
             unsafe {
                 thread_wakeup_prim(registered_event(), 0, THREAD_AWAKENED);
             }
-            old
+            old.0
         };
 
         unsafe { *default_manager = returned };
@@ -1286,10 +1231,10 @@ pub(crate) mod default_manager {
             // SAFETY: thread context; the wait is cleared or blocked on.
             unsafe { assert_wait(event, 0) };
 
-            let right = manager().map_or(null_mut(), |manager| {
-                let current = manager.read();
+            let right = {
+                let current = DEFAULT_MANAGER.lock();
                 unsafe { ipc_port::copy_send(current.0) }
-            });
+            };
             if let Some(port) = IpcPort::valid(right) {
                 // SAFETY: the current thread is live.
                 unsafe { clear_wait(per_cpu::thread(), THREAD_AWAKENED, 0) };
@@ -1306,10 +1251,7 @@ pub(crate) mod default_manager {
     ///
     /// `port` must be `IP_NULL` or a live port.
     pub unsafe fn port(port: *mut c_void) -> bool {
-        let Some(manager) = manager() else {
-            return false;
-        };
-        let current = manager.read();
+        let current = DEFAULT_MANAGER.lock();
         match (IpcPort::valid(port), IpcPort::valid(current.0)) {
             (Some(port), Some(current)) => unsafe {
                 port.receiver() == current.receiver()
@@ -1320,25 +1262,7 @@ pub(crate) mod default_manager {
 
     /// Whether a default memory manager has registered.
     pub fn is_set() -> bool {
-        manager().is_some_and(|manager| manager.read().is_valid())
-    }
-
-    /// Publishes an empty default manager.  Runs once, during boot.
-    ///
-    /// # Panics
-    ///
-    /// If the kernel heap cannot hold the published port.
-    pub fn init() {
-        // SAFETY: `IP_NULL` is a valid argument.
-        let null = unsafe { ManagerPort::new(null_mut()) };
-        let Some(manager) = Rcu::try_new(null)
-            .ok()
-            .and_then(|manager| KBox::try_new(manager, Kalloc).ok())
-        else {
-            kpanic!("default_manager::init", "out of memory\n")
-        };
-        DEFAULT_MANAGER
-            .store(ptr::from_mut(KBox::leak(manager)), Ordering::Release);
+        IpcPort::valid(DEFAULT_MANAGER.lock().0).is_some()
     }
 }
 

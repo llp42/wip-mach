@@ -155,12 +155,6 @@ pub(crate) unsafe extern "C" fn start_kernel_threads() {
         );
         let _ = thread::kernel_thread(
             kernel_task(),
-            c"rcu".as_ptr(),
-            Some(crate::kern::rcu::gp_thread_continue),
-            ptr::null_mut(),
-        );
-        let _ = thread::kernel_thread(
-            kernel_task(),
             c"swapin".as_ptr(),
             Some(swapin_thread_continuation),
             ptr::null_mut(),

@@ -11,7 +11,6 @@ use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_init;
 use crate::kern::debug::kpanic;
 use crate::kern::slab::{kalloc_init, slab_bootstrap, slab_init};
-use crate::vm::memory_object::default_manager;
 use crate::vm::memory_object_proxy;
 use crate::vm::vm_fault;
 use crate::vm::vm_kern::{self, KERNEL_MAP};
@@ -46,7 +45,6 @@ fn bootstrap() {
         kalloc_init();
         vm_fault::init_module();
         vm_resident::module_init();
-        default_manager::init();
     }
 }
 

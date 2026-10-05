@@ -22,11 +22,10 @@ pub const KERNEL_VERSION_MAX: usize = 512;
 /// half then has to carry the same number here.
 ///
 /// At least one, for the boot CPU: `kern/smp.rs` asserts it, since
-/// `CpuId::BOOT` names block 0.  At most 64: the per-CPU state that keeps
-/// one bit per CPU in a machine word, `kern/rcu.rs`'s `QS_PENDING` (which
-/// asserts `MAX_NCPUS <= usize::BITS`) and `arch/x86_64/pmap.rs`'s `CpuSet`
-/// (`1isize << cpu`).  `kern/host.rs` asserts the looser
-/// `MAX_NCPUS <= HOST_INFO_MAX` for the `host_info()` slots.
+/// `CpuId::BOOT` names block 0.  At most 64: `arch/x86_64/pmap.rs`'s
+/// `CpuSet` keeps one bit per CPU in a machine word (`1isize << cpu`).
+/// `kern/host.rs` asserts the looser `MAX_NCPUS <= HOST_INFO_MAX` for the
+/// `host_info()` slots.
 pub const MAX_NCPUS: usize = 2;
 
 /// The serial-port count the build was configured with; the ABI gate pins it
