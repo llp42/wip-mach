@@ -536,7 +536,7 @@ impl Rights {
                             generation | (MACH_PORT_TYPE_SEND_ONCE | 1),
                         );
                         (*entry).set_object(self.reply_port.as_ptr());
-                        space.lock_done();
+                        space.unlock_write();
                     }
 
                     // SAFETY: the destination port is live, locked and
@@ -672,7 +672,7 @@ unsafe fn finish_abort(
     // SAFETY: the destination and space locks are held.
     unsafe {
         self_.dest.unlock();
-        space.lock_done();
+        space.unlock_write();
         (*head).set_bits(
             mach_msg_bits(
                 MACH_MSG_TYPE_MOVE_SEND,

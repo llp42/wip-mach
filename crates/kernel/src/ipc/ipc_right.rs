@@ -120,13 +120,13 @@ pub(crate) unsafe fn lookup_write(
     unsafe { space.lock_write() };
 
     if !unsafe { space.is_active() } {
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::DeadSpace);
     }
 
     // SAFETY: the space is live and write-locked.
     let Some(entry) = (unsafe { space.entry_lookup(name) }) else {
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidName);
     };
 
@@ -210,7 +210,7 @@ pub(crate) unsafe fn dnrequest(
                     // SAFETY: the port lock is held.
                     unsafe { port.unlock() };
                     // SAFETY: the space lock is held.
-                    unsafe { space.lock_done() };
+                    unsafe { space.unlock_write() };
                     return Ok(previous);
                 };
 
@@ -227,11 +227,11 @@ pub(crate) unsafe fn dnrequest(
                     // SAFETY: the entry is live.
                     unsafe { (*entry).set_request(request) };
                     // SAFETY: the space lock is held.
-                    unsafe { space.lock_done() };
+                    unsafe { space.unlock_write() };
                     return Ok(previous);
                 }
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
 
                 // SAFETY: the port is live and locked; `dngrow`
                 // unlocks it and reports why it could not grow.
@@ -249,21 +249,21 @@ pub(crate) unsafe fn dnrequest(
         {
             if urefs_overflow(bits & IE_BITS_UREFS_MASK, 1) {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(Error::UrefsOverflow);
             }
 
             // SAFETY: the entry is live and the space lock is held.
             unsafe { (*entry).set_bits(bits.wrapping_add(1)) };
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
 
             unsafe { ipc_notify::dead_name(notify.as_ptr(), name) };
             return Ok(ptr::null_mut());
         }
 
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
 
         return if bits & MACH_PORT_TYPE_PORT_OR_DEAD != 0 {
             Err(Error::InvalidArgument)
@@ -318,7 +318,7 @@ pub(crate) unsafe fn inuse(space: IpcSpace, entry: *mut IpcEntry) -> bool {
     let bits = unsafe { (*entry).bits() };
 
     if bits & IE_BITS_TYPE_MASK != MACH_PORT_TYPE_NONE {
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return true;
     }
 
@@ -506,7 +506,7 @@ pub(crate) unsafe fn destroy(
         MACH_PORT_TYPE_DEAD_NAME => {
             unsafe { ipc_entry::dealloc(space, name, entry) };
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
         }
 
         MACH_PORT_TYPE_PORT_SET => {
@@ -524,7 +524,7 @@ pub(crate) unsafe fn destroy(
             // SAFETY: the pset is live and unlocked.
             unsafe { (*target).lock() };
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
 
             // SAFETY: the port set is live and locked; the destroy consumes
             // the entry's reference and unlocks.
@@ -560,7 +560,7 @@ pub(crate) unsafe fn destroy(
                     (*entry).set_request(0);
                     (*entry).set_object(ptr::null_mut());
                     ipc_entry::dealloc(space, name, entry);
-                    space.lock_done();
+                    space.unlock_write();
                 }
                 return;
             }
@@ -572,7 +572,7 @@ pub(crate) unsafe fn destroy(
             unsafe {
                 (*entry).set_object(ptr::null_mut());
                 ipc_entry::dealloc(space, name, entry);
-                space.lock_done();
+                space.unlock_write();
             }
 
             let mut nsrequest = None;
@@ -653,7 +653,7 @@ unsafe fn dealloc_dead_name(
         unsafe { (*entry).set_bits(bits.wrapping_sub(1)) };
     }
 
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 }
 
 /// Releases one user reference to the send, send-once or dead-name right
@@ -740,7 +740,7 @@ pub(crate) unsafe fn dealloc(
             // SAFETY: the port is live and its lock is held.
             unsafe { port.unlock() };
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
 
             if let Some(nsrequest) = nsrequest {
                 // SAFETY: a nonzero no-senders request is a live send-once
@@ -794,7 +794,7 @@ pub(crate) unsafe fn dealloc(
             // SAFETY: the port lock is held.
             unsafe { port.unlock() };
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
 
             if let Some(nsrequest) = nsrequest {
                 // SAFETY: a nonzero no-senders request is a live send-once
@@ -807,7 +807,7 @@ pub(crate) unsafe fn dealloc(
 
         _ => {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             Err(Error::InvalidRight)
         }
     }
@@ -848,7 +848,7 @@ unsafe fn dealloc_send_once(
     unsafe {
         (*entry).set_object(ptr::null_mut());
         ipc_entry::dealloc(space, name, entry);
-        space.lock_done();
+        space.unlock_write();
     }
 
     // SAFETY: the notification consumes the send-once right (or its
@@ -881,19 +881,19 @@ pub(crate) unsafe fn delta(
         MACH_PORT_RIGHT_PORT_SET => {
             if bits & MACH_PORT_TYPE_PORT_SET == 0 {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(Error::InvalidRight);
             }
 
             if delta == 0 {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Ok(());
             }
 
             if delta != -1 {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(Error::InvalidValue);
             }
 
@@ -911,7 +911,7 @@ pub(crate) unsafe fn delta(
             // SAFETY: the pset is live and unlocked.
             unsafe { (*target).lock() };
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
 
             // SAFETY: the port set is live and locked; the destroy consumes
             // the entry's reference and unlocks.
@@ -923,19 +923,19 @@ pub(crate) unsafe fn delta(
         MACH_PORT_RIGHT_RECEIVE => {
             if bits & MACH_PORT_TYPE_RECEIVE == 0 {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(Error::InvalidRight);
             }
 
             if delta == 0 {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Ok(());
             }
 
             if delta != -1 {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(Error::InvalidValue);
             }
 
@@ -979,7 +979,7 @@ pub(crate) unsafe fn delta(
             }
 
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
 
             // SAFETY: the port is live and locked.
             unsafe { ipc_port::clear_receiver(port) };
@@ -1030,7 +1030,7 @@ unsafe fn delta_send(
 ) -> Result<(), Error> {
     if bits & MACH_PORT_TYPE_SEND == 0 {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidRight);
     }
 
@@ -1039,13 +1039,13 @@ unsafe fn delta_send(
     let urefs = bits & IE_BITS_UREFS_MASK;
     if urefs_underflow(urefs, delta) {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidValue);
     }
 
     if urefs_overflow(urefs.wrapping_add(1), delta) {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::UrefsOverflow);
     }
 
@@ -1055,7 +1055,7 @@ unsafe fn delta_send(
     // SAFETY: the space is write-locked and the entry is live.
     if unsafe { check(space, port, name, entry) } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidRight);
     }
 
@@ -1112,7 +1112,7 @@ unsafe fn delta_send(
     // SAFETY: the port is live and its lock is held.
     unsafe { port.unlock() };
     // SAFETY: the space lock is held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     if let Some(nsrequest) = nsrequest {
         // SAFETY: a nonzero no-senders request is a live send-once right.
@@ -1143,13 +1143,13 @@ unsafe fn delta_send_once(
 ) -> Result<(), Error> {
     if bits & MACH_PORT_TYPE_SEND_ONCE == 0 {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidRight);
     }
 
     if !(-1..=0).contains(&delta) {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidValue);
     }
     // SAFETY: a send-once entry names a live port.
@@ -1158,7 +1158,7 @@ unsafe fn delta_send_once(
     // SAFETY: the space is write-locked and the entry is live.
     if unsafe { check(space, port, name, entry) } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidRight);
     }
 
@@ -1168,7 +1168,7 @@ unsafe fn delta_send_once(
         // SAFETY: the port lock is held.
         unsafe { port.unlock() };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Ok(());
     }
 
@@ -1181,7 +1181,7 @@ unsafe fn delta_send_once(
     unsafe {
         (*entry).set_object(ptr::null_mut());
         ipc_entry::dealloc(space, name, entry);
-        space.lock_done();
+        space.unlock_write();
     }
 
     // SAFETY: the send-once notification consumes the entry's reference.
@@ -1218,7 +1218,7 @@ unsafe fn delta_dead_name(
             // SAFETY: the port is live and locked.
             unsafe { port.unlock() };
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(Error::InvalidRight);
         }
 
@@ -1226,7 +1226,7 @@ unsafe fn delta_dead_name(
         bits = unsafe { (*entry).bits() };
     } else if bits & MACH_PORT_TYPE_DEAD_NAME == 0 {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidRight);
     }
 
@@ -1234,13 +1234,13 @@ unsafe fn delta_dead_name(
 
     if urefs_underflow(urefs, delta) {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidValue);
     }
 
     if urefs_overflow(urefs, delta) {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::UrefsOverflow);
     }
 
@@ -1251,7 +1251,7 @@ unsafe fn delta_dead_name(
     }
 
     // SAFETY: the space lock is held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
     Ok(())
 }
 
@@ -1990,6 +1990,6 @@ pub(crate) unsafe fn rename(
     unsafe {
         (*oentry).set_object(ptr::null_mut());
         ipc_entry::dealloc(space, oname, oentry);
-        space.lock_done();
+        space.unlock_write();
     }
 }

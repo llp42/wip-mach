@@ -3,15 +3,17 @@
 
 //! IPC facilities; mirrors `ipc/`.
 
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::ipc::ipc_table::IpcTableSize;
 use crate::ipc::ipc_thread::IpcThreadQueue;
 use crate::kern::debug::kpanic;
 use crate::kern::kheap::Kalloc;
-use crate::kern::lock::{LockData, SimpleLock};
+use crate::kern::lock::SimpleLock;
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
 use kmem::RadixTree;
+use lock::RawRwLock;
 
 pub mod copy_user;
 pub mod error;
@@ -461,7 +463,7 @@ pub(crate) type NameMap = RadixTree<IpcEntry, Kalloc>;
 pub(crate) struct IpcSpaceRecord {
     ref_lock: SimpleLock,
     references: u32,
-    lock: LockData,
+    lock: RawRwLock<MachPlatform>,
     active: c_int,
     map: NameMap,
     size: usize,

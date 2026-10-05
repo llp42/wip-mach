@@ -219,7 +219,7 @@ pub(crate) unsafe fn translate(
     // SAFETY: the entry is live and the space is locked.
     if unsafe { (*entry).bits() } & mach_port_type(right) == 0 {
         // SAFETY: the earlier call took the space lock.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidRight);
     }
 
@@ -230,7 +230,7 @@ pub(crate) unsafe fn translate(
     unsafe { (*object.cast::<IpcObject>()).lock.lock() };
 
     // SAFETY: the space lock from the lookup is still held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     Ok(object)
 }
@@ -248,7 +248,7 @@ pub(crate) unsafe fn alloc_dead(space: IpcSpace) -> Result<c_uint, Error> {
         Ok(found) => found,
         Err(error) => {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(error);
         }
     };
@@ -256,7 +256,7 @@ pub(crate) unsafe fn alloc_dead(space: IpcSpace) -> Result<c_uint, Error> {
     // SAFETY: the entry is live and the space is locked.
     unsafe {
         (*entry).or_bits(MACH_PORT_TYPE_DEAD_NAME | 1);
-        space.lock_done();
+        space.unlock_write();
     }
 
     Ok(name)
@@ -278,7 +278,7 @@ pub(crate) unsafe fn alloc_dead_name(
         Ok(entry) => entry,
         Err(error) => {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(error);
         }
     };
@@ -291,7 +291,7 @@ pub(crate) unsafe fn alloc_dead_name(
     // SAFETY: the entry is live and the space is locked.
     unsafe {
         (*entry).or_bits(MACH_PORT_TYPE_DEAD_NAME | 1);
-        space.lock_done();
+        space.unlock_write();
     }
 
     Ok(())
@@ -324,7 +324,7 @@ pub(crate) unsafe fn alloc(
         Ok(found) => found,
         Err(error) => {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             // SAFETY: the object is the fresh allocation from above.
             unsafe { io_free(otype, object) };
             return Err(error);
@@ -337,7 +337,7 @@ pub(crate) unsafe fn alloc(
         (*entry).or_bits(type_ | urefs);
         (*entry).set_object(object);
         lock_object(object);
-        space.lock_done();
+        space.unlock_write();
         activate_object(object, otype);
     }
 
@@ -372,7 +372,7 @@ pub(crate) unsafe fn alloc_name(
         Ok(entry) => entry,
         Err(error) => {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             // SAFETY: the object is the fresh allocation from above.
             unsafe { io_free(otype, object) };
             return Err(error);
@@ -392,7 +392,7 @@ pub(crate) unsafe fn alloc_name(
         (*entry).or_bits(type_ | urefs);
         (*entry).set_object(object);
         lock_object(object);
-        space.lock_done();
+        space.unlock_write();
         activate_object(object, otype);
     }
 
@@ -423,7 +423,7 @@ pub(crate) unsafe fn copyin(
         if (*entry).bits() & IE_BITS_TYPE_MASK == 0 {
             ipc_entry::dealloc(space, name, entry);
         }
-        space.lock_done();
+        space.unlock_write();
     }
 
     let (object, soright) = result?;
@@ -519,7 +519,7 @@ pub(crate) unsafe fn copyout(
     // SAFETY: the space lock is held.
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::DeadSpace);
     }
 
@@ -540,7 +540,7 @@ pub(crate) unsafe fn copyout(
             Ok(found) => found,
             Err(error) => {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(error);
             }
         };
@@ -552,7 +552,7 @@ pub(crate) unsafe fn copyout(
             if (*header).bits & IO_BITS_ACTIVE == 0 {
                 (*header).lock.unlock();
                 ipc_entry::dealloc(space, name, entry);
-                space.lock_done();
+                space.unlock_write();
                 return Err(Error::InvalidCapability);
             }
             (*entry).set_object(object);
@@ -568,7 +568,7 @@ pub(crate) unsafe fn copyout(
     };
 
     // SAFETY: the space lock is still held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     result.map(|()| name)
 }
@@ -593,7 +593,7 @@ pub(crate) unsafe fn copyout_name(
         Ok(entry) => entry,
         Err(error) => {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(error);
         }
     };
@@ -615,7 +615,7 @@ pub(crate) unsafe fn copyout_name(
                 if (*entry).bits() & IE_BITS_TYPE_MASK == 0 {
                     ipc_entry::dealloc(space, name, entry);
                 }
-                space.lock_done();
+                space.unlock_write();
             }
             return Err(Error::RightExists);
         }
@@ -633,7 +633,7 @@ pub(crate) unsafe fn copyout_name(
             if (*header).bits & IO_BITS_ACTIVE == 0 {
                 (*header).lock.unlock();
                 ipc_entry::dealloc(space, name, entry);
-                space.lock_done();
+                space.unlock_write();
                 return Err(Error::InvalidCapability);
             }
             (*entry).set_object(object);
@@ -647,7 +647,7 @@ pub(crate) unsafe fn copyout_name(
     };
 
     // SAFETY: the space lock is still held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     result
 }
@@ -743,7 +743,7 @@ pub(crate) unsafe fn rename(
         Ok(entry) => entry,
         Err(error) => {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(error);
         }
     };
@@ -764,7 +764,7 @@ pub(crate) unsafe fn rename(
         // SAFETY: the space lock is held and `nentry` is live.
         unsafe {
             ipc_entry::dealloc(space, nname, nentry);
-            space.lock_done();
+            space.unlock_write();
         }
         return Err(Error::InvalidName);
     };

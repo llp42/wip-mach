@@ -130,7 +130,7 @@ pub(crate) unsafe fn remove(pset: *mut IpcTarget, port: IpcPort) {
 ///
 /// # Safety
 ///
-/// `space` must be live and read-locked, and `port` live with `nset` either
+/// `space` must be live and write-locked, and `port` live with `nset` either
 /// `None` or a live port set.
 pub(crate) unsafe fn move_between(
     space: IpcSpace,
@@ -144,15 +144,15 @@ pub(crate) unsafe fn move_between(
 
     match (oset, nset) {
         (None, None) => {
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
         }
         (Some(old), Some(new)) if old == new => {
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
         }
         (None, Some(nset)) => {
             // SAFETY: a non-null `nset` names a live port set.
             unsafe { (*nset.as_ptr()).lock() };
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
 
             // SAFETY: both are live, active, and locked.
             unsafe { add(nset.as_ptr(), port) };
@@ -161,7 +161,7 @@ pub(crate) unsafe fn move_between(
             unsafe { (*nset.as_ptr()).unlock() };
         }
         (Some(old), None) => {
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             // SAFETY: the old set holds a reference for the port.
             unsafe { (*old.as_ptr()).lock() };
 
@@ -196,7 +196,7 @@ pub(crate) unsafe fn move_between(
                 }
             }
 
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
 
             // SAFETY: both sets and the port are live and locked; the port
             // cannot be inactive, so the old set stays live through the

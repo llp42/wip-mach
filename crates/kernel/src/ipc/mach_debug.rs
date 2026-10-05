@@ -207,7 +207,7 @@ pub(crate) unsafe fn mach_port_kernel_object(
     // SAFETY: the entry is live and the space is write-locked.
     if unsafe { (*entry).bits() } & MACH_PORT_TYPE_SEND_RECEIVE == 0 {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidRight);
     }
 
@@ -216,7 +216,7 @@ pub(crate) unsafe fn mach_port_kernel_object(
     // SAFETY: the port is live and unlocked.
     unsafe { port.lock() };
     // SAFETY: the space lock is held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     // SAFETY: the port is live and locked.
     if !unsafe { port.is_active() } {

@@ -415,14 +415,14 @@ pub(crate) unsafe fn copyin(
     // SAFETY: the space is live and locked.
     if !unsafe { space.is_active() } {
         // SAFETY: the space is live and locked.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return Err(ReceiveError::InvalidName);
     }
 
     // SAFETY: the space is live and read-locked.
     let Some(entry) = (unsafe { space.entry_lookup(name) }) else {
         // SAFETY: the space is live and locked.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return Err(ReceiveError::InvalidName);
     };
 
@@ -435,7 +435,7 @@ pub(crate) unsafe fn copyin(
         // SAFETY: the port is live and unlocked.
         unsafe { port.lock() };
         // SAFETY: the space is live and read-locked.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
 
         // SAFETY: the port is live and locked.
         let pset = unsafe { port.pset() };
@@ -469,12 +469,12 @@ pub(crate) unsafe fn copyin(
         // SAFETY: the target is live and unlocked.
         unsafe { (*target).lock() };
         // SAFETY: the space is live and read-locked.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         // SAFETY: the target is live and locked.
         (unsafe { (*target).messages() }, Held::Target(target))
     } else {
         // SAFETY: the space is live and locked.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return Err(ReceiveError::InvalidName);
     };
 

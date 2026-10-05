@@ -10,7 +10,6 @@
 use crate::ipc::ipc_entry;
 use crate::ipc::ipc_right;
 use crate::ipc::{IE_BITS_TYPE_MASK, IpcEntry, IpcSpace, IpcSpaceRecord};
-use crate::kern::lock::LockData;
 
 use crate::ipc::error::Error;
 use crate::kern::slab::{KmemCache, kmem_cache_init};
@@ -19,6 +18,7 @@ use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, Ordering};
+use lock::RawRwLock;
 
 /// The name no entry holds.
 const MACH_PORT_NAME_NULL: c_uint = 0;
@@ -59,13 +59,22 @@ impl IpcSpace {
         unsafe { (*self.record()).lock.read() };
     }
 
-    /// Releases the space's read or write lock.
+    /// Releases the space's write lock.
     ///
     /// # Safety
     ///
-    /// The space must be live, and this call must hold its lock.
-    pub(crate) unsafe fn lock_done(self) {
-        unsafe { (*self.record()).lock.done() };
+    /// The space must be live, and this call must hold its write lock.
+    pub(crate) unsafe fn unlock_write(self) {
+        unsafe { (*self.record()).lock.unlock_write() };
+    }
+
+    /// Releases the space's read lock.
+    ///
+    /// # Safety
+    ///
+    /// The space must be live, and this call must hold its read lock.
+    pub(crate) unsafe fn unlock_read(self) {
+        unsafe { (*self.record()).lock.unlock_read() };
     }
 
     /// `is_active` of `struct ipc_space`.
@@ -134,14 +143,20 @@ fn reverse_key(object: *mut c_void) -> u64 {
     (object.addr().wrapping_sub(VM_MIN_KERNEL_ADDRESS) >> 3) as u64
 }
 
-/// Allocates a space record from the cache.
+/// Allocates a space record from the cache, its lock made and free.
 fn alloc() -> Option<IpcSpace> {
     // SAFETY: `ipc_bootstrap()` initialized the cache before any space could
     // exist.
     let buf = unsafe { (*ptr::addr_of_mut!(IPC_SPACE_CACHE)).alloc()? };
     // SAFETY: the cache's buffers are `struct ipc_space` sized, as its init
     // recorded from the C size, and `alloc()` returned a live one.
-    Some(unsafe { IpcSpace::from_raw(buf.as_ptr().cast()) })
+    let space = unsafe { IpcSpace::from_raw(buf.as_ptr().cast()) };
+    // Every space's lock is made here, so all spaces share one lock class.
+    // SAFETY: the fresh allocation is unshared.
+    unsafe {
+        ptr::addr_of_mut!((*space.record()).lock).write(RawRwLock::new());
+    }
+    Some(space)
 }
 
 /// Returns `space` to the cache.
@@ -204,7 +219,6 @@ pub(crate) fn create() -> Result<IpcSpace, Error> {
         let record = space.record();
         (*record).ref_lock.init();
         (*record).references = 2;
-        LockData::init(ptr::addr_of_mut!((*record).lock), true);
         (*record).active = 1;
 
         let map = ptr::addr_of_mut!((*record).map);
@@ -240,7 +254,6 @@ pub(crate) fn create_special() -> Result<IpcSpace, Error> {
         let record = space.record();
         (*record).ref_lock.init();
         (*record).references = 1;
-        LockData::init(ptr::addr_of_mut!((*record).lock), true);
         (*record).active = 0;
     }
 
@@ -283,7 +296,7 @@ pub(crate) unsafe fn destroy(space: IpcSpace) {
         let record = space.record();
         let active = (*record).active != 0;
         (*record).active = 0;
-        space.lock_done();
+        space.unlock_write();
         active
     };
 

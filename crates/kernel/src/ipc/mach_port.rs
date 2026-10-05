@@ -339,7 +339,7 @@ unsafe fn names_buffers(
         // SAFETY: the space is live and read-locked.
         if !unsafe { space.is_active() } {
             // SAFETY: the space is live and read-locked.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_read() };
             if size != 0 {
                 // SAFETY: the two regions came from the allocations below.
                 unsafe {
@@ -364,7 +364,7 @@ unsafe fn names_buffers(
         }
 
         // SAFETY: the space is live and read-locked.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
 
         if size != 0 {
             // SAFETY: the two regions came from the allocations below.
@@ -467,7 +467,7 @@ pub(crate) unsafe fn names(
     }
 
     // SAFETY: the space is live and read-locked.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_read() };
 
     if actual == 0 {
         if size != 0 {
@@ -559,7 +559,7 @@ pub(crate) unsafe fn port_type(
     let (type_, _) = unsafe { ipc_right::info(space, name, entry) };
 
     // SAFETY: the space is live and write-locked.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     Ok(type_)
 }
@@ -724,7 +724,7 @@ pub(crate) unsafe fn get_refs(
     let (type_, urefs) = unsafe { ipc_right::info(space, name, entry) };
 
     // SAFETY: the space is live and write-locked.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     if type_ & mach_port_type(right as c_uint) == 0 {
         return Ok(0);
@@ -983,9 +983,9 @@ pub(crate) unsafe fn get_set_status(
         if unsafe { (*entry).bits() } & IE_BITS_TYPE_MASK
             != MACH_PORT_TYPE_PORT_SET
         {
-            // SAFETY: the space is live and read-locked.
+            // SAFETY: the space is live and write-locked.
             unsafe {
-                space.lock_done();
+                space.unlock_write();
                 vm_kern::kmem_free(&mut *map, addr, size)
                     .unwrap_or_else(|_| kpanic!("kmem_free", "kmem_free"));
             }
@@ -996,19 +996,19 @@ pub(crate) unsafe fn get_set_status(
         let pset = unsafe { (*entry).object() };
         let maxnames = size / size_of::<c_uint>();
         // SAFETY: the allocation holds `maxnames` names, and the space is
-        // read-locked.
+        // write-locked.
         let names = unsafe {
             slice::from_raw_parts_mut(addr as *mut c_uint, maxnames)
         };
 
-        // SAFETY: the space is live and read-locked, and the allocation
+        // SAFETY: the space is live and write-locked, and the allocation
         // holds `maxnames` names.
         let actual = unsafe {
             set_members(pset.cast::<IpcTarget>(), maxnames, names, space)
         };
 
-        // SAFETY: the space is live and read-locked.
-        unsafe { space.lock_done() };
+        // SAFETY: the space is live and write-locked.
+        unsafe { space.unlock_write() };
 
         if as_index(actual) <= maxnames {
             break (addr, actual);
@@ -1072,11 +1072,11 @@ pub(crate) unsafe fn get_set_status(
 }
 
 /// Collect the names of the ports that are members of `pset`, the C's walk
-/// over the read-locked space's map.
+/// over the write-locked space's map.
 ///
 /// # Safety
 ///
-/// The space must be live and read-locked, `pset` must be a live port set,
+/// The space must be live and write-locked, `pset` must be a live port set,
 /// and `names` must have room for `maxnames` entries.
 unsafe fn set_members(
     pset: *mut IpcTarget,
@@ -1086,10 +1086,10 @@ unsafe fn set_members(
 ) -> c_uint {
     let mut actual: c_uint = 0;
 
-    // SAFETY: the space is live and read-locked; the map address is formed
+    // SAFETY: the space is live and write-locked; the map address is formed
     // without reading.
     let map_ptr = unsafe { ptr::addr_of_mut!((*space.record()).map) };
-    // SAFETY: the space is read-locked, so its map is stable; each walk
+    // SAFETY: the space is write-locked, so its map is stable; each walk
     // returns a live entry once.
     for (_key, found) in unsafe { (*map_ptr).iter() } {
         let entry = found.as_ptr();
@@ -1136,7 +1136,7 @@ pub(crate) unsafe fn move_member(
     // SAFETY: the lookup returned the live entry.
     if unsafe { (*entry).bits() } & MACH_PORT_TYPE_RECEIVE == 0 {
         // SAFETY: the space is live and write-locked.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(Error::InvalidRight);
     }
 
@@ -1148,14 +1148,14 @@ pub(crate) unsafe fn move_member(
         // SAFETY: the space is live and write-locked.
         let Some(entry) = (unsafe { space.entry_lookup(after) }) else {
             // SAFETY: the space is live and write-locked.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(Error::InvalidName);
         };
 
         // SAFETY: a looked-up entry is live.
         if unsafe { (*entry).bits() } & MACH_PORT_TYPE_PORT_SET == 0 {
             // SAFETY: the space is live and write-locked.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(Error::InvalidRight);
         }
 

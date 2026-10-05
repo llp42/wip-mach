@@ -1318,7 +1318,7 @@ pub(crate) unsafe fn copyin_header(
     }
 
     // SAFETY: the space is still write-locked.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     if !rights.dest_soright.is_null() {
         // SAFETY: the copy-in left the send-once right unused.
@@ -1418,7 +1418,7 @@ unsafe fn copyin_header_async(
     // SAFETY: the space lock is held.
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     }
 
@@ -1426,14 +1426,14 @@ unsafe fn copyin_header_async(
     let Some(entry) = (unsafe { space.entry_lookup(dest_name) }) else {
         unsafe { entry_lookup_failed(header, dest_name) };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     };
     // SAFETY: the entry is live and the space is locked.
     let bits = unsafe { (*entry).bits() };
     if bits & IE_BITS_TYPE_MASK != MACH_PORT_TYPE_SEND {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     }
 
@@ -1442,7 +1442,7 @@ unsafe fn copyin_header_async(
     // SAFETY: the port is live and its lock is free.
     unsafe { dest_port.lock() };
     // SAFETY: the space lock is held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_read() };
 
     // SAFETY: the port is live and locked.
     if !unsafe { dest_port.is_active() } {
@@ -1482,7 +1482,7 @@ unsafe fn copyin_header_request(
     // SAFETY: the space lock is held.
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     }
 
@@ -1490,14 +1490,14 @@ unsafe fn copyin_header_request(
     let Some(entry) = (unsafe { space.entry_lookup(dest_name) }) else {
         unsafe { entry_lookup_failed(header, dest_name) };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     };
     // SAFETY: the entry is live and the space is locked.
     let bits = unsafe { (*entry).bits() };
     if bits & IE_BITS_TYPE_MASK != MACH_PORT_TYPE_SEND {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     }
     // SAFETY: a send entry names a live port.
@@ -1507,14 +1507,14 @@ unsafe fn copyin_header_request(
     let Some(entry) = (unsafe { space.entry_lookup(reply_name) }) else {
         unsafe { entry_lookup_failed(header, reply_name) };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     };
     // SAFETY: the entry is live and the space is locked.
     let bits = unsafe { (*entry).bits() };
     if bits & IE_BITS_TYPE_MASK != MACH_PORT_TYPE_RECEIVE {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     }
     // SAFETY: a receive entry names a live port.
@@ -1530,11 +1530,11 @@ unsafe fn copyin_header_request(
         // SAFETY: the destination lock is held.
         unsafe { dest_port.unlock() };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return false;
     }
     // SAFETY: the space lock is held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_read() };
 
     // SAFETY: both ports are live, locked, and active.
     unsafe {
@@ -1580,7 +1580,7 @@ unsafe fn copyin_header_reply(
     // SAFETY: the space lock is held.
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return false;
     }
 
@@ -1588,7 +1588,7 @@ unsafe fn copyin_header_reply(
     let Some(entry) = (unsafe { space.entry_lookup(dest_name) }) else {
         unsafe { entry_lookup_failed(header, dest_name) };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return false;
     };
     // SAFETY: the entry is live and the space is locked.
@@ -1598,7 +1598,7 @@ unsafe fn copyin_header_reply(
         || unsafe { (*entry).request() } != 0
     {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return false;
     }
     // SAFETY: a send-once entry names a live port.
@@ -1611,7 +1611,7 @@ unsafe fn copyin_header_reply(
         // SAFETY: the port lock is held.
         unsafe { dest_port.unlock() };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return false;
     }
     // SAFETY: the port lock is held.
@@ -1621,7 +1621,7 @@ unsafe fn copyin_header_reply(
     unsafe {
         (*entry).set_object(ptr::null_mut());
         ipc_entry::dealloc(space, dest_name, entry);
-        space.lock_done();
+        space.unlock_write();
 
         (*header).set_bits(
             mach_msg_bits_other(mbits)
@@ -1666,7 +1666,7 @@ unsafe fn copyin_header_notify(
     // SAFETY: the space lock is held.
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidDest);
     }
 
@@ -1686,13 +1686,13 @@ unsafe fn copyin_header_notify(
             }
             Some(_) => {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(SendError::InvalidNotify);
             }
             None => {
                 unsafe { entry_lookup_failed(header, notify) };
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(SendError::InvalidNotify);
             }
         }
@@ -1723,14 +1723,14 @@ unsafe fn copyin_header_same_name(
     let Some(entry) = (unsafe { space.entry_lookup(name) }) else {
         unsafe { entry_lookup_failed(header, name) };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidDest);
     };
 
     // SAFETY: the entry is live.
     if !unsafe { ipc_right::copyin_check(entry, reply_type) } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidReply);
     }
 
@@ -1738,7 +1738,7 @@ unsafe fn copyin_header_same_name(
         || reply_type == MACH_MSG_TYPE_PORT_SEND_ONCE
     {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidDest);
     } else if dest_type == MACH_MSG_TYPE_MAKE_SEND
         || dest_type == MACH_MSG_TYPE_MAKE_SEND_ONCE
@@ -1750,7 +1750,7 @@ unsafe fn copyin_header_same_name(
             ipc_right::copyin(space, name, entry, dest_type, false)
         }) else {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(SendError::InvalidDest);
         };
         rights.dest_port = object;
@@ -1773,7 +1773,7 @@ unsafe fn copyin_header_same_name(
             ipc_right::copyin(space, name, entry, dest_type, false)
         }) else {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(SendError::InvalidDest);
         };
         rights.dest_port = object;
@@ -1790,7 +1790,7 @@ unsafe fn copyin_header_same_name(
             (unsafe { ipc_right::copyin_two(space, name, entry) })
         else {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(SendError::InvalidDest);
         };
         rights.dest_port = object;
@@ -1836,7 +1836,7 @@ unsafe fn copyin_header_same_mixed(
         ipc_right::copyin(space, name, entry, MACH_MSG_TYPE_PORT_SEND, false)
     }) else {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidDest);
     };
     rights.dest_port = object;
@@ -1883,7 +1883,7 @@ unsafe fn copyin_header_bad_reply(
     let Some(entry) = (unsafe { space.entry_lookup(dest_name) }) else {
         unsafe { entry_lookup_failed(header, dest_name) };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidDest);
     };
 
@@ -1892,7 +1892,7 @@ unsafe fn copyin_header_bad_reply(
         ipc_right::copyin(space, dest_name, entry, dest_type, false)
     }) else {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidDest);
     };
     rights.dest_port = object;
@@ -1934,7 +1934,7 @@ unsafe fn copyin_header_distinct(
     let Some(dest_entry) = (unsafe { space.entry_lookup(dest_name) }) else {
         unsafe { entry_lookup_failed(header, dest_name) };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidDest);
     };
 
@@ -1942,14 +1942,14 @@ unsafe fn copyin_header_distinct(
     let Some(reply_entry) = (unsafe { space.entry_lookup(reply_name) }) else {
         unsafe { entry_lookup_failed(header, reply_name) };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidReply);
     };
 
     // SAFETY: the entry is live.
     if !unsafe { ipc_right::copyin_check(reply_entry, reply_type) } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidReply);
     }
 
@@ -1958,7 +1958,7 @@ unsafe fn copyin_header_distinct(
         ipc_right::copyin(space, dest_name, dest_entry, dest_type, false)
     }) else {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return Err(SendError::InvalidDest);
     };
     rights.dest_port = object;
@@ -2024,7 +2024,7 @@ unsafe fn copyin_header_distinct(
                     rights.reply_port,
                     NonNull::new(rights.reply_soright),
                 );
-                space.lock_done();
+                space.unlock_write();
 
                 if !rights.dest_soright.is_null() {
                     ipc_notify::dead_name(rights.dest_soright, dest_name);
@@ -2753,7 +2753,7 @@ unsafe fn copyout_header_request(
         unsafe { (*space.record()).free_list.is_null() };
     if inactive || no_reply_entry {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return false;
     }
 
@@ -2772,7 +2772,7 @@ unsafe fn copyout_header_request(
         // SAFETY: the destination lock is held.
         unsafe { dest_port.unlock() };
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         return false;
     }
     // SAFETY: the reply lock is held.
@@ -2781,7 +2781,7 @@ unsafe fn copyout_header_request(
         unsafe {
             reply_port.unlock();
             dest_port.unlock();
-            space.lock_done();
+            space.unlock_write();
         }
         return false;
     }
@@ -2796,7 +2796,7 @@ unsafe fn copyout_header_request(
         // SAFETY: the destination lock and the space lock are held.
         unsafe {
             dest_port.unlock();
-            space.lock_done();
+            space.unlock_write();
         }
         return false;
     };
@@ -2806,7 +2806,7 @@ unsafe fn copyout_header_request(
         let generation = (*entry).bits().wrapping_add(IE_BITS_GEN_ONE);
         (*entry).set_bits(generation | (MACH_PORT_TYPE_SEND_ONCE | 1));
         (*entry).set_object(reply);
-        space.lock_done();
+        space.unlock_write();
     }
 
     // SAFETY: the destination is live, locked, and active.
@@ -2921,7 +2921,7 @@ unsafe fn copyout_header_loop(
         // SAFETY: the space lock is held.
         if !unsafe { space.is_active() } {
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             return Err(ReceiveError::Header(Shortage::IPC_SPACE));
         }
 
@@ -2936,7 +2936,7 @@ unsafe fn copyout_header_loop(
                 Some(port)
             } else {
                 // SAFETY: the space lock is held.
-                unsafe { space.lock_done() };
+                unsafe { space.unlock_write() };
                 return Err(ReceiveError::InvalidNotify);
             }
         };
@@ -2969,7 +2969,7 @@ unsafe fn copyout_header_loop(
             // SAFETY: the destination is live and unlocked.
             unsafe { dest_port.lock() };
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             state.reply = IO_DEAD;
             state.reply_name = MACH_PORT_NAME_DEAD;
             state.need_copyout = false;
@@ -3013,7 +3013,7 @@ unsafe fn copyout_header_entry(
                 if let Some(port) = state.notify_port {
                     ipc_port::release_sonce(port);
                 }
-                space.lock_done();
+                space.unlock_write();
             }
             return Err(if error == Error::ResourceShortage {
                 ReceiveError::Header(Shortage::IPC_KERNEL)
@@ -3053,7 +3053,7 @@ unsafe fn copyout_header_entry(
         reply_port.unlock();
         ipc_port::release_sonce(port);
         ipc_entry::dealloc(space, state.reply_name, state.entry.cast());
-        space.lock_done();
+        space.unlock_write();
         reply_port.lock();
     }
 
@@ -3113,7 +3113,7 @@ unsafe fn copyout_header_need_copyout(
 
     // SAFETY: the destination is live and unlocked.
     unsafe { dest_port.lock() };
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 }
 
 /// The invalid-reply branch of [`copyout_header()`]: read-lock the space,
@@ -3137,7 +3137,7 @@ unsafe fn copyout_header_bad_reply(
     // SAFETY: the space lock is held.
     if !unsafe { space.is_active() } {
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_read() };
         return Err(ReceiveError::Header(Shortage::IPC_SPACE));
     }
 
@@ -3154,7 +3154,7 @@ unsafe fn copyout_header_bad_reply(
                 unsafe { entry_lookup_failed(header, notify) };
             }
             // SAFETY: the space lock is held.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_read() };
             return Err(ReceiveError::InvalidNotify);
         }
     }
@@ -3162,7 +3162,7 @@ unsafe fn copyout_header_bad_reply(
     // SAFETY: the header names a live destination.
     unsafe { dest_port.lock() };
     // SAFETY: the space lock is held.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_read() };
     // SAFETY: the reply is null or dead.
     Ok(unsafe { ipc_port::invalid_port_to_name(reply) })
 }
@@ -3302,7 +3302,7 @@ pub(crate) unsafe fn copyout_object(
                         if bits & IE_BITS_UREFS_MASK < MACH_PORT_UREFS_MAX {
                             (*entry).set_bits(bits);
                         }
-                        space.lock_done();
+                        space.unlock_write();
                     }
                     fast = true;
                 }
@@ -3318,7 +3318,7 @@ pub(crate) unsafe fn copyout_object(
         }
 
         // SAFETY: the space lock is held.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
     }
 
     match unsafe { ipc_object::copyout(space, object, msgt_name, true) } {

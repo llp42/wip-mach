@@ -200,7 +200,7 @@ pub(crate) unsafe fn create(
     // SAFETY: the space is live and locked.
     if !unsafe { space.is_active() } {
         // SAFETY: the space is live and locked.
-        unsafe { space.lock_done() };
+        unsafe { space.unlock_write() };
         // SAFETY: the request is the fresh allocation from above.
         unsafe { free(marequest) };
         return Err(SendError::InvalidNotify);
@@ -217,7 +217,7 @@ pub(crate) unsafe fn create(
             // port's receiver has nothing to mark, so the notify name cannot
             // be honoured.
             // SAFETY: the space is live and write-locked.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             // SAFETY: the request is the fresh allocation from above.
             unsafe { free(marequest) };
             return Err(SendError::InvalidNotify);
@@ -227,7 +227,7 @@ pub(crate) unsafe fn create(
         let bits = unsafe { (*entry).bits() };
         if bits & IE_BITS_MAREQUEST != 0 {
             // SAFETY: the space is live and write-locked.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             // SAFETY: the request is the fresh allocation from above.
             unsafe { free(marequest) };
             return Err(SendError::NotifyInProgress);
@@ -238,7 +238,7 @@ pub(crate) unsafe fn create(
             (unsafe { ipc_port::lookup_notify(space, notify) })
         else {
             // SAFETY: the space is live and write-locked.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             // SAFETY: the request is the fresh allocation from above.
             unsafe { free(marequest) };
             return Err(SendError::InvalidNotify);
@@ -270,7 +270,7 @@ pub(crate) unsafe fn create(
             (unsafe { ipc_port::lookup_notify(space, notify) })
         else {
             // SAFETY: the space is live and write-locked.
-            unsafe { space.lock_done() };
+            unsafe { space.unlock_write() };
             // SAFETY: the request is the fresh allocation from above.
             unsafe { free(marequest) };
             return Err(SendError::InvalidNotify);
@@ -288,7 +288,7 @@ pub(crate) unsafe fn create(
     }
 
     // SAFETY: the space is live and write-locked.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
 
     Ok(marequest)
 }
@@ -396,7 +396,7 @@ pub(crate) unsafe fn destroy(marequest: *mut IpcMarequest) {
     }
 
     // SAFETY: the space is live and write-locked.
-    unsafe { space.lock_done() };
+    unsafe { space.unlock_write() };
     // SAFETY: the request holds a reference to the space.
     unsafe { ipc_space::release(space) };
 

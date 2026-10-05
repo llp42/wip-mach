@@ -269,17 +269,17 @@ unsafe fn fast_send_right_lookup(name: c_uint) -> Option<IpcPort> {
         space.lock_read();
         let found = space.entry_lookup(name);
         let Some(entry) = found else {
-            space.lock_done();
+            space.unlock_read();
             return None;
         };
         if (*entry).bits() & IE_BITS_TYPE_MASK != MACH_PORT_TYPE_SEND {
-            space.lock_done();
+            space.unlock_read();
             return None;
         }
 
         let port = IpcPort::from_raw((*entry).object());
         port.lock();
-        space.lock_done();
+        space.unlock_read();
         Some(port)
     }
 }
