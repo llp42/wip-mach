@@ -16,19 +16,19 @@ use crate::arch::x86_64::ioapic;
 use crate::arch::x86_64::irq;
 use crate::arch::x86_64::kd::{KEYBOARD, keyboard};
 use crate::arch::x86_64::pio::Port;
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::device::ds_routines::{device_read_alloc, ds_read_done, iodone};
 use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 use crate::device::subrs;
 use crate::kern::console::kprint;
 use crate::kern::sched_prim::{assert_wait, thread_block};
 use crate::utils::kd_queue::{KdEvent, KdEventQueue, KevType, MouseMotion};
-use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_long, c_uint};
 use core::mem::size_of;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use lock::IrqSpinLock;
 
 /// The signature of an interrupt handler.
 type InterruptHandler = unsafe extern "C" fn(c_int);
@@ -84,19 +84,11 @@ const K_CMD: u16 = 0x64;
 const K_IBUF_FUL: u8 = 0x02;
 
 /// Whether `/dev/mouse` is open.
-static MOUSE_IN_USE: crate::arch::x86_64::kd::SyncCell<c_int> =
-    crate::arch::x86_64::kd::SyncCell(UnsafeCell::new(0));
+static MOUSE_IN_USE: AtomicI32 = AtomicI32::new(0);
 
 /// Whether the mouse has taken over the console (X is running).
 pub(crate) fn mouse_in_use() -> c_int {
-    // SAFETY: a plain integer, written at SPLKD.
-    unsafe { *MOUSE_IN_USE.0.get() }
-}
-
-/// Record that the mouse took (`1`) or gave back (`0`) the console.
-pub(crate) fn set_mouse_in_use(value: c_int) {
-    // SAFETY: a plain integer, written at SPLKD.
-    unsafe { *MOUSE_IN_USE.0.get() = value };
+    MOUSE_IN_USE.load(Ordering::Acquire)
 }
 
 /// The driver's mutable state: the C file's file-scope globals.
@@ -148,14 +140,20 @@ impl State {
     }
 }
 
-static STATE: crate::arch::x86_64::kd::SyncCell<State> =
-    crate::arch::x86_64::kd::SyncCell(UnsafeCell::new(State::new()));
+// SAFETY: the read queue links requests the device layer owns, which any CPU
+// may complete, and the saved handler is a plain function pointer.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the queued requests are shared between CPUs, which their type \
+              does not say"
+)]
+unsafe impl Send for State {}
 
-/// The one state object.
-fn state() -> &'static mut State {
-    // SAFETY: the driver runs at SPLKD; nothing else accesses `STATE`.
-    unsafe { &mut *STATE.0.get() }
-}
+/// The mouse state, under an irq spin lock, since the mouse interrupts feed
+/// it.  The keyboard interrupt hands it PS/2 bytes with [`KEYBOARD`] held,
+/// so nothing takes [`KEYBOARD`] while holding this lock.
+static STATE: IrqSpinLock<State, MachPlatform> =
+    IrqSpinLock::new(State::new());
 
 /// The read queue head.
 ///
@@ -185,8 +183,8 @@ fn enqueue(s: &mut State, ev: &KdEvent) {
     }
     // SAFETY: `s` is the state in `STATE`.
     while let Some(entry) = unsafe { read_queue(s) }.pop_front() {
-        // SAFETY: this runs at SPLKD; each entry is an `io_req`, still owned
-        // by the device layer and valid for `iodone()`.
+        // SAFETY: the state's lock is held; each entry is an `io_req`, still
+        // owned by the device layer and valid for `iodone()`.
         unsafe { iodone(ptr::from_mut(entry)) };
     }
 }
@@ -213,59 +211,56 @@ fn init_mouse_hw(s: &State, unit: c_int, mode: u8) {
     Port::new(base_addr + RIE).write_u8(IERD | IELS);
 }
 
-/// Takes over the unit's interrupt vector.
+/// Takes over the unit's interrupt vector; the line is masked while its
+/// handler and unit change.
 fn serial_open(s: &mut State, dev: DevT) {
     let unit = c_int::from(dev & 7);
     let mouse_pic = com::irq(unit);
-    // SAFETY: raising to `splhigh` has no precondition.
-    let sp = unsafe { spl::splhi() };
+    let Ok(line) = c_uint::try_from(mouse_pic) else {
+        return;
+    };
+    irq::__disable_irq(line);
     s.oldvect = irq::handler(mouse_pic);
     irq::set_handler(mouse_pic, Some(mouseintr));
     s.oldunit = irq::unit(mouse_pic);
     irq::set_unit(mouse_pic, unit);
-    // SAFETY: `sp` is the level `splhi()` returned.
-    unsafe { spl::splx(sp) };
+    irq::__enable_irq(line);
 }
 
-/// Routes the IRQ to the keyboard driver.
+/// Routes the IRQ to the keyboard driver: the line is still masked while its
+/// handler changes, and unmasked after.
 fn kd_open(s: &mut State, mouse_pic: c_int) {
-    // SAFETY: raising to `splhigh` has no precondition.
-    let sp = unsafe { spl::splhi() };
     s.oldvect = irq::handler(mouse_pic);
     irq::set_handler(mouse_pic, Some(keyboard::kdintr));
     ioapic::unmask(mouse_pic);
-    // SAFETY: `sp` is the level `splhi()` returned.
-    unsafe { spl::splx(sp) };
 }
 
-/// Gives back the unit's interrupt vector.
+/// Gives back the unit's interrupt vector; the line is masked while its
+/// handler and unit change.
 fn serial_close(s: &State, dev: DevT) {
-    // SAFETY: raising to `splhigh` has no precondition.
-    let sp = unsafe { spl::splhi() };
     let unit = c_int::from(dev & 7);
     let mouse_pic = com::irq(unit);
     let base_addr = com::base_addr(unit) as u16;
     Port::new(base_addr + RIE).write_u8(0);
     Port::new(base_addr + RMC).write_u8(0);
+    let Ok(line) = c_uint::try_from(mouse_pic) else {
+        return;
+    };
+    irq::__disable_irq(line);
     irq::set_handler(mouse_pic, s.oldvect);
     irq::set_unit(mouse_pic, s.oldunit);
-    // SAFETY: `sp` is the level `splhi()` returned.
-    unsafe { spl::splx(sp) };
+    irq::__enable_irq(line);
 }
 
-/// Routes the IRQ back away from the keyboard driver.
+/// Routes the IRQ back away from the keyboard driver, masking it first.
 fn kd_close(s: &State, mouse_pic: c_int) {
-    // SAFETY: raising to `splhigh` has no precondition.
-    let sp = unsafe { spl::splhi() };
     ioapic::mask(mouse_pic);
     irq::set_handler(mouse_pic, s.oldvect);
-    // SAFETY: `sp` is the level `splhi()` returned.
-    unsafe { spl::splx(sp) };
 }
 
-/// Sends a byte to the PS/2 mouse, through the keyboard controller.
+/// Sends a byte to the PS/2 mouse, through the keyboard controller.  The
+/// caller holds [`KEYBOARD`].
 fn write_char(ch: u8) {
-    let _keyboard = KEYBOARD.lock();
     while Port::new(K_STATUS).read_u8() & K_IBUF_FUL != 0 {
         core::hint::spin_loop();
     }
@@ -276,25 +271,29 @@ fn write_char(ch: u8) {
     Port::new(K_RDWR).write_u8(ch);
 }
 
-/// Waits for a byte the interrupt path delivers.
-fn read_char(s: &mut State) -> c_int {
-    if s.mouse_char_index >= s.mousebufsize {
-        return -1;
-    }
-    while s.mousebufindex <= s.mouse_char_index {
+/// Waits for a byte the interrupt path delivers, or `-1` past the buffer.
+fn read_char() -> c_int {
+    loop {
+        let mut s = STATE.lock();
+        if s.mouse_char_index >= s.mousebufsize {
+            return -1;
+        }
+        if s.mousebufindex > s.mouse_char_index {
+            let ch = s.mousebuf[s.mouse_char_index as usize];
+            s.mouse_char_index += 1;
+            return c_int::from(ch);
+        }
         s.mouse_char_wanted = true;
-        // SAFETY: the wait channel is the driver's own buffer, and the handler
-        // wakes this exact address.
+        // SAFETY: the wait channel is the buffer in the static state, which
+        // the handler wakes; the wait is asserted under the lock, so a byte
+        // that arrives after the check still wakes this thread, and the
+        // block holds no lock.
         unsafe {
             assert_wait(NonNull::new(ptr::addr_of_mut!(s.mousebuf).cast()), 0);
-        };
-        // SAFETY: no thread state to hand over; the caller resumes after the
-        // wakeup.
-        unsafe { thread_block(None) };
+            drop(s);
+            thread_block(None);
+        }
     }
-    let ch = s.mousebuf[s.mouse_char_index as usize];
-    s.mouse_char_index += 1;
-    c_int::from(ch)
 }
 
 /// Resets the byte the interrupt path delivers.
@@ -303,64 +302,52 @@ const fn read_reset(s: &mut State) {
     s.mouse_char_index = 0;
 }
 
-/// Enables the PS/2 mouse.
-fn ps2_open(s: &mut State, _dev: DevT) {
-    // SAFETY: raising to `spltty` has no precondition.
-    let sp = unsafe { spl::spltty() };
-    s.lastbuttons = 0;
-    s.mouse_char_cmd = true;
+/// Resets the reply buffer and sends `ch` to the PS/2 mouse.  The keyboard
+/// lock is held across both, so no byte the interrupt path delivers can land
+/// between them.
+fn send_command(ch: u8) {
+    let _keyboard = KEYBOARD.lock();
+    read_reset(&mut STATE.lock());
+    write_char(ch);
+}
+
+/// Enables the PS/2 mouse; the caller has set the command mode.
+fn ps2_open() {
     {
         let _keyboard = KEYBOARD.lock();
         keyboard::sendcmd(0xa8);
         keyboard::cmdreg_write(0x47);
     }
-    read_reset(s);
-    write_char(0xff);
-    if read_char(s) != 0xfa {
-        // SAFETY: `sp` is the level `spltty()` returned.
-        unsafe { spl::splx(sp) };
+    send_command(0xff);
+    if read_char() != 0xfa {
         return;
     }
-    let _ = read_char(s);
-    let _ = read_char(s);
-    read_reset(s);
-    write_char(0xea);
-    if read_char(s) != 0xfa {
-        // SAFETY: `sp` is the level `spltty()` returned.
-        unsafe { spl::splx(sp) };
+    let _ = read_char();
+    let _ = read_char();
+    send_command(0xea);
+    if read_char() != 0xfa {
         return;
     }
-    read_reset(s);
-    write_char(0xf4);
-    if read_char(s) != 0xfa {
-        // SAFETY: `sp` is the level `spltty()` returned.
-        unsafe { spl::splx(sp) };
+    send_command(0xf4);
+    if read_char() != 0xfa {
         return;
     }
-    read_reset(s);
+    let mut s = STATE.lock();
+    read_reset(&mut s);
     s.mouse_char_cmd = false;
-    // SAFETY: `sp` is the level `spltty()` returned.
-    unsafe { spl::splx(sp) };
 }
 
 /// Disables the PS/2 mouse.
-fn ps2_close(s: &mut State, _dev: DevT) {
-    // SAFETY: raising to `spltty` has no precondition.
-    let sp = unsafe { spl::spltty() };
-    s.mouse_char_cmd = true;
-    read_reset(s);
-    write_char(0xff);
-    if read_char(s) == 0xfa {
-        let _ = read_char(s);
-        let _ = read_char(s);
+fn ps2_close() {
+    STATE.lock().mouse_char_cmd = true;
+    send_command(0xff);
+    if read_char() == 0xfa {
+        let _ = read_char();
+        let _ = read_char();
     }
-    {
-        let _keyboard = KEYBOARD.lock();
-        keyboard::sendcmd(0xa7);
-        keyboard::cmdreg_write(0x65);
-    }
-    // SAFETY: `sp` is the level `spltty()` returned.
-    unsafe { spl::splx(sp) };
+    let _keyboard = KEYBOARD.lock();
+    keyboard::sendcmd(0xa7);
+    keyboard::cmdreg_write(0x65);
 }
 
 /// Decodes a Mouse Systems packet.
@@ -557,41 +544,42 @@ fn handle_byte(s: &mut State, ch: u8) {
 ///
 /// # Safety
 ///
-/// The device layer calls this with a valid, open request; everything else
-/// runs at `spltty`.
+/// The device layer calls this with a valid, open request.
 pub(crate) unsafe fn mouseopen(
     dev: DevT,
     _flags: c_int,
     _ior: *mut IoReq,
 ) -> IoResult {
-    if mouse_in_use() != 0 {
+    if MOUSE_IN_USE
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return Err(DeviceError::AlreadyOpen);
     }
-    set_mouse_in_use(1);
-    let s = state();
+    let mut s = STATE.lock();
     s.queue.clear();
     s.lastbuttons = MOUSE_ALL_UP;
     s.mouse_type = c_int::from(((dev & 0xff) & 0xf8) >> 3);
     match s.mouse_type {
         MICROSOFT_MOUSE7 => {
             s.mousebufsize = 3;
-            serial_open(s, dev);
-            init_mouse_hw(s, c_int::from(dev & 7), LC7);
+            serial_open(&mut s, dev);
+            init_mouse_hw(&s, c_int::from(dev & 7), LC7);
         }
         MICROSOFT_MOUSE => {
             s.mousebufsize = 3;
-            serial_open(s, dev);
-            init_mouse_hw(s, c_int::from(dev & 7), LC8);
+            serial_open(&mut s, dev);
+            init_mouse_hw(&s, c_int::from(dev & 7), LC8);
         }
         MOUSE_SYSTEM_MOUSE => {
             s.mousebufsize = 5;
-            serial_open(s, dev);
-            init_mouse_hw(s, c_int::from(dev & 7), LC8);
+            serial_open(&mut s, dev);
+            init_mouse_hw(&s, c_int::from(dev & 7), LC8);
         }
         LOGITECH_TRACKMAN => {
             s.mousebufsize = 3;
-            serial_open(s, dev);
-            init_mouse_hw(s, c_int::from(dev & 7), LC7);
+            serial_open(&mut s, dev);
+            init_mouse_hw(&s, c_int::from(dev & 7), LC7);
             s.track_man[0] = com::getc(c_int::from(dev & 7));
             s.track_man[1] = com::getc(c_int::from(dev & 7));
             if s.track_man[0] != 0x4d && s.track_man[1] != 0x33 {
@@ -600,8 +588,14 @@ pub(crate) unsafe fn mouseopen(
         }
         IBM_MOUSE => {
             s.mousebufsize = 3;
-            kd_open(s, IBM_MOUSE_IRQ);
-            ps2_open(s, dev);
+            s.lastbuttons = 0;
+            s.mouse_char_cmd = true;
+            kd_open(&mut s, IBM_MOUSE_IRQ);
+            // The PS/2 handshake sleeps for the mouse's replies, so it runs
+            // with the state's lock released.
+            drop(s);
+            ps2_open();
+            s = STATE.lock();
         }
         _ => {}
     }
@@ -615,13 +609,13 @@ pub(crate) unsafe fn mouseopen(
 ///
 /// The device layer calls this for an open mouse.
 pub(crate) unsafe fn mouseclose(dev: DevT, _flags: c_int) {
-    let s = state();
-    match s.mouse_type {
+    let mouse_type = STATE.lock().mouse_type;
+    match mouse_type {
         MICROSOFT_MOUSE | MICROSOFT_MOUSE7 | MOUSE_SYSTEM_MOUSE
-        | LOGITECH_TRACKMAN => serial_close(s, dev),
+        | LOGITECH_TRACKMAN => serial_close(&STATE.lock(), dev),
         IBM_MOUSE => {
-            ps2_close(s, dev);
-            kd_close(s, IBM_MOUSE_IRQ);
+            ps2_close();
+            kd_close(&STATE.lock(), IBM_MOUSE_IRQ);
             let mut i: c_int = 20000;
             while i != 0 {
                 i -= 1;
@@ -632,8 +626,8 @@ pub(crate) unsafe fn mouseclose(dev: DevT, _flags: c_int) {
         }
         _ => {}
     }
-    s.queue.clear();
-    set_mouse_in_use(0);
+    STATE.lock().queue.clear();
+    MOUSE_IN_USE.store(0, Ordering::Release);
 }
 
 /// Reads queued mouse events, or queues the request until one arrives.
@@ -641,33 +635,28 @@ pub(crate) unsafe fn mouseclose(dev: DevT, _flags: c_int) {
 /// # Safety
 ///
 /// The device layer calls this with a valid, read-only request whose buffer
-/// `device_read_alloc()` may allocate; everything else runs at `spltty`.
+/// `device_read_alloc()` may allocate.
 pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> IoResult {
     let wanted = unsafe { (*ior).count() };
     if wanted % size_of::<KdEvent>() as c_long != 0 {
         return Err(DeviceError::InvalidSize);
     }
     unsafe { device_read_alloc(ior, wanted as usize) }?;
-    let s = state();
-    // SAFETY: queueing a request and the event queue share SPLKD.
-    let sp = unsafe { spl::spltty() };
+    let mut s = STATE.lock();
     if s.queue.is_empty() {
         if unsafe { (*ior).mode() } & D_NOWAIT != 0 {
-            // SAFETY: `sp` is the level `spltty()` returned.
-            unsafe { spl::splx(sp) };
             return Err(DeviceError::WouldBlock);
         }
         unsafe { (*ior).set_done(mouse_read_done) };
-        // SAFETY: the read queue is this state's, at SPLKD, and the request
+        // SAFETY: the read queue is the locked state's, and the request
         // stays at its address until `iodone()`.
-        unsafe { read_queue(s).push_back_ptr(NonNull::new_unchecked(ior)) };
-        // SAFETY: `sp` is the level `spltty()` returned.
-        unsafe { spl::splx(sp) };
+        unsafe {
+            read_queue(&mut s).push_back_ptr(NonNull::new_unchecked(ior));
+        };
         return Ok(DeviceSuccess::IoQueued);
     }
     let count = drain(&mut s.queue, unsafe { &mut *ior });
-    // SAFETY: `sp` is the level `spltty()` returned.
-    unsafe { spl::splx(sp) };
+    drop(s);
     unsafe { (*ior).set_residual((*ior).count() - count) };
     Ok(DeviceSuccess::Success)
 }
@@ -677,20 +666,18 @@ pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> IoResult {
 /// # Safety
 ///
 /// `ior` must be the live request `mouseread()` queued, and the call must
-/// come through `ior`'s `done` slot at `spltty`, as `iodone()` invokes it.
+/// come through `ior`'s `done` slot, as `iodone()` invokes it.
 unsafe fn mouse_read_done(ior: *mut IoReq) -> bool {
-    let s = state();
-    let sp = unsafe { spl::spltty() };
+    let mut s = STATE.lock();
     if s.queue.is_empty() {
         unsafe { (*ior).set_done(mouse_read_done) };
-        unsafe { read_queue(s).push_back_ptr(NonNull::new_unchecked(ior)) };
-        // SAFETY: `sp` is the level `spltty()` returned.
-        unsafe { spl::splx(sp) };
+        unsafe {
+            read_queue(&mut s).push_back_ptr(NonNull::new_unchecked(ior));
+        };
         return false;
     }
     let count = drain(&mut s.queue, unsafe { &mut *ior });
-    // SAFETY: `sp` is the level `spltty()` returned.
-    unsafe { spl::splx(sp) };
+    drop(s);
     unsafe { (*ior).set_residual((*ior).count() - count) };
     // SAFETY: the request is complete; its data buffer is populated.
     unsafe { ds_read_done(ior) };
@@ -735,22 +722,22 @@ unsafe extern "C" fn mouseintr(unit: c_int) {
     }
     if id & IDRD != 0 {
         let ch = Port::new(base_addr + RDAT).read_u8();
-        handle_byte(state(), ch);
+        handle_byte(&mut STATE.lock(), ch);
     }
 }
 
-/// Feeds a PS/2 byte to the packet decoder; called at `spltty` from the kd
-/// interrupt path.
+/// Feeds a PS/2 byte to the packet decoder; the kd interrupt path calls
+/// this.
 pub(crate) fn mouse_handle_byte(ch: u8) {
-    handle_byte(state(), ch);
+    handle_byte(&mut STATE.lock(), ch);
 }
 
 /// Queues a motion event.
 pub(crate) fn mouse_moved(where_: MouseMotion) {
-    motion_event(state(), where_);
+    motion_event(&mut STATE.lock(), where_);
 }
 
 /// Queues a button event.
 pub(crate) fn mouse_button(which: KevType, direction: u8) {
-    button_event(state(), which, direction);
+    button_event(&mut STATE.lock(), which, direction);
 }
