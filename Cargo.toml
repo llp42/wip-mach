@@ -11,6 +11,7 @@ license = "GPL-2.0-or-later"
 repository = "https://github.com/llp42/wip-mach"
 
 [workspace.dependencies]
+acpi = { path = "crates/acpi" }
 collections = { path = "crates/collections" }
 kmem = { path = "crates/kmem" }
 lock = { path = "crates/lock" }

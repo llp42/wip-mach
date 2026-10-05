@@ -35,7 +35,10 @@ deletes its entry; a change that opens one adds it.
   `ELFCLASS32` is rejected (ADR 0003).  The radix tree is
   `kmem::RadixTree`, MIT code derived from an MIT upstream (ADR 0053),
   with non-owning pointer leaves over `A: Alloc`; the IPC name tables use
-  it and `kern/rdxtree.rs` is gone.
+  it and `kern/rdxtree.rs` is gone.  The ACPI table reader passes the
+  split test and lives in `crates/acpi` as original MIT code designed
+  from the ACPI specification; the kernel keeps the APIC wiring in
+  `arch/x86_64/acpi.rs`.
 
 ## Host tests compile kernel sources through a shim
 

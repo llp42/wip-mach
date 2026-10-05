@@ -10,7 +10,6 @@
 //! `IrqOverrideData` and `ApicInfo` records keep the hardware's and the MADT's
 //! field order.
 
-use crate::arch::x86_64::acpi_parse_apic::HPET_ADDR;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
 use crate::config::MAX_NCPUS;
 use crate::kern::console::kprint;
@@ -359,6 +358,9 @@ const _: () = {
 /// The HPET period in nanoseconds.
 static HPET_PERIOD_NSEC: AtomicU32 = AtomicU32::new(0);
 
+/// The mapped HPET register window, or null when the machine has none.
+static HPET_ADDR: AtomicPtr<u32> = AtomicPtr::new(ptr::null_mut());
+
 /// The zero page [`LAPIC`] points at until ACPI maps the real one, so a lookup
 /// before then reports the master.
 static mut DUMMY_LAPIC: ApicLocalUnit = ApicLocalUnit::ZERO;
@@ -382,7 +384,7 @@ static APIC_ID_MASK: AtomicU8 = AtomicU8::new(0xf);
 ///
 /// # Invariants
 ///
-/// `base` names the register block `acpi_parse_apic.rs` mapped for the HPET,
+/// `base` names the register block `acpi.rs` mapped for the HPET,
 /// so the register constants above are valid byte offsets into it.
 struct Hpet {
     base: NonNull<u8>,
@@ -477,6 +479,11 @@ pub(crate) fn ipi_pending() -> bool {
 /// Publishes the mapped local-APIC page.
 pub(crate) fn publish_lapic(unit: *mut ApicLocalUnit) {
     LAPIC.store(unit, Ordering::Relaxed);
+}
+
+/// Publishes the mapped HPET register window, or null for none.
+pub(crate) fn publish_hpet(window: *mut u32) {
+    HPET_ADDR.store(window, Ordering::Relaxed);
 }
 
 /// The mapped local-APIC page.

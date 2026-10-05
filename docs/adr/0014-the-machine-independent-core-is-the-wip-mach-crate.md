@@ -12,9 +12,9 @@ The final map is not fixed; the test is. Code moves out of `kernel`
 when a `Platform` seam can carry what it needs without mirroring its
 internals. Code that cannot move stays in `kernel`, and that is the
 target, not debt. Mechanisms with no Mach semantics — the radix tree,
-the boot-script parser, the ELF loader — take the same test and move
-to crates of their own. A planned move is a `DEBT.md` entry
-(ADR 0012); code that stays needs no record.
+the boot-script parser, the ELF loader, the ACPI table reader — take
+the same test and move to crates of their own. A planned move is a
+`DEBT.md` entry (ADR 0012); code that stays needs no record.
 
 ## Considered Options
 

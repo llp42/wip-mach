@@ -4,7 +4,7 @@
 //! The `x86_64` kernel's architecture code, mirroring the shared `i386/`
 //! headers of the C tree.
 
-pub mod acpi_parse_apic;
+pub mod acpi;
 pub mod apic;
 pub mod ast;
 pub mod autoconf;

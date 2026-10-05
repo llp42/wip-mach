@@ -250,7 +250,7 @@ pub(crate) fn machine_init() {
     // SAFETY: the FPU init runs once, on the boot CPU.
     unsafe { fpu::init_fpu() };
 
-    if let Err(error) = crate::arch::x86_64::acpi_parse_apic::init() {
+    if let Err(error) = crate::arch::x86_64::acpi::init() {
         kprint!("acpi_apic_init failed with {:?}\n", error);
         loop {
             core::hint::spin_loop();
