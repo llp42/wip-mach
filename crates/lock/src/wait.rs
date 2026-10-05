@@ -15,9 +15,10 @@
 //! A waiter lives on its parked thread's stack.  Its unparker takes it
 //! off the queue, sets its woken flag and unparks its thread, all under
 //! the bucket lock; setting the flag is the unparker's last touch of the
-//! waiter, whose thread may return and free it at once.  So a waiter is
-//! on its queue exactly while its flag is clear, as seen under the bucket
-//! lock.
+//! waiter.  So a waiter is on its queue exactly while its flag is clear,
+//! as seen under the bucket lock.  A woken thread takes the bucket lock
+//! once more before its park returns: its unparker is then done with the
+//! thread as well, which may exit and have its record freed at once.
 
 #[cfg(debug_assertions)]
 use crate::checker;
@@ -259,7 +260,7 @@ fn sleep<P: Platform>(
         platform: PhantomData,
     };
     #[cfg(not(panic = "unwind"))]
-    let _ = (bucket, node);
+    let _ = node;
     before_sleep();
     #[cfg(debug_assertions)]
     checker::may_sleep::<P>();
@@ -268,6 +269,9 @@ fn sleep<P: Platform>(
     }
     #[cfg(panic = "unwind")]
     core::mem::forget(unqueue);
+    // The flag can be seen set while the unparker, still holding the
+    // bucket lock, has yet to unpark this thread.
+    drop(bucket.lock::<P>());
     true
 }
 

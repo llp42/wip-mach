@@ -121,8 +121,8 @@ pub unsafe trait Platform: 'static {
     /// Makes `thread`'s pending or next [`Self::park`] return.
     ///
     /// May be called from any context, including an irq-quiet section.
-    /// `thread` may already have stopped waiting, and even have exited:
-    /// the unpark must then be harmless, as for [`Self::is_running`].
+    /// `thread` may already have stopped parking, but the lock wait it
+    /// parked for has not returned, so it has not exited.
     fn unpark(thread: ThreadRef);
 
     /// Returns the wait table every sleeping lock of this platform queues

@@ -643,6 +643,23 @@ mod loom_tests {
     }
 
     #[test]
+    fn woken_waiter_may_exit_once_it_returns() {
+        loom::model(|| {
+            let lock = Arc::new(Mutex::<usize, Host>::new(0));
+            let other = {
+                let lock = Arc::clone(&lock);
+                thread::spawn(move || {
+                    *lock.lock() += 1;
+                    Host::exit();
+                })
+            };
+            *lock.lock() += 1;
+            other.join().unwrap();
+            assert_eq!(*lock.lock(), 2);
+        });
+    }
+
+    #[test]
     fn lock_parks_and_hands_writes_on() {
         loom::model(|| {
             let lock = Arc::new(Mutex::<usize, Host>::new(0));

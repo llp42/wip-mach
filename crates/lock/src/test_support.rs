@@ -11,10 +11,11 @@
 #[cfg(debug_assertions)]
 use crate::checker::HeldLocks;
 use crate::platform::{Platform, ThreadRef};
+use crate::sync;
 use crate::wait::{Bucket, WaitTable};
 use core::cell::Cell;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{self, Ordering};
 #[cfg(loom)]
 use loom::thread::{self, Thread};
 #[cfg(not(loom))]
@@ -27,11 +28,15 @@ pub(crate) struct Host;
 /// The per-thread record a [`ThreadRef`] points at.
 ///
 /// `parked` feeds [`Platform::is_running`] only; it is a plain atomic even
-/// under loom, which is not asked to model it.
+/// under loom, which is not asked to model it.  `exited` stands in for a
+/// thread whose record its kernel has freed: [`Host::unpark`] panics on it.
+/// Loom models it, so it can run the exit between an unparker's last
+/// look at the waiter and its unpark.
 #[repr(align(8))]
 struct HostThread {
     thread: Thread,
-    parked: AtomicBool,
+    parked: atomic::AtomicBool,
+    exited: sync::AtomicBool,
 }
 
 struct Local {
@@ -46,10 +51,12 @@ struct Local {
 
 impl Local {
     fn new() -> Self {
-        // Leaked, so a late unpark of a finished thread stays sound.
+        // Leaked, so `is_running` on an owner that has finished stays
+        // sound.
         let me = Box::leak(Box::new(HostThread {
             thread: thread::current(),
-            parked: AtomicBool::new(false),
+            parked: atomic::AtomicBool::new(false),
+            exited: sync::AtomicBool::new(false),
         }));
         Self {
             me,
@@ -103,6 +110,14 @@ impl Host {
     #[cfg(not(loom))]
     pub(crate) fn panic_in_next_park() {
         LOCAL.with(|local| local.interrupt_park.set(true));
+    }
+
+    /// Marks the running thread exited, as a kernel thread whose record
+    /// goes back to its allocator the moment it holds and waits for
+    /// nothing.
+    #[cfg(loom)]
+    pub(crate) fn exit() {
+        LOCAL.with(|local| local.me.exited.store(true, Ordering::SeqCst));
     }
 }
 
@@ -196,7 +211,12 @@ unsafe impl Platform for Host {
     }
 
     fn unpark(thread: ThreadRef) {
-        host_thread(thread).thread.unpark();
+        let record = host_thread(thread);
+        assert!(
+            !record.exited.load(Ordering::SeqCst),
+            "unpark reached an exited thread",
+        );
+        record.thread.unpark();
     }
 
     fn wait_table() -> &'static WaitTable {
