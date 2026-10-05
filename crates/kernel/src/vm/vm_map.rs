@@ -9,6 +9,7 @@
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::x86_64::per_cpu;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_END;
 use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_START;
 use crate::arch::x86_64::pmap::kernel_pmap_ptr;
@@ -22,7 +23,7 @@ use crate::arch::x86_64::pmap::pmap_remove;
 use crate::ipc::{IpcPort, IpcSpace, ipc_port};
 use crate::kern::console::{CStrArg, kprint};
 use crate::kern::debug::kpanic;
-use crate::kern::lock::{LockData, SimpleLock};
+use crate::kern::lock::SimpleLock;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, thread_block, thread_wakeup_prim,
 };
@@ -53,6 +54,7 @@ use core::mem::{ManuallyDrop, offset_of, size_of};
 use core::ops::Bound;
 use core::ptr::{self, NonNull, addr_of_mut};
 use core::sync::atomic::{AtomicU32, Ordering};
+use lock::RawMutex;
 
 /// `VM_MAP_COPY_PAGE_LIST_MAX`: pages a page-list copy carries inline.
 pub const VM_MAP_COPY_PAGE_LIST_MAX: usize = 64;
@@ -335,8 +337,8 @@ pub const VM_MAP_WIRING_REQUIRED: u32 = 1 << 1;
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct VmMap {
-    /// The sleep lock protecting the map data.
-    pub lock: LockData,
+    /// The lock protecting the map data.
+    pub(crate) lock: RawMutex<MachPlatform>,
     pub hdr: VmMapHeader,
     pub pmap: *mut Pmap,
     /// Current virtual size.
@@ -363,11 +365,17 @@ pub struct VmMap {
     pub size_max_limit: VmSize,
 }
 
-assert_layout!(VmMap, 200, 8, {
-    lock: 0, hdr: 16, pmap: 104, size: 112, size_wired: 120,
-    size_none: 128, ref_count: 136, ref_lock: 140, hint: 144,
-    hint_lock: 152, first_free: 160, flags: 168, timestamp: 172,
-    name: 176, size_cur_limit: 184, size_max_limit: 192,
+/// The map lock's size: one word, and the lock class in debug builds.
+const MAP_LOCK: usize = size_of::<RawMutex<MachPlatform>>();
+
+assert_layout!(VmMap, MAP_LOCK + 184, 8, {
+    lock: 0, hdr: MAP_LOCK, pmap: MAP_LOCK + 88, size: MAP_LOCK + 96,
+    size_wired: MAP_LOCK + 104, size_none: MAP_LOCK + 112,
+    ref_count: MAP_LOCK + 120, ref_lock: MAP_LOCK + 124,
+    hint: MAP_LOCK + 128, hint_lock: MAP_LOCK + 136,
+    first_free: MAP_LOCK + 144, flags: MAP_LOCK + 152,
+    timestamp: MAP_LOCK + 156, name: MAP_LOCK + 160,
+    size_cur_limit: MAP_LOCK + 168, size_max_limit: MAP_LOCK + 176,
 });
 
 impl VmMap {
@@ -375,7 +383,7 @@ impl VmMap {
     /// [`VmMap::init_module`] or `kmem_submap()`.
     pub(crate) const fn zeroed() -> Self {
         Self {
-            lock: LockData::zeroed(),
+            lock: RawMutex::new(),
             hdr: VmMapHeader {
                 links: VmMapLinks {
                     prev: None,
@@ -484,7 +492,7 @@ impl VmMap {
     pub(crate) fn lock(map: NonNull<Self>) {
         // SAFETY: the caller owns the map, and the sleep lock lives in its
         // storage.
-        unsafe { (*map.as_ptr()).lock.write() };
+        unsafe { (*map.as_ptr()).lock.lock() };
         // SAFETY: `per_cpu::thread()` is the running thread, or null early in
         // boot; the C `vm_privilege++` wraps as an unsigned int.
         let thread = per_cpu::thread();
@@ -517,20 +525,20 @@ impl VmMap {
             };
         }
         // SAFETY: the caller holds the write lock on this map.
-        unsafe { (*map.as_ptr()).lock.done() };
+        unsafe { (*map.as_ptr()).lock.unlock() };
     }
 
     /// Whether `version` still validates a lookup in `map`: the map is
     /// unchanged since.
     pub(crate) fn verify(map: NonNull<Self>, version: &VmMapVersion) -> bool {
         // SAFETY: the caller owns the map.
-        unsafe { (*map.as_ptr()).lock.read() };
+        unsafe { (*map.as_ptr()).lock.lock() };
         // SAFETY: reading the timestamp holds at least the read lock.
         let timestamp = unsafe { (*map.as_ptr()).timestamp };
         let result = timestamp == version.main_timestamp;
         if !result {
             // SAFETY: the read lock was taken above.
-            unsafe { (*map.as_ptr()).lock.done() };
+            unsafe { (*map.as_ptr()).lock.unlock() };
         }
         result
     }
@@ -741,8 +749,6 @@ impl VmMap {
             map.size_max_limit = mem_size;
         }
 
-        // SAFETY: the sleep lock lives in the caller's map storage.
-        unsafe { LockData::init(addr_of_mut!(map.lock), true) };
         map.timestamp = 0;
         map.ref_lock.init();
         map.hint_lock.init();
@@ -761,6 +767,11 @@ impl VmMap {
 
         // SAFETY: the object is freshly allocated and unshared.
         Self::setup(unsafe { &mut *map.as_ptr() }, pmap, min, max);
+        // User maps get a lock class of their own, apart from the kernel
+        // map's and its submaps': the slab may lock the kernel map while a
+        // user map is held.
+        // SAFETY: the map is still unshared.
+        unsafe { addr_of_mut!((*map.as_ptr()).lock).write(RawMutex::new()) };
         Some(map)
     }
 
@@ -843,29 +854,9 @@ enum LookupAttempt {
     Failed(Error),
     /// The entry is a submap; the map is read-locked.
     SubMap(NonNull<VmMap>),
-    /// The upgrade failed and released the read lock.
-    Retry,
 }
 
 impl VmMap {
-    /// Upgrades the map's read lock to a write lock, bumping the timestamp
-    /// when the upgrade succeeds.
-    fn lock_read_to_write(map: NonNull<Self>) -> bool {
-        // SAFETY: the caller holds the read lock; `LockData::read_to_write`
-        // leaves the write lock held when the upgrade succeeds and releases
-        // the read lock with no lock held when it fails.
-        let failed = unsafe { (*map.as_ptr()).lock.read_to_write() };
-        if !failed {
-            // SAFETY: the write lock is held, so the timestamp is exclusively
-            // ours; the macro's `map->timestamp++` wraps as an unsigned int.
-            unsafe {
-                let timestamp = addr_of_mut!((*map.as_ptr()).timestamp);
-                timestamp.write(timestamp.read().wrapping_add(1));
-            }
-        }
-        failed
-    }
-
     /// One locked pass of [`VmMap::lookup`], without the submap loop.
     fn lookup_locked(
         map: NonNull<Self>,
@@ -918,9 +909,6 @@ impl VmMap {
         // SAFETY: the entry is live under the map lock.
         if unsafe { (*entry.as_ptr()).needs_copy() } {
             if fault_type.contains(VmProt::WRITE) {
-                if Self::lock_read_to_write(map) {
-                    return LookupAttempt::Retry;
-                }
                 // SAFETY: the write lock is held; the integer wraps.
                 unsafe {
                     let timestamp = addr_of_mut!((*map.as_ptr()).timestamp);
@@ -940,9 +928,6 @@ impl VmMap {
                     );
                     (*entry.as_ptr()).set_needs_copy(false);
                 }
-
-                // SAFETY: the write lock taken by the upgrade.
-                unsafe { (*map.as_ptr()).lock.write_to_read() };
             } else {
                 prot &= VmProt::from_bits(!VmProt::WRITE.bits());
             }
@@ -950,8 +935,10 @@ impl VmMap {
 
         // SAFETY: the entry is live under the map lock.
         if unsafe { (*entry.as_ptr()).object.vm_object }.is_null() {
-            if Self::lock_read_to_write(map) {
-                return LookupAttempt::Retry;
+            // SAFETY: the map lock is held; the integer wraps.
+            unsafe {
+                let timestamp = addr_of_mut!((*map.as_ptr()).timestamp);
+                timestamp.write(timestamp.read().wrapping_add(1));
             }
 
             // SAFETY: the write lock is held; the entry is live.
@@ -964,9 +951,6 @@ impl VmMap {
                 );
                 (*entry.as_ptr()).offset = 0;
             }
-
-            // SAFETY: the write lock taken by the upgrade.
-            unsafe { (*map.as_ptr()).lock.write_to_read() };
         }
 
         // SAFETY: the entry is live under the lock.
@@ -1005,27 +989,26 @@ impl VmMap {
             let map = *var_map;
             // SAFETY: the caller owns the map for the call; the read lock
             // keeps the entries stable.
-            unsafe { (*map.as_ptr()).lock.read() };
+            unsafe { (*map.as_ptr()).lock.lock() };
 
             match Self::lookup_locked(map, vaddr, fault_type) {
                 LookupAttempt::Found(result) => {
                     if !keep_map_locked {
                         // SAFETY: the read lock taken above.
-                        unsafe { (*map.as_ptr()).lock.done() };
+                        unsafe { (*map.as_ptr()).lock.unlock() };
                     }
                     return Ok(result);
                 }
                 LookupAttempt::Failed(error) => {
                     // SAFETY: the read lock taken above.
-                    unsafe { (*map.as_ptr()).lock.done() };
+                    unsafe { (*map.as_ptr()).lock.unlock() };
                     return Err(error);
                 }
                 LookupAttempt::SubMap(submap) => {
                     // SAFETY: the read lock taken above.
-                    unsafe { (*map.as_ptr()).lock.done() };
+                    unsafe { (*map.as_ptr()).lock.unlock() };
                     *var_map = submap;
                 }
-                LookupAttempt::Retry => {}
             }
         }
     }
@@ -2998,7 +2981,7 @@ impl VmMap {
             // SAFETY: the map is live and unlocked; the read lock covers the
             // lookup and the reads of the entry it found.
             let step = unsafe {
-                (*map.as_ptr()).lock.read();
+                (*map.as_ptr()).lock.lock();
                 let (found, entry) = self.lookup_entry(va);
                 // The range may have holes; past one, the next entry goes on.
                 let entry = if found {
@@ -3013,7 +2996,7 @@ impl VmMap {
                         (*entry.as_ptr()).wired_count == 1,
                     )
                 });
-                (*map.as_ptr()).lock.done();
+                (*map.as_ptr()).lock.unlock();
                 step
             };
             let Some((entry_start, entry_end, first_wiring)) = step else {
@@ -6512,7 +6495,7 @@ impl VmMap {
         let map = NonNull::from(self);
         // SAFETY: the caller owns the map; the read lock keeps the entries
         // stable and the named object alive below.
-        unsafe { (*map.as_ptr()).lock.read() };
+        unsafe { (*map.as_ptr()).lock.lock() };
 
         let region = self.region_entry(address).map(|entry| {
             // SAFETY: `entry` is a live entry of the read-locked map;
@@ -6542,7 +6525,7 @@ impl VmMap {
         });
 
         // SAFETY: the read lock taken above.
-        unsafe { (*map.as_ptr()).lock.done() };
+        unsafe { (*map.as_ptr()).lock.unlock() };
 
         region
     }
@@ -6609,14 +6592,14 @@ impl VmMap {
         let map = NonNull::from(self);
         // SAFETY: the caller owns the map; the read lock keeps the entry and
         // its object stable while the pager is copied.
-        unsafe { (*map.as_ptr()).lock.read() };
+        unsafe { (*map.as_ptr()).lock.lock() };
 
         let locked =
             self.region_create_proxy_locked(address, max_protection, len);
 
         // SAFETY: the read lock taken above; the C drops it before the proxy
         // call, which no longer needs the map.
-        unsafe { (*map.as_ptr()).lock.done() };
+        unsafe { (*map.as_ptr()).lock.unlock() };
 
         let RegionProxy {
             max_protection,

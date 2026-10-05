@@ -187,7 +187,7 @@ fn probe(
             // SAFETY: the lookup left the map read-locked and the object
             // locked; the C released both on this path.
             unsafe {
-                (*map.as_ptr()).lock.done();
+                (*map.as_ptr()).lock.unlock();
                 (*found.object).lock.unlock();
             }
             Err(Error::InvalidAddress)
@@ -306,7 +306,7 @@ unsafe fn wait_compare(
             // SAFETY: the bucket lock and the map's read lock.
             unsafe {
                 (*bucketp).lock.unlock();
-                (*task_map).lock.done();
+                (*task_map).lock.unlock();
             }
             // SAFETY: the reference the caller added, and the failed
             // mapping took none.
@@ -344,7 +344,7 @@ unsafe fn wait_compare(
         {
             // SAFETY: the two locks the lookup and the bucket took.
             unsafe {
-                (*task_map).lock.done();
+                (*task_map).lock.unlock();
                 (*bucketp).lock.unlock();
             }
             return Err(Error::InvalidAddress);
@@ -364,7 +364,7 @@ unsafe fn wait_compare(
             {
                 // SAFETY: the same two locks.
                 unsafe {
-                    (*task_map).lock.done();
+                    (*task_map).lock.unlock();
                     (*bucketp).lock.unlock();
                 }
                 return Err(Error::InvalidAddress);
@@ -374,7 +374,7 @@ unsafe fn wait_compare(
     }
 
     // SAFETY: the map's read lock from the lookup.
-    unsafe { (*task_map).lock.done() };
+    unsafe { (*task_map).lock.unlock() };
 
     if !equal {
         // SAFETY: the bucket lock taken above.
@@ -545,7 +545,7 @@ pub(crate) fn wake(
                 // SAFETY: the bucket lock and the map's read lock.
                 unsafe {
                     (*bucketp).lock.unlock();
-                    (*task_map).lock.done();
+                    (*task_map).lock.unlock();
                 }
                 // SAFETY: the reference this call added.
                 unsafe { crate::vm::vm_object::deallocate(args.object) };
@@ -577,7 +577,7 @@ pub(crate) fn wake(
                 // SAFETY: the bucket lock and the map's read lock.
                 unsafe {
                     (*bucketp).lock.unlock();
-                    (*task_map).lock.done();
+                    (*task_map).lock.unlock();
                 }
                 return Err(Error::InvalidAddress);
             }
@@ -585,7 +585,7 @@ pub(crate) fn wake(
     }
 
     // SAFETY: the map's read lock from the lookup.
-    unsafe { (*task_map).lock.done() };
+    unsafe { (*task_map).lock.unlock() };
 
     let (first, exact) = {
         // SAFETY: the bucket lock guards the list.
@@ -732,7 +732,7 @@ pub(crate) fn requeue(
         prepare_key(unsafe { &*task.as_ptr() }, src, flags, &mut args)?;
     // SAFETY: the map and object locks the lookup returned.
     unsafe {
-        (*task_map).lock.done();
+        (*task_map).lock.unlock();
         (*args.object).lock.unlock();
     }
 
@@ -745,7 +745,7 @@ pub(crate) fn requeue(
     // `requeue` maps nothing, so the object lock is released
     // before the buckets are.
     unsafe {
-        (*task_map).lock.done();
+        (*task_map).lock.unlock();
         (*args.object).lock.unlock();
     }
 

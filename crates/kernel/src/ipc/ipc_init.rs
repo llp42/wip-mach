@@ -17,10 +17,7 @@ use crate::vm::vm_map::VmMap;
 use core::ptr::{self, NonNull};
 
 /// The storage for the kernel's IPC submap.
-static mut IPC_KERNEL_MAP_STORE: VmMap =
-    // SAFETY: `VmMap` is a plain structure; the map is built in place by
-    // `kmem_submap()` before anything reads it.
-    unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+static mut IPC_KERNEL_MAP_STORE: VmMap = VmMap::zeroed();
 
 /// The kernel's IPC submap.
 static mut IPC_KERNEL_MAP: *mut VmMap =

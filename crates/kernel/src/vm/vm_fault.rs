@@ -311,10 +311,10 @@ pub(crate) unsafe fn wire(map: &VmMap, start: VmOffset, end: VmOffset) {
         // SAFETY: the map is live and unlocked; the fast path runs under the
         // read lock taken here, on the entry the lookup found.
         let wired = unsafe {
-            (*map).lock.read();
+            (*map).lock.lock();
             let (found, entry) = (*map).lookup_entry(va);
             let wired = found && wire_fast(&*map, va, entry.as_ptr());
-            (*map).lock.done();
+            (*map).lock.unlock();
             wired
         };
         if !wired {
@@ -1905,7 +1905,7 @@ unsafe fn fault_success(
     }
     if wired && prot != fault_type {
         // SAFETY: `verify` left the map read-locked.
-        unsafe { map.as_ref().lock.done() };
+        unsafe { map.as_ref().lock.unlock() };
         unsafe {
             release_page(result_page);
             cleanup((*result_page).object, NonNull::new(top_page));
@@ -1954,7 +1954,7 @@ unsafe fn fault_success(
     // SAFETY: `verify` left the map read-locked, and the page is the live,
     // busy result of the fault.
     unsafe {
-        map.as_ref().lock.done();
+        map.as_ref().lock.unlock();
         page_wakeup_done(result_page);
     }
 
@@ -2326,7 +2326,7 @@ pub(crate) unsafe fn copy(
                 (*(*dst_page).object).lock.unlock();
                 // SAFETY: `verify` left the read lock held; the failed
                 // recheck releases it.
-                (*dst_map.as_ptr()).lock.done();
+                (*dst_map.as_ptr()).lock.unlock();
                 if !src_page.is_null() {
                     copy_cleanup(src_page, src_top_page);
                 }
@@ -2353,7 +2353,7 @@ pub(crate) unsafe fn copy(
         // SAFETY: the destination page is live.
         unsafe { (*dst_page).set_dirty(true) };
         // SAFETY: `verify` left the read lock held.
-        unsafe { (*dst_map.as_ptr()).lock.done() };
+        unsafe { (*dst_map.as_ptr()).lock.unlock() };
 
         // SAFETY: both faults left their page and top page to release.
         unsafe {

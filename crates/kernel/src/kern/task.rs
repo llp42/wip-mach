@@ -391,9 +391,9 @@ unsafe fn fresh_task_map(parent: Option<NonNull<Task>>) -> *mut VmMap {
         unsafe {
             let parent_map =
                 NonNull::new_unchecked((*parent.as_ptr()).map.cast::<VmMap>());
-            (*parent_map.as_ptr()).lock.read();
+            (*parent_map.as_ptr()).lock.lock();
             VmMap::copy_limits(map, parent_map);
-            (*parent_map.as_ptr()).lock.done();
+            (*parent_map.as_ptr()).lock.unlock();
         }
     }
     map.as_ptr()

@@ -583,7 +583,7 @@ pub(crate) unsafe fn allocate_contiguous(
 unsafe fn mapped_phys_addr(map: *mut VmMap, address: VmOffset) -> RpcPhysAddr {
     let mut cmap = unsafe { NonNull::new_unchecked(map) };
     // SAFETY: the map is live and unlocked.
-    unsafe { (*map).lock.read() };
+    unsafe { (*map).lock.lock() };
 
     let entry = loop {
         // SAFETY: `cmap` is live and read-locked.
@@ -598,10 +598,14 @@ unsafe fn mapped_phys_addr(map: *mut VmMap, address: VmOffset) -> RpcPhysAddr {
             let nmap = unsafe { (*entry.as_ptr()).object.sub_map };
             // SAFETY: a submap entry names a live map.
             let nmap = unsafe { NonNull::new_unchecked(nmap) };
+            // The parent is released before the submap is locked: a
+            // submap lives as long as the kernel, so the parent's lock
+            // need not keep it, and holding both would order the map
+            // classes against the slab's.
+            // SAFETY: `cmap` was locked above.
+            unsafe { (*cmap.as_ptr()).lock.unlock() };
             // SAFETY: the submap is live and unlocked.
-            unsafe { (*nmap.as_ptr()).lock.read() };
-            // SAFETY: `cmap` was read-locked.
-            unsafe { (*cmap.as_ptr()).lock.done() };
+            unsafe { (*nmap.as_ptr()).lock.lock() };
             cmap = nmap;
             continue;
         }
@@ -638,7 +642,7 @@ unsafe fn mapped_phys_addr(map: *mut VmMap, address: VmOffset) -> RpcPhysAddr {
         }
     }
     // SAFETY: `cmap` was read-locked.
-    unsafe { (*cmap.as_ptr()).lock.done() };
+    unsafe { (*cmap.as_ptr()).lock.unlock() };
 
     paddr
 }
@@ -988,9 +992,10 @@ pub(crate) fn msync(
 
 /// Reports the current and maximum virtual size limits of `map`.
 pub(crate) fn get_size_limit(map: &VmMap) -> (VmSize, VmSize) {
-    map.lock.read();
+    map.lock.lock();
     let limits = (map.size_cur_limit, map.size_max_limit);
-    map.lock.done();
+    // SAFETY: the lock was taken just above.
+    unsafe { map.lock.unlock() };
     limits
 }
 

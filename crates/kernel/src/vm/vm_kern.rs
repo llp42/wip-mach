@@ -34,6 +34,7 @@ use crate::vm::{vm_page, vm_resident};
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
+use lock::RawMutex;
 
 /// The allocation flag that lets the page come from high physical memory.
 const VM_PAGE_HIGHMEM: c_uint = 0x08;
@@ -301,6 +302,9 @@ pub(crate) fn kmem_submap(
     // its own.
     unsafe { pmap_reference(NonNull::new(pmap)) };
     VmMap::setup(map, pmap, addr, addr.wrapping_add(size));
+    // Submaps get a lock class of their own: one may be held while the slab
+    // locks the kernel map.
+    map.lock = RawMutex::new();
 
     // The caller promises the parent is a live map and `map` the storage just
     // set up, which is what `submap()` requires.
@@ -320,6 +324,9 @@ pub(crate) fn kmem_init(
     // else uses it, and `pmap` is the boot pmap.
     unsafe {
         VmMap::setup(&mut *map.as_ptr(), pmap, VM_MIN_KERNEL_ADDRESS, end);
+        // The kernel map's lock gets a class of its own: a user map or a
+        // submap may be held while the slab locks it.
+        (*map.as_ptr()).lock = RawMutex::new();
     };
 
     if start == VM_MIN_KERNEL_ADDRESS {

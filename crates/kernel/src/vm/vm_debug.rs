@@ -234,7 +234,7 @@ pub(crate) unsafe fn region_info(
     let mut cmap = map;
 
     // SAFETY: the map is live and unlocked.
-    unsafe { (*map.as_ptr()).lock.read() };
+    unsafe { (*map.as_ptr()).lock.lock() };
 
     let entry = loop {
         // SAFETY: `cmap` is live and read-locked.
@@ -250,7 +250,7 @@ pub(crate) unsafe fn region_info(
             if next == unsafe { (*cmap.as_ptr()).to_entry() } {
                 if map == cmap {
                     // SAFETY: the read lock was taken above.
-                    unsafe { (*cmap.as_ptr()).lock.done() };
+                    unsafe { (*cmap.as_ptr()).lock.unlock() };
                     return Err(Error::NoSpace);
                 }
 
@@ -258,10 +258,10 @@ pub(crate) unsafe fn region_info(
                 // SAFETY: `cmap` is live and read-locked.
                 address = unsafe { (*cmap.as_ptr()).hdr.links.end };
                 // SAFETY: the read lock was taken above.
-                unsafe { (*cmap.as_ptr()).lock.done() };
+                unsafe { (*cmap.as_ptr()).lock.unlock() };
                 cmap = map;
                 // SAFETY: the top-level map is live and unlocked again.
-                unsafe { (*map.as_ptr()).lock.read() };
+                unsafe { (*map.as_ptr()).lock.lock() };
                 continue;
             }
             next
@@ -273,10 +273,14 @@ pub(crate) unsafe fn region_info(
             let nmap = unsafe { (*entry.as_ptr()).object.sub_map };
             // SAFETY: the submap entry names a live map.
             let nmap = unsafe { NonNull::new_unchecked(nmap) };
+            // The parent is released before the submap is locked: a
+            // submap lives as long as the kernel, so the parent's lock
+            // need not keep it, and holding both would order the map
+            // classes against the slab's.
+            // SAFETY: `cmap` was locked above.
+            unsafe { (*cmap.as_ptr()).lock.unlock() };
             // SAFETY: the submap is live and unlocked.
-            unsafe { (*nmap.as_ptr()).lock.read() };
-            // SAFETY: `cmap` was read-locked.
-            unsafe { (*cmap.as_ptr()).lock.done() };
+            unsafe { (*nmap.as_ptr()).lock.lock() };
             cmap = nmap;
             continue;
         }
@@ -305,7 +309,7 @@ pub(crate) unsafe fn region_info(
     // map read lock is still held.
     let port = unsafe { object_real_name(object) };
     // SAFETY: `cmap` was read-locked, as above.
-    unsafe { (*cmap.as_ptr()).lock.done() };
+    unsafe { (*cmap.as_ptr()).lock.unlock() };
 
     Ok((info, port))
 }
