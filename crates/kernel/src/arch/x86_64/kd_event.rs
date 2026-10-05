@@ -11,17 +11,17 @@ use super::io_req::{
     D_NOWAIT, DEV_GET_SIZE, DEV_GET_SIZE_COUNT, DEV_GET_SIZE_DEVICE_SIZE,
     DEV_GET_SIZE_RECORD_SIZE, DevT, IoReq, IoReqQueue, drain,
 };
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::device::ds_routines::{device_read_alloc, ds_read_done, iodone};
 use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 use crate::kern::console::kprint;
 use crate::utils::kd_queue::{KdEvent, KdEventQueue, Scancode};
-use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_long, c_uint};
 use core::mem::size_of;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
+use lock::IrqSpinLock;
 
 const KDSKBDMODE: c_uint = 0x8004_4b01;
 const KDGKBDTYPE: c_uint = 0x4004_4b02;
@@ -46,14 +46,19 @@ impl State {
     }
 }
 
-static STATE: crate::arch::x86_64::kd::SyncCell<State> =
-    crate::arch::x86_64::kd::SyncCell(UnsafeCell::new(State::new()));
+// SAFETY: the read queue links requests the device layer owns, which any CPU
+// may complete.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the queued requests are shared between CPUs, which their type \
+              does not say"
+)]
+unsafe impl Send for State {}
 
-/// The one state object.
-fn state() -> &'static mut State {
-    // SAFETY: the driver runs at SPLKD; nothing else accesses `STATE`.
-    unsafe { &mut *STATE.0.get() }
-}
+/// The event queue and the blocked reads, under an irq spin lock, since the
+/// keyboard interrupt queues events.
+static STATE: IrqSpinLock<State, MachPlatform> =
+    IrqSpinLock::new(State::new());
 
 /// The read queue head.
 ///
@@ -83,23 +88,19 @@ fn enqueue_event(s: &mut State, ev: &KdEvent) {
     }
     // SAFETY: `s` is the state in `STATE`.
     while let Some(entry) = unsafe { read_queue(s) }.pop_front() {
-        // SAFETY: this runs at SPLKD; each entry is an `io_req`, still owned
-        // by the device layer and valid for `iodone()`.
+        // SAFETY: the state's lock is held; each entry is an `io_req`, still
+        // owned by the device layer and valid for `iodone()`.
         unsafe { iodone(ptr::from_mut(entry)) };
     }
 }
 
-/// Resets the queue once, at `spltty`.
+/// Resets the queue once.
 fn kbdinit() {
-    // SAFETY: the keyboard queue is only touched at `spltty`.
-    let sp = unsafe { spl::spltty() };
-    let s = state();
+    let mut s = STATE.lock();
     if !s.initialized {
         s.queue.clear();
         s.initialized = true;
     }
-    // SAFETY: `sp` is this function's `spltty()` result.
-    unsafe { spl::splx(sp) };
 }
 
 /// Opens the keyboard event device, setting up the kd driver and the queue.
@@ -127,12 +128,8 @@ pub(crate) unsafe fn kbdopen(
 ///
 /// The device layer calls this for an open keyboard.
 pub(crate) unsafe fn kbdclose(_dev: DevT, _flags: c_int) {
-    // SAFETY: the keyboard device is closed with `spltty` raised.
-    let sp = unsafe { spl::spltty() };
     crate::arch::x86_64::kd::set_kb_mode(KB_ASCII);
-    state().queue.clear();
-    // SAFETY: `sp` is this function's `spltty()` result.
-    unsafe { spl::splx(sp) };
+    STATE.lock().queue.clear();
 }
 
 /// Reports a status flavor of the keyboard event device.
@@ -201,33 +198,28 @@ pub(crate) unsafe fn kbdsetstat(
 /// # Safety
 ///
 /// The device layer calls this with a valid, read-only request whose buffer
-/// `device_read_alloc()` may allocate; everything else runs at `spltty`.
+/// `device_read_alloc()` may allocate.
 pub(crate) unsafe fn kbdread(_dev: DevT, ior: *mut IoReq) -> IoResult {
     let wanted = unsafe { (*ior).count() };
     if wanted % size_of::<KdEvent>() as c_long != 0 {
         return Err(DeviceError::InvalidSize);
     }
     unsafe { device_read_alloc(ior, wanted as usize) }?;
-    let s = state();
-    // SAFETY: queueing a request and the event queue share SPLKD.
-    let sp = unsafe { spl::spltty() };
+    let mut s = STATE.lock();
     if s.queue.is_empty() {
         if unsafe { (*ior).mode() } & D_NOWAIT != 0 {
-            // SAFETY: `sp` is this thread's `spltty()` result.
-            unsafe { spl::splx(sp) };
             return Err(DeviceError::WouldBlock);
         }
         unsafe { (*ior).set_done(kbd_read_done) };
-        // SAFETY: the read queue is this state's, at SPLKD, and the request
+        // SAFETY: the read queue is the locked state's, and the request
         // stays at its address until `iodone()`.
-        unsafe { read_queue(s).push_back_ptr(NonNull::new_unchecked(ior)) };
-        // SAFETY: `sp` is this thread's `spltty()` result.
-        unsafe { spl::splx(sp) };
+        unsafe {
+            read_queue(&mut s).push_back_ptr(NonNull::new_unchecked(ior));
+        };
         return Ok(DeviceSuccess::IoQueued);
     }
     let count = drain(&mut s.queue, unsafe { &mut *ior });
-    // SAFETY: `sp` is this thread's `spltty()` result.
-    unsafe { spl::splx(sp) };
+    drop(s);
     unsafe { (*ior).set_residual((*ior).count() - count) };
     Ok(DeviceSuccess::Success)
 }
@@ -237,22 +229,19 @@ pub(crate) unsafe fn kbdread(_dev: DevT, ior: *mut IoReq) -> IoResult {
 /// # Safety
 ///
 /// The device layer must call this as `ior`'s completion callback, with `ior`
-/// the same valid, still-queued request [`kbdread()`] queued, and it must run
-/// at `spltty`.
+/// the same valid, still-queued request [`kbdread()`] queued.
 unsafe fn kbd_read_done(ior: *mut IoReq) -> bool {
-    let s = state();
-    let sp = unsafe { spl::spltty() };
+    let mut s = STATE.lock();
     if s.queue.is_empty() {
         unsafe { (*ior).set_done(kbd_read_done) };
-        unsafe { read_queue(s).push_back_ptr(NonNull::new_unchecked(ior)) };
-        // SAFETY: `sp` is this callback's `spltty()` result.
-        unsafe { spl::splx(sp) };
+        unsafe {
+            read_queue(&mut s).push_back_ptr(NonNull::new_unchecked(ior));
+        };
         return false;
     }
     // SAFETY: `ior` is the request the device layer queued.
     let count = drain(&mut s.queue, unsafe { &mut *ior });
-    // SAFETY: `sp` is this callback's `spltty()` result.
-    unsafe { spl::splx(sp) };
+    drop(s);
     // SAFETY: `ior` is the request the device layer queued.
     unsafe { (*ior).set_residual((*ior).count() - count) };
     // SAFETY: the request is complete; its data buffer is populated.
@@ -260,8 +249,7 @@ unsafe fn kbd_read_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// Queues the scancode `sc` as an event; called at `spltty` from the kd
-/// interrupt path.
+/// Queues the scancode `sc` as an event; the kd interrupt path calls this.
 pub(crate) fn kd_enqsc(sc: Scancode) {
-    enqueue_event(state(), &KdEvent::scancode(sc));
+    enqueue_event(&mut STATE.lock(), &KdEvent::scancode(sc));
 }
