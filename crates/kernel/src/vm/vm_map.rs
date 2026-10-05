@@ -2959,8 +2959,14 @@ impl VmMap {
         self.pageable_scan_faults(start_entry, end);
     }
 
-    /// The fault phase of `pageable_scan()`: wire the entries the scan marked,
-    /// bracketing the unlocked faults with the kernel map's transition flags.
+    /// The fault phase of `pageable_scan()`: wire the entries the scan marked.
+    ///
+    /// The faults run with the map unlocked, since a fault takes the map lock
+    /// itself and may allocate from the kernel map.  The transition flags keep
+    /// the entries from being deleted, coalesced, rewired or reprotected
+    /// meanwhile, but not from being clipped, nor their neighbours from
+    /// going; so no entry is held across an unlock, and each step looks its
+    /// address up again.  Called and returns with the map write-locked.
     fn pageable_scan_faults(
         &mut self,
         start_entry: NonNull<VmMapEntry>,
@@ -2968,71 +2974,138 @@ impl VmMap {
     ) {
         let sentinel = self.to_entry();
         let map = NonNull::from(&mut *self);
-
-        let is_kernel = self.pmap == kernel_pmap_ptr();
-
-        if is_kernel {
-            let mut entry = start_entry;
-            while !self.hdr.is_sentinel(entry)
-                // SAFETY: `entry` is live or the sentinel under the map lock.
-                && unsafe { (*entry.as_ptr()).links.end } <= end
-            {
-                // SAFETY: the entries are live and the map lock is held; the
-                // flags keep them out of coalescing while the kernel map is
-                // unlocked for the faults.
-                unsafe {
-                    (*entry.as_ptr()).set_in_transition(true);
-                    (*entry.as_ptr()).set_needs_wakeup(false);
-                }
-                // SAFETY: the entries are live and the map lock is held; the
-                // flags keep them out of coalescing while the kernel
-                // map is unlocked for the faults; `entry` is live and
-                // the map is locked.
-                entry = unsafe { (*entry.as_ptr()).links.next }
-                    .unwrap_or(sentinel);
-            }
-            Self::unlock(map);
-        } else {
-            // SAFETY: the map lock is held; the downgrade is the C protocol
-            // for faulting with a read lock.
-            unsafe {
-                (*map.as_ptr()).lock.set_recursive();
-                (*map.as_ptr()).lock.write_to_read();
-            }
-        }
+        // SAFETY: `start_entry` is live under the map lock.
+        let start = unsafe { (*start_entry.as_ptr()).links.start };
 
         let mut entry = start_entry;
         while !self.hdr.is_sentinel(entry)
             // SAFETY: `entry` is live or the sentinel under the map lock.
             && unsafe { (*entry.as_ptr()).links.end } <= end
         {
-            // SAFETY: `entry` is live or the sentinel under the map lock.
-            if unsafe { (*entry.as_ptr()).wired_count } == 1 {
-                // SAFETY: the map may be read-locked and `entry` is one of its
-                // live entries; the C code assumes the faults always succeed.
-                unsafe { vm_fault::wire(self, entry) };
+            // SAFETY: the entry is live and the map is locked.
+            unsafe {
+                (*entry.as_ptr()).set_in_transition(true);
+                (*entry.as_ptr()).set_needs_wakeup(false);
             }
+            // SAFETY: the entry is live and the map is locked.
             entry =
-                // SAFETY: `entry` is live under the map lock.
                 unsafe { (*entry.as_ptr()).links.next }.unwrap_or(sentinel);
         }
+        Self::unlock(map);
 
-        if is_kernel {
-            Self::lock(map);
-            let mut entry = start_entry;
+        let mut va = start;
+        while va < end {
+            // SAFETY: the map is live and unlocked; the read lock covers the
+            // lookup and the reads of the entry it found.
+            let step = unsafe {
+                (*map.as_ptr()).lock.read();
+                let (found, entry) = self.lookup_entry(va);
+                // The range may have holes; past one, the next entry goes on.
+                let entry = if found {
+                    entry
+                } else {
+                    (*entry.as_ptr()).links.next.unwrap_or(sentinel)
+                };
+                let step = (!self.hdr.is_sentinel(entry)).then(|| {
+                    (
+                        (*entry.as_ptr()).links.start.max(va),
+                        (*entry.as_ptr()).links.end,
+                        (*entry.as_ptr()).wired_count == 1,
+                    )
+                });
+                (*map.as_ptr()).lock.done();
+                step
+            };
+            let Some((entry_start, entry_end, first_wiring)) = step else {
+                break;
+            };
+            if entry_end > end {
+                break;
+            }
+            if first_wiring {
+                // SAFETY: the map is unlocked, and the entries over
+                // `entry_start..entry_end` stay in transition until the flags
+                // are cleared below; the C assumes the faults always succeed.
+                unsafe { vm_fault::wire(self, entry_start, entry_end) };
+            }
+            va = entry_end;
+        }
+
+        Self::lock(map);
+        let mut wakeup = false;
+        let (found, entry) = self.lookup_entry(start);
+        let mut entry = if found {
+            entry
+        } else {
+            // SAFETY: the entry before `start` is live, or the sentinel.
+            unsafe { (*entry.as_ptr()).links.next }.unwrap_or(sentinel)
+        };
+        while !self.hdr.is_sentinel(entry)
+            // SAFETY: `entry` is live or the sentinel under the map lock.
+            && unsafe { (*entry.as_ptr()).links.end } <= end
+        {
+            // SAFETY: the entry is live and the map is locked.
+            unsafe {
+                (*entry.as_ptr()).set_in_transition(false);
+                if (*entry.as_ptr()).needs_wakeup() {
+                    (*entry.as_ptr()).set_needs_wakeup(false);
+                    wakeup = true;
+                }
+            }
+            // SAFETY: the entry is live and the map is locked.
+            entry =
+                unsafe { (*entry.as_ptr()).links.next }.unwrap_or(sentinel);
+        }
+        if wakeup {
+            // SAFETY: the wakeup event is the map header, where entry waiters
+            // sleep; they take the map lock once it is released.
+            unsafe {
+                thread_wakeup_prim(
+                    addr_of_mut!((*map.as_ptr()).hdr).cast::<c_void>(),
+                    0,
+                    THREAD_AWAKENED,
+                )
+            };
+        }
+    }
+
+    /// Sleeps until no entry of `start..end` is in transition, so a range
+    /// being wired with the map unlocked is not rewired or reprotected under
+    /// the faults.  Called and returns with the map write-locked; the lock is
+    /// released for each sleep.
+    fn await_transitions(&mut self, start: VmOffset, end: VmOffset) {
+        let map = NonNull::from(&mut *self);
+        'scan: loop {
+            let sentinel = self.to_entry();
+            let (found, entry) = self.lookup_entry(start);
+            let mut entry = if found {
+                entry
+            } else {
+                // SAFETY: the entry before the range is live, or the sentinel.
+                unsafe { (*entry.as_ptr()).links.next }.unwrap_or(sentinel)
+            };
             while !self.hdr.is_sentinel(entry)
                 // SAFETY: `entry` is live or the sentinel under the map lock.
-                && unsafe { (*entry.as_ptr()).links.end } <= end
+                && unsafe { (*entry.as_ptr()).links.start } < end
             {
-                // SAFETY: the entries are live and the map is locked.
-                unsafe { (*entry.as_ptr()).set_in_transition(false) };
-                // SAFETY: `entry` is live and the map is locked.
+                // SAFETY: the entry is live and the map is locked.
+                if unsafe { (*entry.as_ptr()).in_transition() } {
+                    // SAFETY: the entry is live and the map is locked; the
+                    // waiter marks it and sleeps on the map header with the
+                    // lock released.
+                    unsafe { (*entry.as_ptr()).set_needs_wakeup(true) };
+                    self.entry_wait();
+                    Self::unlock(map);
+                    // SAFETY: the lock was released just above.
+                    unsafe { thread_block(None) };
+                    Self::lock(map);
+                    continue 'scan;
+                }
+                // SAFETY: the entry is live and the map is locked.
                 entry = unsafe { (*entry.as_ptr()).links.next }
                     .unwrap_or(sentinel);
             }
-        } else {
-            // SAFETY: the map read lock is held.
-            unsafe { (*map.as_ptr()).lock.clear_recursive() };
+            return;
         }
     }
 
@@ -3050,6 +3123,7 @@ impl VmMap {
         let mut start = start_in;
         let mut end = end_in;
         self.range_check(&mut start, &mut end);
+        self.await_transitions(start, end);
 
         let sentinel = self.to_entry();
         let (found, temp_entry) = self.lookup_entry(start);
@@ -3234,6 +3308,7 @@ impl VmMap {
         let mut start = start_in;
         let mut end = end_in;
         self.range_check(&mut start, &mut end);
+        self.await_transitions(start, end);
 
         let (found, start_entry) = self.lookup_entry(start);
         if !found {

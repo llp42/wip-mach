@@ -8,7 +8,6 @@
 //! The kernel's simple and sleep-capable locks.
 
 use crate::arch::x86_64::per_cpu;
-use crate::kern::debug::kpanic;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, thread_sleep, thread_wakeup_prim,
 };
@@ -229,14 +228,6 @@ impl LockData {
         unsafe { self.thread.get().read() }
     }
 
-    /// Record the current thread as the owner.
-    const fn set_thread(&self, owner: *mut c_void) {
-        // SAFETY: the interlock serializes ownership, and the caller holds it;
-        // `thread` is interior-mutable; the caller holds the
-        // interlock.
-        unsafe { self.thread.get().write(owner) };
-    }
-
     /// Whether the calling thread already owns the lock for recursive use.
     fn owned_by_current(&self) -> bool {
         self.thread() == per_cpu::thread().cast::<c_void>()
@@ -417,35 +408,6 @@ impl LockData {
             self.wakeup();
         }
 
-        self.interlock.unlock();
-    }
-
-    /// Lets the current writer take the lock recursively.
-    pub(crate) fn set_recursive(&self) {
-        self.interlock.lock();
-
-        if !self.want_write() {
-            kpanic!(
-                "lock_set_recursive",
-                "lock_set_recursive: don't have write lock"
-            )
-        }
-        self.set_thread(per_cpu::thread().cast::<c_void>());
-        self.interlock.unlock();
-    }
-
-    /// Ends recursive locking by the current writer.
-    pub(crate) fn clear_recursive(&self) {
-        self.interlock.lock();
-        if !self.owned_by_current() {
-            kpanic!(
-                "lock_clear_recursive",
-                "lock_clear_recursive: wrong thread"
-            )
-        }
-        if self.recursion_depth() == 0 {
-            self.set_thread(NO_THREAD);
-        }
         self.interlock.unlock();
     }
 }

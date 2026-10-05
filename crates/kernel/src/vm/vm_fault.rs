@@ -293,26 +293,31 @@ unsafe fn release_page(m: *mut VmPage) {
     }
 }
 
-/// Wires down every page of `entry` in `map`.
+/// Wires down every page of `start..end` in `map`.
+///
+/// Each page's entry is looked up afresh under the map's read lock: the map
+/// is unlocked between pages, and an entry may be clipped meanwhile.
 ///
 /// # Safety
 ///
-/// `entry` must be a live entry of `map`, and `map` must be referenced and
-/// read-locked (or otherwise stable) for the whole call, as the C requires.
-pub(crate) unsafe fn wire(map: &VmMap, entry: NonNull<VmMapEntry>) {
-    let (start, end) = unsafe {
-        let links = &(*entry.as_ptr()).links;
-        (links.start, links.end)
-    };
-
+/// `map` must be referenced and unlocked, and the entries over `start..end`
+/// must stay in transition for the whole call, so none is deleted.
+pub(crate) unsafe fn wire(map: &VmMap, start: VmOffset, end: VmOffset) {
     pmap_pageable(map.pmap, start, end, c_int::from(false));
 
     let map = ptr::from_ref(map).cast_mut();
     let mut va = start;
     while va < end {
-        // SAFETY: `map` and `entry` are live and read-locked by the caller,
-        // and `va` is an address the entry covers.
-        if !unsafe { wire_fast(&*map, va, entry.as_ptr()) } {
+        // SAFETY: the map is live and unlocked; the fast path runs under the
+        // read lock taken here, on the entry the lookup found.
+        let wired = unsafe {
+            (*map).lock.read();
+            let (found, entry) = (*map).lookup_entry(va);
+            let wired = found && wire_fast(&*map, va, entry.as_ptr());
+            (*map).lock.done();
+            wired
+        };
+        if !wired {
             // The C ignored the wiring fault's result.
             let _ = unsafe { fault(map, va, VmProt::NONE, true, false, None) };
         }
@@ -2040,37 +2045,47 @@ pub(crate) unsafe fn fault(
 
 /// Unwires every page of `entry` in `map`.
 ///
+/// An entry with neither object nor submap has no page to unwire: wiring
+/// gives an entry its object before its first fault.
+///
 /// # Safety
 ///
 /// `map` must be a live, referenced map and `entry` a live entry of it whose
 /// pages are wired down.
 pub(crate) unsafe fn unwire(map: &VmMap, entry: NonNull<VmMapEntry>) {
-    let (start, end_addr, object) = unsafe {
-        (
-            (*entry.as_ptr()).links.start,
-            (*entry.as_ptr()).links.end,
-            if (*entry.as_ptr()).is_sub_map() {
-                ptr::null_mut()
-            } else {
-                (*entry.as_ptr()).object.vm_object
-            },
-        )
+    let (start, end_addr, submap, object) = unsafe {
+        let entry = &*entry.as_ptr();
+        if entry.is_sub_map() {
+            (
+                entry.links.start,
+                entry.links.end,
+                entry.object.sub_map,
+                ptr::null_mut(),
+            )
+        } else {
+            (
+                entry.links.start,
+                entry.links.end,
+                ptr::null_mut(),
+                entry.object.vm_object,
+            )
+        }
     };
 
     let pmap = map.pmap;
-    let map_ptr = ptr::from_ref(map).cast_mut();
     let mut va = start;
     while va < end_addr {
         unsafe { pmap_change_wiring(pmap, va, 0) };
 
-        if object.is_null() {
-            unsafe {
-                map.lock.set_recursive();
-                // The C ignored the unwiring fault's result.
-                let _ = fault(map_ptr, va, VmProt::NONE, true, false, None);
-                map.lock.clear_recursive();
-            }
-        } else {
+        if !submap.is_null() {
+            // The fault goes to the submap itself: through `map` it would
+            // take the lock the caller holds, then step down into the submap.
+            // The C ignored the unwiring fault's result.
+            // SAFETY: a submap entry names a live map, and the caller holds
+            // no lock of it.
+            let _ =
+                unsafe { fault(submap, va, VmProt::NONE, true, false, None) };
+        } else if !object.is_null() {
             let fault = loop {
                 // SAFETY: the object is live; each attempt takes the lock
                 // and paging reference the fault consumes, exactly as the C
