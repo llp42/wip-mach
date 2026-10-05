@@ -15,13 +15,13 @@
 use crate::arch::x86_64::cswitch;
 use crate::arch::x86_64::model_dep::halt_cpu;
 use crate::arch::x86_64::per_cpu::{self, per_cpu_at};
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::pmap;
 use crate::arch::x86_64::spl;
 use crate::config::MAX_NCPUS;
 use crate::kern::console::kprint;
 use crate::kern::debug::{self, kpanic};
 use crate::kern::error::Error;
-use crate::kern::lock::SimpleLock;
 use crate::kern::priority;
 use crate::kern::processor::{
     Processor, ProcessorQueue, ProcessorSet, ProcessorState, boot_processor,
@@ -33,13 +33,12 @@ use crate::kern::sched_prim::{
 };
 use crate::kern::smp::CpuId;
 use crate::kern::thread::Thread;
-use crate::utils::cell::SyncCell;
-use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_uint, c_void};
 use core::mem::offset_of;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering;
+use lock::IrqSpinLock;
 
 /// The per-state tick counters every machine slot carries.
 pub const CPU_STATE_MAX: usize = 3;
@@ -134,12 +133,30 @@ static mut MACHINE_INFO: MachineInfo = MachineInfo {
 pub(crate) static mut MACHINE_SLOT: [MachineSlot; MAX_NCPUS] =
     [const { MachineSlot::zeroed() }; MAX_NCPUS];
 
-/// The assign/shutdown queue.
-static ACTION_QUEUE: SyncCell<ProcessorQueue> =
-    SyncCell(UnsafeCell::new(ProcessorQueue::new()));
+/// The processors waiting for the action thread.
+struct ActionQueue(ProcessorQueue);
 
-/// Serializes the action queue.
-static ACTION_LOCK: SimpleLock = SimpleLock::new();
+// SAFETY: the queue links processor records, which every CPU shares.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the linked processors are shared between CPUs, which their type \
+              does not say"
+)]
+unsafe impl Send for ActionQueue {}
+
+impl ActionQueue {
+    /// The queue, pinned.
+    const fn pinned(&mut self) -> Pin<&mut ProcessorQueue> {
+        // SAFETY: the one `ActionQueue` is in `ACTION_QUEUE`, a static, which
+        // never moves.
+        unsafe { Pin::new_unchecked(&mut self.0) }
+    }
+}
+
+/// The assign/shutdown queue, under an irq spin lock, since processors are
+/// queued with their lock held at splsched.
+static ACTION_QUEUE: IrqSpinLock<ActionQueue, MachPlatform> =
+    IrqSpinLock::new(ActionQueue(ProcessorQueue::new()));
 
 /// The slot of CPU `cpu`.
 pub(crate) fn slot(cpu: CpuId) -> *mut MachineSlot {
@@ -213,23 +230,7 @@ pub(crate) fn info() -> *mut MachineInfo {
 
 /// The action queue's address, the event the action thread waits on.
 fn action_event() -> *mut c_void {
-    ACTION_QUEUE.0.get().cast()
-}
-
-/// The live `action_queue`.
-///
-/// # Safety
-///
-/// The caller must hold `action_lock` for as long as it uses the queue.
-unsafe fn action_queue() -> Pin<&'static mut ProcessorQueue> {
-    // SAFETY: the static never moves, and the lock the caller holds keeps
-    // anything else from reaching the queue.
-    unsafe { Pin::new_unchecked(&mut *ACTION_QUEUE.0.get()) }
-}
-
-/// The live `action_lock`.
-pub(crate) fn action_lock() -> &'static SimpleLock {
-    &ACTION_LOCK
+    ptr::from_ref(&ACTION_QUEUE).cast_mut().cast()
 }
 
 /// The option word of `host_reboot()`.
@@ -361,7 +362,7 @@ unsafe fn request_action(
             core::hint::spin_loop();
         }
 
-        action_lock().lock();
+        let mut queue = ACTION_QUEUE.lock();
 
         match (*processor).state.load(Ordering::Acquire) {
             ProcessorState::Idle => {
@@ -369,12 +370,14 @@ unsafe fn request_action(
                     .idle_queue_pinned()
                     .remove_ptr(processor.cast_const());
                 (*pset).idle_count = (*pset).idle_count.wrapping_sub(1);
-                action_queue()
+                queue
+                    .pinned()
                     .push_back_ptr(NonNull::new_unchecked(processor));
                 set_action_state(processor, new_pset);
             }
             ProcessorState::Running => {
-                action_queue()
+                queue
+                    .pinned()
                     .push_back_ptr(NonNull::new_unchecked(processor));
                 set_action_state(processor, new_pset);
             }
@@ -392,7 +395,7 @@ unsafe fn request_action(
             }
         }
 
-        action_lock().unlock();
+        drop(queue);
         (*pset).idle_lock.unlock();
 
         let _ = thread_wakeup_prim(action_event(), 0, THREAD_AWAKENED);
@@ -538,7 +541,7 @@ pub(crate) unsafe fn shutdown(processor: *mut Processor) -> Result<(), Error> {
 ///
 /// # Safety
 ///
-/// `processor` must be a live processor queued on `action_queue` with a state
+/// `processor` must be a live processor queued on `ACTION_QUEUE` with a state
 /// of assign or shutdown, and the caller must be the action thread.
 unsafe fn doaction(processor: *mut Processor) {
     let this_thread = per_cpu::thread();
@@ -836,37 +839,31 @@ pub(crate) unsafe extern "C" fn action_thread() {
 /// # Safety
 ///
 /// The thread that runs this must be the action thread, and nothing else may
-/// drain `action_queue`.
+/// drain `ACTION_QUEUE`.
 unsafe fn engine() -> ! {
+    // The continuation must be typed `extern "C" fn()`; the trampoline
+    // re-enters the loop below on the resumed stack.
+    unsafe extern "C" fn resume() {
+        // SAFETY: `engine()` never returns.
+        unsafe { engine() }
+    }
+
     loop {
-        // SAFETY: the action thread is the only drainer of the queue, and the
-        // action lock serializes the walk.
+        let mut queue = ACTION_QUEUE.lock();
+        while let Some(processor) = queue.pinned().pop_front() {
+            let processor = ptr::from_mut(processor);
+            // SAFETY: `request_action` queues only live processors, in the
+            // assign or shutdown state; the queue's lock is released for the
+            // action, which blocks.
+            queue.unlocked(|| unsafe { doaction(processor) });
+        }
+
+        // SAFETY: the wait is asserted before the queue's lock is released,
+        // so a processor queued after the check still wakes this thread, and
+        // the block holds no lock.
         unsafe {
-            // The continuation must be typed `extern "C" fn()`; the
-            // trampoline re-enters the loop above on the resumed stack.
-            unsafe extern "C" fn resume() {
-                // SAFETY: `engine()` never returns.
-                unsafe { engine() }
-            }
-
-            let mut s = spl::splsched();
-            action_lock().lock();
-
-            while let Some(processor) = action_queue().pop_front() {
-                let processor = ptr::from_mut(processor);
-                action_lock().unlock();
-                spl::splx(s);
-
-                doaction(processor);
-
-                s = spl::splsched();
-                action_lock().lock();
-            }
-
             assert_wait(NonNull::new(action_event()), 0);
-            action_lock().unlock();
-            spl::splx(s);
-
+            drop(queue);
             thread_block(Some(resume));
         }
     }

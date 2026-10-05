@@ -96,7 +96,6 @@ pub(crate) unsafe fn setup_main() {
     unsafe {
         task::init();
         Thread::init();
-        thread_swap::swapper_init();
         processor::system_init();
 
         sched_prim::recompute_priorities_start();

@@ -12,6 +12,7 @@ use crate::arch::vm_param::KERNEL_STACK_SIZE;
 use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
 use crate::arch::x86_64::pcb::Pcb;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::spl;
 use crate::ipc::IpcSpace;
 use crate::ipc::ipc_thread::IpcWait;
@@ -55,6 +56,7 @@ use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 #[cfg(debug_assertions)]
 use lock::HeldLocks;
+use lock::IrqSpinLock;
 
 /// The length of a thread's name, with its NUL.
 pub const TASK_NAME_SIZE: usize = 32;
@@ -410,8 +412,8 @@ impl Thread {
         thread
     }
 
-    /// Sets up the thread and stack caches, the template, and the reaper and
-    /// stack locks.
+    /// Sets up the thread and stack caches, the template, and the stack
+    /// lock.
     ///
     /// # Safety
     ///
@@ -434,7 +436,6 @@ impl Thread {
                 CacheInitFlags::EMPTY,
             );
             (*ptr::addr_of_mut!(THREAD_TEMPLATE)).write(Self::new());
-            REAPER_LOCK.init();
             STACK_LOCK_DATA.init();
             crate::arch::x86_64::pcb::pcb_module_init();
         }
@@ -1518,27 +1519,34 @@ static mut THREAD_STACK_CACHE: KmemCache = KmemCache::zeroed();
 static mut THREAD_TEMPLATE: MaybeUninit<Thread> = MaybeUninit::uninit();
 
 /// The threads waiting for the reaper.
-static REAPER_QUEUE: SyncCell<ThreadQueue> =
-    SyncCell(UnsafeCell::new(ThreadQueue::new()));
+struct ReaperQueue(ThreadQueue);
+
+// SAFETY: the queue links thread records, which every CPU shares.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the linked threads are shared between CPUs, which their type \
+              does not say"
+)]
+unsafe impl Send for ReaperQueue {}
+
+impl ReaperQueue {
+    /// The queue, pinned.
+    const fn pinned(&mut self) -> Pin<&mut ThreadQueue> {
+        // SAFETY: the one `ReaperQueue` is in `REAPER_QUEUE`, a static, which
+        // never moves.
+        unsafe { Pin::new_unchecked(&mut self.0) }
+    }
+}
+
+/// The threads waiting for the reaper, under an irq spin lock, since a
+/// terminating thread queues itself at splsched.
+static REAPER_QUEUE: IrqSpinLock<ReaperQueue, MachPlatform> =
+    IrqSpinLock::new(ReaperQueue(ThreadQueue::new()));
 
 /// The reaper queue's address, the event the reaper thread waits on.
 fn reaper_event() -> *mut c_void {
-    REAPER_QUEUE.0.get().cast()
+    ptr::from_ref(&REAPER_QUEUE).cast_mut().cast()
 }
-
-/// The live `reaper_queue` head.
-///
-/// # Safety
-///
-/// The caller must hold `REAPER_LOCK` for as long as it uses the queue.
-unsafe fn reaper_queue() -> Pin<&'static mut ThreadQueue> {
-    // SAFETY: the static never moves, and the lock the caller holds keeps
-    // anything else from reaching the queue.
-    unsafe { Pin::new_unchecked(&mut *REAPER_QUEUE.0.get()) }
-}
-
-/// Protects `REAPER_QUEUE`.
-static REAPER_LOCK: SimpleLock = SimpleLock::new();
 
 /// Protects the cached-stack free list, at splsched.
 static STACK_LOCK_DATA: SimpleLock = SimpleLock::new();
@@ -2223,9 +2231,10 @@ impl Thread {
                 Self::hold(thread);
 
                 let s = spl::splsched();
-                REAPER_LOCK.lock();
-                reaper_queue().push_back_ptr(NonNull::new_unchecked(thread));
-                REAPER_LOCK.unlock();
+                REAPER_QUEUE
+                    .lock()
+                    .pinned()
+                    .push_back_ptr(NonNull::new_unchecked(thread));
 
                 (*thread).lock.lock();
                 (*thread).set_state((*thread).state() | TH_HALTED);
@@ -2560,28 +2569,27 @@ unsafe extern "C" fn walking_zombie() {
 /// Runs as the reaper kernel thread, which `kernel_thread()` starts once.
 pub(crate) unsafe extern "C" fn reaper_thread_continue() {
     loop {
-        // SAFETY: the reaper runs alone; the lock protects the queue, and
-        // both waits release it.
-        unsafe {
-            let mut s = spl::splsched();
-            REAPER_LOCK.lock();
-
-            let mut entry = reaper_queue().cursor_front_mut().remove_current();
-            while let Some(thread) = entry {
-                REAPER_LOCK.unlock();
-                spl::splx(s);
-
-                let thread = ptr::from_mut(thread);
+        let mut queue = REAPER_QUEUE.lock();
+        while let Some(thread) =
+            queue.pinned().cursor_front_mut().remove_current()
+        {
+            let thread = ptr::from_mut(thread);
+            // SAFETY: a queued thread is live and is not the reaper, and the
+            // reference it holds for being alive is the one the reaper drops;
+            // the queue's lock is released for the wait and the free, which
+            // may block.
+            queue.unlocked(|| unsafe {
                 let _ = Thread::dowait(thread, true);
                 Thread::deallocate(thread);
+            });
+        }
 
-                s = spl::splsched();
-                REAPER_LOCK.lock();
-                entry = reaper_queue().cursor_front_mut().remove_current();
-            }
+        // SAFETY: the wait is asserted before the queue's lock is released,
+        // so a thread queued after the check still wakes the reaper, and the
+        // block holds no lock.
+        unsafe {
             assert_wait(NonNull::new(reaper_event()), 0);
-            REAPER_LOCK.unlock();
-            spl::splx(s);
+            drop(queue);
             thread_block(Some(reaper_thread_continue));
         }
     }

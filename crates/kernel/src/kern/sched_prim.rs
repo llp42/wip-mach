@@ -327,8 +327,8 @@ fn state_panic(thread: *mut Thread) -> ! {
     )
 }
 
-/// Sets the quantum, bootstraps the processor sets, and initializes the action
-/// lock and the AST state.
+/// Sets the quantum, bootstraps the processor sets, and initializes the AST
+/// state.
 ///
 /// # Safety
 ///
@@ -337,12 +337,9 @@ fn state_panic(thread: *mut Thread) -> ! {
 pub(crate) unsafe fn sched_init() {
     MIN_QUANTUM_TICKS.store(machine::CLOCK_HZ / 33, Ordering::Relaxed);
 
-    // SAFETY: the processor module owns the processor sets and the machine
-    // module the action globals, and this is the boot step that builds them.
-    unsafe {
-        processor::bootstrap();
-        machine::action_lock().init();
-    }
+    // SAFETY: the processor module owns the processor sets, and this is the
+    // boot step that builds them.
+    unsafe { processor::bootstrap() };
 
     SCHED_TICK.store(0, Ordering::Relaxed);
     // No other CPU is running yet, so no AST can be pending.

@@ -6,9 +6,9 @@
 //! The thread swapper.
 
 use crate::arch::x86_64::per_cpu;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::spl;
 use crate::kern::debug::kpanic;
-use crate::kern::lock::SimpleLock;
 use crate::kern::sched_prim::{
     THREAD_AWAKENED, assert_wait, thread_block, thread_continue,
     thread_setrun, thread_wakeup_prim,
@@ -16,43 +16,40 @@ use crate::kern::sched_prim::{
 use crate::kern::thread::{
     TH_RUN, TH_SW_COMING_IN, TH_SWAP_STATE, TH_SWAPPED, Thread, ThreadQueue,
 };
-use crate::utils::cell::SyncCell;
-use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_void};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
+use lock::IrqSpinLock;
 
-/// Guards `SWAPIN_QUEUE`.
-static SWAPPER_LOCK: SimpleLock = SimpleLock::new();
+/// The threads waiting for a stack.
+struct SwapinQueue(ThreadQueue);
 
-/// The threads waiting for a stack, and the event the swapin thread sleeps on.
-static SWAPIN_QUEUE: SyncCell<ThreadQueue> =
-    SyncCell(UnsafeCell::new(ThreadQueue::new()));
+// SAFETY: the queue links thread records, which every CPU shares.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the linked threads are shared between CPUs, which their type \
+              does not say"
+)]
+unsafe impl Send for SwapinQueue {}
 
-/// The live swapin queue head.
-///
-/// # Safety
-///
-/// The caller must hold `SWAPPER_LOCK` for as long as it uses the queue.
-unsafe fn swapin_queue() -> Pin<&'static mut ThreadQueue> {
-    // SAFETY: the static never moves, and the lock the caller holds keeps
-    // anything else from reaching the queue.
-    unsafe { Pin::new_unchecked(&mut *SWAPIN_QUEUE.0.get()) }
+impl SwapinQueue {
+    /// The queue, pinned.
+    const fn pinned(&mut self) -> Pin<&mut ThreadQueue> {
+        // SAFETY: the one `SwapinQueue` is in `SWAPIN_QUEUE`, a static, which
+        // never moves.
+        unsafe { Pin::new_unchecked(&mut self.0) }
+    }
 }
+
+/// The threads waiting for a stack, and the event the swapin thread sleeps
+/// on.  Under an irq spin lock, since the scheduler queues threads at
+/// splsched.
+static SWAPIN_QUEUE: IrqSpinLock<SwapinQueue, MachPlatform> =
+    IrqSpinLock::new(SwapinQueue(ThreadQueue::new()));
 
 /// The swapin queue's address, which doubles as the wakeup event.
 fn swapin_event() -> *mut c_void {
-    SWAPIN_QUEUE.0.get().cast()
-}
-
-/// Initializes the swapper lock and queue.
-///
-/// # Safety
-///
-/// Must be called once during boot, before any thread is queued for swapin;
-/// `setup_main()` is the only caller.
-pub(crate) unsafe fn swapper_init() {
-    SWAPPER_LOCK.init();
+    ptr::from_ref(&SWAPIN_QUEUE).cast_mut().cast()
 }
 
 /// Queues `thread`, which lost its stack, for the swapin thread.
@@ -69,14 +66,15 @@ pub(crate) unsafe fn thread_swapin(thread: *mut Thread) {
                 (*thread)
                     .set_state((state & !TH_SWAP_STATE) | TH_SW_COMING_IN);
             }
-            // SAFETY: the swapper lock serializes the queue, and the thread's
-            // `links` field is free while the thread is swapped out.
+            // SAFETY: the thread's `links` field is free while the thread is
+            // swapped out.
             unsafe {
-                SWAPPER_LOCK.lock();
-                swapin_queue().push_back_ptr(NonNull::new_unchecked(thread));
-                SWAPPER_LOCK.unlock();
+                SWAPIN_QUEUE
+                    .lock()
+                    .pinned()
+                    .push_back_ptr(NonNull::new_unchecked(thread));
             }
-            // SAFETY: the event is the queue head's fixed address, the key the
+            // SAFETY: the event is the queue's fixed address, the key the
             // swapin thread registers with `assert_wait()`.
             unsafe {
                 thread_wakeup_prim(swapin_event(), 0, THREAD_AWAKENED);
@@ -118,34 +116,23 @@ pub(crate) unsafe fn doswapin(thread: *mut Thread) {
 /// Runs as the swapin kernel thread.
 unsafe fn swapin_thread_continue() -> ! {
     loop {
-        // SAFETY: the continuation runs in thread context; the swapper lock
-        // and the spl level guard the queue, and `doswapin()` blocks only with
-        // both released.
+        let mut queue = SWAPIN_QUEUE.lock();
+        while let Some(thread) =
+            queue.pinned().cursor_front_mut().remove_current()
+        {
+            let thread = ptr::from_mut(thread);
+            // SAFETY: every thread on the queue is a live, swapped-out
+            // thread that no lock protects, and the queue's lock is
+            // released for the stack allocation, which can block.
+            queue.unlocked(|| unsafe { doswapin(thread) });
+        }
+
+        // SAFETY: the wait is asserted before the queue's lock is released,
+        // so a thread queued after the check still wakes this one, and the
+        // block holds no lock.
         unsafe {
-            let mut s = spl::splsched();
-            SWAPPER_LOCK.lock();
-
-            while let Some(elt) =
-                swapin_queue().cursor_front_mut().remove_current()
-            {
-                SWAPPER_LOCK.unlock();
-                spl::splx(s);
-
-                // SAFETY: `links` is the first field of `struct thread`, so a
-                // popped link is its thread; every entry on this queue was
-                // pushed that way.
-                let thread = ptr::from_mut(elt);
-                doswapin(thread);
-
-                s = spl::splsched();
-                SWAPPER_LOCK.lock();
-            }
-
-            // SAFETY: the event is the queue head's fixed address, and the
-            // lock is released before blocking, as in C.
             assert_wait(NonNull::new(swapin_event()), 0);
-            SWAPPER_LOCK.unlock();
-            spl::splx(s);
+            drop(queue);
             thread_block(Some(swapin_thread_continuation));
         }
     }
