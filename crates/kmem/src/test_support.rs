@@ -79,8 +79,13 @@ unsafe impl Alloc for Heap {
         }
         // SAFETY: the size is not zero.
         let block = NonNull::new(unsafe { alloc(layout) }).expect("host heap");
+        // Miri flags any read of uninitialized bytes itself, which the fill
+        // would hide.
+        #[cfg(not(miri))]
         // SAFETY: the block is `layout.size()` writable bytes.
-        unsafe { block.as_ptr().write_bytes(0xAA, layout.size()) };
+        unsafe {
+            block.as_ptr().write_bytes(0xAA, layout.size());
+        }
         self.live.lock().unwrap().push((block.addr().get(), layout));
         Ok(block)
     }

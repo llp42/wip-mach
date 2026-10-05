@@ -515,20 +515,15 @@ mod tests {
     #[test]
     fn contender_parks_while_the_owner_holds_on() {
         let lock = Mutex::<u32, Host>::new(0);
-        let held = Barrier::new(2);
         thread::scope(|scope| {
             let mut guard = lock.lock();
-            let contender = scope.spawn(|| {
-                let _ = held.wait();
-                *lock.lock() += 1;
-                Host::parks()
-            });
-            let _ = held.wait();
-            // Long enough for the contender to spin out and park.
-            thread::sleep(Duration::from_millis(50));
+            // Returns once the contender has parked, though this thread
+            // runs throughout: the contender spins out instead of waiting
+            // for the owner to sleep.
+            let (_, contender) = spawn_parked(scope, || *lock.lock() += 1);
             *guard += 10;
             drop(guard);
-            assert!(contender.join().unwrap() > 0);
+            contender.join().unwrap();
         });
         assert_eq!(lock.into_inner(), 11);
     }
