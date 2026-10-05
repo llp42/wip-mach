@@ -47,15 +47,8 @@ pub(crate) fn mach_factor() -> [c_long; 3] {
 /// Updates the load averages and the mach factors from each processor set's
 /// run queues.
 pub(crate) fn compute() {
-    let lock = processor::all_psets_lock();
-    // The boot path initialized the lock and the list, and the lock serializes
-    // this walk with every list update.
-    lock.lock();
-    // SAFETY: the list head is initialized and stays at its address, and the
-    // lock serializes the walk with every list update.
-    let head = unsafe { processor::all_psets() };
-    let mut cursor = head.cursor_front();
-    // SAFETY: `head` is initialized and each yielded node is live.
+    let all_psets = processor::ALL_PSETS.lock();
+    let mut cursor = all_psets.list().cursor_front();
     while let Some(pset) = cursor.current_ptr() {
         cursor.move_next();
         let pset = pset.as_ptr();
@@ -137,5 +130,5 @@ pub(crate) fn compute() {
             (*pset).lock.unlock();
         }
     }
-    lock.unlock();
+    drop(all_psets);
 }

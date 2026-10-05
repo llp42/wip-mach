@@ -184,25 +184,22 @@ pub(crate) unsafe fn processor_sets(
         return Err(Error::InvalidArgument);
     }
 
-    let lock = processor::all_psets_lock();
     let mut size: usize = 0;
     let mut addr: *mut u8 = ptr::null_mut();
     let actual;
     let size_needed;
 
-    loop {
-        // The lock guards `all_psets`.
-        lock.lock();
-        // SAFETY: the lock is held.
-        let count = unsafe { *processor::all_psets_count() } as usize;
+    let all_psets = loop {
+        let all_psets = processor::ALL_PSETS.lock();
+        let count = all_psets.count as usize;
         let needed = count.wrapping_mul(size_of::<usize>());
         if needed <= size {
             actual = count;
             size_needed = needed;
-            break;
+            break all_psets;
         }
 
-        lock.unlock();
+        drop(all_psets);
         if let Some(old) = NonNull::new(addr) {
             // SAFETY: `addr` came from `kalloc(size)`.
             unsafe { kfree(old, size) };
@@ -212,13 +209,10 @@ pub(crate) unsafe fn processor_sets(
             return Err(Error::ResourceShortage);
         };
         addr = buffer.as_ptr();
-    }
+    };
 
     let psets = addr.cast::<*mut c_void>();
-    // SAFETY: the lock is held, the list was initialized by
-    // `processor_set_create()`, and every link is a live set.
-    let list = unsafe { processor::all_psets() };
-    let mut cursor = list.cursor_front();
+    let mut cursor = all_psets.list().cursor_front();
     for i in 0..actual {
         let Some(pset) = cursor.current_ptr() else {
             break;
@@ -232,7 +226,7 @@ pub(crate) unsafe fn processor_sets(
             psets.add(i).write(pset.cast());
         }
     }
-    lock.unlock();
+    drop(all_psets);
 
     let mut psets = psets;
     if size_needed < size {

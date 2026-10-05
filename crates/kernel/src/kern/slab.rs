@@ -9,6 +9,7 @@
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::phys::kvtophys;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_END;
 use crate::arch::x86_64::pmap::KERNEL_VIRTUAL_START;
 use crate::kern::console::{CStrArg, kprint};
@@ -32,6 +33,7 @@ use core::ops;
 use core::pin::{Pin, pin};
 use core::ptr::{self, NonNull, addr_of_mut, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use lock::SpinLock;
 
 /// The length of a cache name, chosen so the mirror fits in two 64-byte cache
 /// lines.
@@ -330,14 +332,22 @@ static KALLOC_CACHES: SyncCell<[KmemCache; KALLOC_NR_CACHES]> = SyncCell(
 );
 
 /// Every cache, in initialization order.
-static KMEM_CACHE_LIST: SyncCell<CacheList> =
-    SyncCell(UnsafeCell::new(CacheList::new()));
+struct Caches(CacheList);
+
+// SAFETY: the list links cache records, which every CPU shares.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the linked caches are shared between CPUs, which their type \
+              does not say"
+)]
+unsafe impl Send for Caches {}
+
+/// Every cache, in initialization order.
+static KMEM_CACHE_LIST: SpinLock<Caches, MachPlatform> =
+    SpinLock::new(Caches(CacheList::new()));
 
 /// How many caches [`KMEM_CACHE_LIST`] holds.
 static KMEM_NR_CACHES: AtomicU32 = AtomicU32::new(0);
-
-/// Serializes the cache list.
-static KMEM_CACHE_LIST_LOCK: SimpleLock = SimpleLock::new();
 
 /// Whether `kalloc_init()` has built the general-purpose caches, so
 /// [`kalloc`] may be called.
@@ -345,18 +355,6 @@ static KALLOC_READY: AtomicBool = AtomicBool::new(false);
 
 /// The tick of the last garbage collection.
 static KMEM_GC_LAST_TICK: AtomicUsize = AtomicUsize::new(0);
-
-/// The global cache list head.
-///
-/// # Safety
-///
-/// The caller must hold `KMEM_CACHE_LIST_LOCK` for as long as it uses the
-/// list.
-unsafe fn cache_list() -> Pin<&'static mut CacheList> {
-    // SAFETY: the static never moves, and the lock the caller holds keeps
-    // anything else from reaching the list.
-    unsafe { Pin::new_unchecked(&mut *KMEM_CACHE_LIST.0.get()) }
-}
 
 /// The off-slab data cache; live from `slab_init()` on.
 fn slab_cache() -> *mut KmemCache {
@@ -472,15 +470,18 @@ impl KmemCache {
 
         self.compute_properties(flags);
 
-        KMEM_CACHE_LIST_LOCK.lock();
-        // SAFETY: each cache is initialized once, lives in static storage
-        // for the kernel's lifetime, and the list lock serializes the
-        // insertion.
-        unsafe { cache_list().push_back_ptr(NonNull::from(&mut *self)) };
+        let mut caches = KMEM_CACHE_LIST.lock();
+        // SAFETY: the list is in `KMEM_CACHE_LIST`, a static, which never
+        // moves; each cache is initialized once and lives in static storage
+        // for the kernel's lifetime.
+        unsafe {
+            Pin::new_unchecked(&mut caches.0)
+                .push_back_ptr(NonNull::from(&mut *self));
+        }
         // `Relaxed` is enough: the list lock orders the insertion, and the
         // count is only a size hint outside the lock.
         KMEM_NR_CACHES.fetch_add(1, Ordering::Relaxed);
-        KMEM_CACHE_LIST_LOCK.unlock();
+        drop(caches);
     }
 
     /// Chooses the cache's slab size, buffer layout and slab-data placement.
@@ -1653,15 +1654,9 @@ pub(crate) unsafe fn kmem_cache_free(cache: *mut KmemCache, obj: VmOffset) {
     unsafe { (*cache.as_ptr()).free(obj) };
 }
 
-/// Initializes the cache-list lock.
-pub(crate) fn slab_bootstrap() {
-    KMEM_CACHE_LIST_LOCK.init();
-}
-
 /// Initializes the cache of off-slab data.
 pub(crate) fn slab_init() {
-    // SAFETY: `slab_bootstrap()` ran, and this is the off-slab cache's only
-    // initializer.
+    // SAFETY: this is the off-slab cache's only initializer.
     unsafe {
         (*slab_cache()).init(
             b"kmem_slab",
@@ -1748,9 +1743,9 @@ pub(crate) fn slab_collect() {
 
     let mut dead_slabs = pin!(SlabList::new());
 
-    KMEM_CACHE_LIST_LOCK.lock();
-    for_each_cache(|cache| cache.reap(dead_slabs.as_mut()));
-    KMEM_CACHE_LIST_LOCK.unlock();
+    for_each_cache(&KMEM_CACHE_LIST.lock().0, |cache| {
+        cache.reap(dead_slabs.as_mut());
+    });
 
     while let Some(slab) =
         dead_slabs.as_mut().cursor_front_mut().remove_current()
@@ -1777,16 +1772,16 @@ pub(crate) fn collect(expected: u32, out: &mut [CacheInfo]) -> Option<u32> {
         return None;
     }
 
-    KMEM_CACHE_LIST_LOCK.lock();
+    let caches = KMEM_CACHE_LIST.lock();
 
     if KMEM_NR_CACHES.load(Ordering::Relaxed) != expected {
-        KMEM_CACHE_LIST_LOCK.unlock();
+        drop(caches);
         return None;
     }
 
     let mut count = 0usize;
 
-    for_each_cache(|cache| {
+    for_each_cache(&caches.0, |cache| {
         let Some(info) = out.get_mut(count) else {
             return;
         };
@@ -1794,22 +1789,17 @@ pub(crate) fn collect(expected: u32, out: &mut [CacheInfo]) -> Option<u32> {
         count += 1;
     });
 
-    KMEM_CACHE_LIST_LOCK.unlock();
+    drop(caches);
 
     // `count` never exceeds the list's length, `expected`, which is a `u32`.
     Some(count as u32)
 }
 
-/// Run `f` on every cache of the global list.
+/// Runs `f` on every cache of `caches`, the locked global list.
 ///
-/// The caller must hold `KMEM_CACHE_LIST_LOCK`; no callback may remove a
-/// cache from the list.
-fn for_each_cache(mut f: impl FnMut(&mut KmemCache)) {
-    // SAFETY: the caller holds the list lock, so the head is a valid list
-    // for the walk.
-    let head = unsafe { cache_list() };
-
-    let mut cursor = head.cursor_front();
+/// No callback may remove a cache from the list.
+fn for_each_cache(caches: &CacheList, mut f: impl FnMut(&mut KmemCache)) {
+    let mut cursor = caches.cursor_front();
     while let Some(cache) = cursor.current_ptr() {
         cursor.move_next();
         // SAFETY: `KmemCache::init()` linked this cache, which is static

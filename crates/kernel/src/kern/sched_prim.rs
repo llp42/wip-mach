@@ -1493,23 +1493,18 @@ unsafe fn do_runq_scan(runq: *mut RunQueue) -> bool {
 pub(crate) unsafe fn do_thread_scan() {
     let mut restart_needed = false;
     loop {
-        // SAFETY: the all-psets lock serializes the list, and each run queue
-        // has its own lock taken by `do_runq_scan`.
-        unsafe {
-            let lock = processor::all_psets_lock();
-            lock.lock();
-            let head = processor::all_psets();
-            let mut cursor = head.cursor_front();
-            while let Some(pset) = cursor.current_ptr() {
-                cursor.move_next();
-                let pset = pset.as_ptr();
-                if do_runq_scan(&raw mut (*pset).runq) {
-                    restart_needed = true;
-                    break;
-                }
+        let all_psets = processor::ALL_PSETS.lock();
+        let mut cursor = all_psets.list().cursor_front();
+        while let Some(pset) = cursor.current_ptr() {
+            cursor.move_next();
+            // SAFETY: the set is live while it is on the list, and each run
+            // queue has its own lock taken by `do_runq_scan`.
+            if unsafe { do_runq_scan(&raw mut (*pset.as_ptr()).runq) } {
+                restart_needed = true;
+                break;
             }
-            lock.unlock();
         }
+        drop(all_psets);
 
         if !restart_needed {
             for processor in processor::iter() {

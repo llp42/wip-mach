@@ -1469,13 +1469,11 @@ unsafe fn collect_scan() {
     let mut prev_task: *mut Task = null_mut();
     let mut prev_pset: *mut ProcessorSet = null_mut();
 
-    // SAFETY: `all_psets` and its lock guard the global list; the walk keeps a
-    // reference on both the set and the task between iterations.
+    // SAFETY: the walk keeps a reference on both the set and the task between
+    // iterations.
     unsafe {
-        let all_psets_lock = processor::all_psets_lock();
-
-        all_psets_lock.lock();
-        let mut pset_entry = processor::next_pset(None);
+        let mut all_psets = processor::ALL_PSETS.lock();
+        let mut pset_entry = all_psets.list().cursor_front().current_ptr();
         while let Some(pset) = pset_entry {
             let pset = pset.as_ptr();
             (*pset).lock.lock();
@@ -1486,33 +1484,38 @@ unsafe fn collect_scan() {
                 reference(task);
                 (*pset).reference();
                 (*pset).lock.unlock();
-                all_psets_lock.unlock();
 
-                (*task).machine.collect();
-                pmap_collect(NonNull::new(
-                    (*(*task).map.cast::<VmMap>()).pmap,
-                ));
+                all_psets.unlocked(|| {
+                    (*task).machine.collect();
+                    pmap_collect(NonNull::new(
+                        (*(*task).map.cast::<VmMap>()).pmap,
+                    ));
 
-                if !prev_task.is_null() {
-                    deallocate(prev_task);
-                }
-                prev_task = task;
+                    if !prev_task.is_null() {
+                        deallocate(prev_task);
+                    }
+                    prev_task = task;
 
-                if !prev_pset.is_null() {
-                    (*prev_pset).deallocate();
-                }
-                prev_pset = pset;
+                    if !prev_pset.is_null() {
+                        (*prev_pset).deallocate();
+                    }
+                    prev_pset = pset;
+                });
 
-                all_psets_lock.lock();
                 (*pset).lock.lock();
                 // `task` is referenced, so it stays linked.
                 task_entry = next_task(pset, task);
             }
             (*pset).lock.unlock();
-            // `all_psets_lock` still guards `pset`'s link.
-            pset_entry = processor::next_pset(Some(pset));
+            // `pset` is still linked: the walk either kept the list's lock
+            // or holds a reference on the set.
+            let mut cursor = all_psets
+                .list_pinned()
+                .cursor_mut_from_ptr(NonNull::new_unchecked(pset));
+            cursor.move_next();
+            pset_entry = cursor.current_ptr();
         }
-        all_psets_lock.unlock();
+        drop(all_psets);
 
         if !prev_task.is_null() {
             deallocate(prev_task);

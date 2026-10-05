@@ -10,7 +10,7 @@
 use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_init;
 use crate::kern::debug::kpanic;
-use crate::kern::slab::{kalloc_init, slab_bootstrap, slab_init};
+use crate::kern::slab::{kalloc_init, slab_init};
 use crate::vm::memory_object_proxy;
 use crate::vm::vm_fault;
 use crate::vm::vm_kern::{self, KERNEL_MAP};
@@ -20,8 +20,8 @@ use crate::vm::vm_page;
 use crate::vm::vm_resident;
 use core::ptr::NonNull;
 
-/// Brings up the VM packages in boot order: the resident pages, the slab
-/// allocator, objects, maps, the kernel map, the physical maps, `kalloc`,
+/// Brings up the VM packages in boot order: the resident pages, objects,
+/// maps, the kernel map, the physical maps, the slab allocator, `kalloc`,
 /// faults and the default manager.
 fn bootstrap() {
     let (start, end) = vm_resident::bootstrap();
@@ -29,7 +29,6 @@ fn bootstrap() {
     // SAFETY: the boot caller runs the sequence once and in this order, and
     // each callee requires the packages before it to be up.
     unsafe {
-        slab_bootstrap();
         vm_object::bootstrap();
         VmMap::init_module();
         if let Err(error) = vm_kern::kmem_init(

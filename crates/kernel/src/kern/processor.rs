@@ -10,6 +10,7 @@
 //! Processors and processor sets.
 
 use crate::arch::x86_64::mp_desc::cpu_control;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::arch::x86_64::{per_cpu, smp};
 use crate::config::MAX_NCPUS;
 use crate::ipc::IpcPort;
@@ -28,7 +29,6 @@ use crate::kern::slab::{CacheInitFlags, KmemCache, kalloc, kfree};
 use crate::kern::smp::{CpuId, ncpus};
 use crate::kern::task::{self as task, PsetTaskList, Task};
 use crate::kern::thread::{PsetThreadList, Thread, ThreadQueue};
-use crate::utils::cell::SyncCell;
 use collections::simple_queue::{self, SimpleQueue};
 use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_long, c_uint, c_void};
@@ -36,6 +36,7 @@ use core::mem::size_of;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU8, Ordering};
+use lock::SpinLock;
 
 /// The state of a [`Processor`], as its `state` member stores it.
 #[repr(u8)]
@@ -431,15 +432,42 @@ pub type PsetList = SimpleQueue<'static, ProcessorSetAllAdapter>;
 /// The set every task starts in.
 static mut DEFAULT_PSET: ProcessorSet = ProcessorSet::zeroed();
 
-/// The chain of every processor set.
-static ALL_PSETS: SyncCell<PsetList> =
-    SyncCell(UnsafeCell::new(PsetList::new()));
+/// The chain of every processor set, and its length.
+pub(crate) struct AllPsets {
+    list: PsetList,
+    /// How many sets the list holds.
+    pub count: u32,
+}
 
-/// How many sets [`ALL_PSETS`] holds, under [`ALL_PSETS_LOCK`].
-static ALL_PSETS_COUNT: SyncCell<u32> = SyncCell(UnsafeCell::new(0));
+// SAFETY: the list links processor-set records, which every CPU shares.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the linked sets are shared between CPUs, which their type \
+              does not say"
+)]
+unsafe impl Send for AllPsets {}
 
-/// Serializes the set list.
-static ALL_PSETS_LOCK: SimpleLock = SimpleLock::new();
+impl AllPsets {
+    /// The list.
+    pub(crate) const fn list(&self) -> &PsetList {
+        &self.list
+    }
+
+    /// The list, pinned.
+    pub(crate) const fn list_pinned(&mut self) -> Pin<&mut PsetList> {
+        // SAFETY: the one `AllPsets` is in `ALL_PSETS`, a static, which never
+        // moves, and the list is private to this module, so nothing else
+        // moves it out.
+        unsafe { Pin::new_unchecked(&mut self.list) }
+    }
+}
+
+/// Every processor set.
+pub(crate) static ALL_PSETS: SpinLock<AllPsets, MachPlatform> =
+    SpinLock::new(AllPsets {
+        list: PsetList::new(),
+        count: 0,
+    });
 
 /// The slab cache of [`ProcessorSet`] records.
 static mut PSET_CACHE: KmemCache = KmemCache::zeroed();
@@ -450,51 +478,6 @@ static SLAVE_PSET: AtomicPtr<ProcessorSet> = AtomicPtr::new(ptr::null_mut());
 /// The live `default_pset` static.
 pub(crate) fn default_pset() -> *mut ProcessorSet {
     ptr::addr_of_mut!(DEFAULT_PSET)
-}
-
-/// The live `all_psets` queue head.
-///
-/// # Safety
-///
-/// The caller must hold `all_psets_lock` for as long as it uses the list.
-pub(crate) unsafe fn all_psets() -> Pin<&'static mut PsetList> {
-    // SAFETY: the static never moves, and the lock the caller holds keeps
-    // anything else from reaching the list.
-    unsafe { Pin::new_unchecked(&mut *ALL_PSETS.0.get()) }
-}
-
-/// The processor set after `pset` in the global list, or the first for
-/// `None`.
-///
-/// # Safety
-///
-/// The caller must hold `all_psets_lock`, and `pset` must be `None` or on the
-/// list.
-pub(crate) unsafe fn next_pset(
-    pset: Option<*mut ProcessorSet>,
-) -> Option<NonNull<ProcessorSet>> {
-    // SAFETY: the lock is held.
-    let mut head = unsafe { all_psets() };
-    let Some(pset) = pset else {
-        return head.cursor_front().current_ptr();
-    };
-    // SAFETY: `pset` is on the list.
-    let mut cursor = unsafe {
-        head.as_mut()
-            .cursor_mut_from_ptr(NonNull::new_unchecked(pset))
-    };
-    cursor.move_next();
-    cursor.current_ptr()
-}
-
-/// The live `all_psets_count` counter, under `all_psets_lock`.
-pub(crate) fn all_psets_count() -> *mut u32 {
-    ALL_PSETS_COUNT.0.get()
-}
-
-/// The live `all_psets_lock`.
-pub(crate) fn all_psets_lock() -> &'static SimpleLock {
-    &ALL_PSETS_LOCK
 }
 
 /// The boot CPU's processor record.
@@ -782,15 +765,13 @@ impl ProcessorSet {
         self.ref_count = 1;
         self.ref_lock.unlock();
 
-        // SAFETY: the lock guards the list, and the C order is
-        // `all_psets_lock` before the set's `ref_lock`.
-        let all_psets_lock = all_psets_lock();
-        all_psets_lock.lock();
+        // The C order is the set list's lock before the set's `ref_lock`.
+        let mut all_psets = ALL_PSETS.lock();
         self.ref_lock.lock();
         self.ref_count = self.ref_count.wrapping_sub(1);
         if self.ref_count > 0 {
             self.ref_lock.unlock();
-            all_psets_lock.unlock();
+            drop(all_psets);
             return;
         }
 
@@ -807,16 +788,11 @@ impl ProcessorSet {
             )
         }
 
-        // SAFETY: the set is linked into `all_psets` and both locks are held;
-        // the removal keeps the list consistent.
-        unsafe {
-            let _ = all_psets().remove_ptr(ptr::from_ref(self));
-            let count = all_psets_count();
-            *count = (*count).wrapping_sub(1);
-        }
+        let _ = all_psets.list_pinned().remove_ptr(ptr::from_ref(self));
+        all_psets.count = all_psets.count.wrapping_sub(1);
 
         self.ref_lock.unlock();
-        all_psets_lock.unlock();
+        drop(all_psets);
 
         // SAFETY: the set came from `pset_cache` and nothing references it any
         // more; `.addr()` is the address the allocator handed out.
@@ -1409,9 +1385,12 @@ pub(crate) unsafe fn bootstrap() {
             Processor::init(processor_at(cpu).as_ptr(), cpu);
         }
 
-        all_psets_lock().init();
-        all_psets().push_back_ptr(NonNull::new_unchecked(default_pset()));
-        *all_psets_count() = 1;
+        let mut all_psets = ALL_PSETS.lock();
+        all_psets
+            .list_pinned()
+            .push_back_ptr(NonNull::new_unchecked(default_pset()));
+        all_psets.count = 1;
+        drop(all_psets);
         (*default_pset()).active = 1;
     }
 }
@@ -1445,12 +1424,12 @@ pub(crate) unsafe fn create(
         ipc_host::pset_init(&mut *pset);
         (*pset).active = 1;
 
-        let lock = all_psets_lock();
-        lock.lock();
-        all_psets().push_back_ptr(NonNull::new_unchecked(pset));
-        let count = all_psets_count();
-        *count = (*count).wrapping_add(1);
-        lock.unlock();
+        let mut all_psets = ALL_PSETS.lock();
+        all_psets
+            .list_pinned()
+            .push_back_ptr(NonNull::new_unchecked(pset));
+        all_psets.count = all_psets.count.wrapping_add(1);
+        drop(all_psets);
 
         ipc_host::pset_enable(&mut *pset);
     }
