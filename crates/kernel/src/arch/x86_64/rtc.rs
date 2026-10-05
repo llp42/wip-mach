@@ -7,10 +7,11 @@
 //! The CMOS clock.
 
 use crate::arch::x86_64::pio::Port;
-use crate::arch::x86_64::spl;
+use crate::arch::x86_64::platform::MachPlatform;
 use crate::kern::console::kprint;
 use core::mem::{align_of, offset_of, size_of};
 use core::sync::atomic::{AtomicBool, Ordering};
+use lock::IrqSpinLock;
 
 /// The first year the two-digit year field can name.
 const CENTURY_START: u32 = 1970;
@@ -142,6 +143,10 @@ impl RtcSt {
     }
 }
 
+/// The CMOS index and data ports: a register access is a write to one and a
+/// read or write of the other, which nothing may come between.
+static CMOS: IrqSpinLock<(), MachPlatform> = IrqSpinLock::new(());
+
 /// Whether [`rtcinit()`] has run.
 static RTC_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -162,6 +167,7 @@ fn rtcinit_once() {
 
 /// Reads the register block.
 fn rtcget() -> Result<RtcSt, RtcError> {
+    let _cmos = CMOS.lock();
     rtcinit_once();
     RTC_ADDR.write_u8(RTC_D);
     if RTC_DATA.read_u8() & RTC_VRT == 0 {
@@ -178,6 +184,7 @@ fn rtcget() -> Result<RtcSt, RtcError> {
 
 /// Programs the time registers back.
 fn rtcput(st: &RtcSt) {
+    let _cmos = CMOS.lock();
     rtcinit_once();
     RTC_ADDR.write_u8(RTC_B);
     let saved = RTC_DATA.read_u8();
@@ -225,19 +232,7 @@ const fn month_lengths(bissextile: bool) -> [u8; 12] {
 
 /// Read the wall clock.
 pub(crate) fn read_todc() -> Result<u64, RtcError> {
-    // SAFETY: raising to `splclock` has no precondition, and the value it
-    // returns is only handed back to `splx()`.
-    let ospl = unsafe { spl::splclock() };
-    let st = match rtcget() {
-        Ok(st) => st,
-        Err(error) => {
-            // SAFETY: `ospl` is the level `splclock()` returned.
-            unsafe { spl::splx(ospl) };
-            return Err(error);
-        }
-    };
-    // SAFETY: `ospl` is the level `splclock()` returned.
-    unsafe { spl::splx(ospl) };
+    let st = rtcget()?;
 
     let sec = hexdectodec(st.rtc_sec);
     let min = hexdectodec(st.rtc_min);
@@ -288,19 +283,7 @@ pub(crate) fn read_todc() -> Result<u64, RtcError> {
 
 /// Program the wall clock with `seconds` since the Unix epoch.
 pub(crate) fn write_todc(seconds: i64) -> Result<(), RtcError> {
-    // SAFETY: raising to `splclock` has no precondition, and the value it
-    // returns is only handed back to `splx()`.
-    let ospl = unsafe { spl::splclock() };
-    let mut st = match rtcget() {
-        Ok(st) => st,
-        Err(error) => {
-            // SAFETY: `ospl` is the level `splclock()` returned.
-            unsafe { spl::splx(ospl) };
-            return Err(error);
-        }
-    };
-    // SAFETY: `ospl` is the level `splclock()` returned.
-    unsafe { spl::splx(ospl) };
+    let mut st = rtcget()?;
 
     // The clock is a post-epoch count, so the sign-extending cast keeps its
     // value.
@@ -341,12 +324,7 @@ pub(crate) fn write_todc(seconds: i64) -> Result<(), RtcError> {
     st.rtc_mon = dectohexdec(month + 1);
     st.rtc_dom = dectohexdec(n + 1);
 
-    // SAFETY: `splclock()` returns the level `splx()` restores; the C re-took
-    // it right before `rtcput()`.
-    let ospl = unsafe { spl::splclock() };
     rtcput(&st);
-    // SAFETY: `ospl` is the level just returned by `splclock()`.
-    unsafe { spl::splx(ospl) };
 
     Ok(())
 }
