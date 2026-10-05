@@ -1,0 +1,12 @@
+[package]
+name = "acpi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT"
+description = "Read the ACPI static tables: the RSDP, the RSDT or XSDT, the MADT and the HPET"
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

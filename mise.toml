@@ -28,6 +28,14 @@ run = "cargo test -p clock --target x86_64-unknown-linux-gnu"
 description = "Run the host unit tests of the collections crate"
 run = "cargo test -p collections --target x86_64-unknown-linux-gnu"
 
+[tasks."test::acpi"]
+description = "Run the host unit tests of the acpi crate"
+run = "cargo test -p acpi --target x86_64-unknown-linux-gnu"
+
+[tasks."cov::acpi"]
+description = "Fail unless the acpi crate is at 100% line, region and function coverage"
+run = "cargo llvm-cov -p acpi --target x86_64-unknown-linux-gnu --show-missing-lines --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100"
+
 [tasks."test::elf-load"]
 description = "Run the host unit tests of the elf-load crate"
 run = "cargo test -p elf-load --target x86_64-unknown-linux-gnu"
