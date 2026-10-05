@@ -6,8 +6,7 @@
 //   Copyright 1988, 1989 by Olivetti Advanced Technology Center, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! `struct io_req` of <`device/io_req.h`>, the request the device layer and the
-//! x86 drivers share.
+//! The I/O request the device layer and the x86 drivers share.
 
 use crate::device::r#return::DeviceError;
 use crate::kern::lock::SimpleLock;
@@ -18,10 +17,11 @@ use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
 
-/// `dev_t` of <sys/types.h>.
+/// A device number.
 pub type DevT = u16;
 
-/// `boolean_t (*)(io_req_t)`, the C type of `io_done`.
+/// The completion callback of a request, returning whether the request is
+/// finished.
 ///
 /// A caller invoking one through [`IoReq`]'s `done` field must pass the
 /// same live request that was queued with it; `iodone()` and its
@@ -32,12 +32,12 @@ pub type DevT = u16;
 /// `mouse_read_done()` do.
 pub type IoDone = unsafe fn(*mut IoReq) -> bool;
 
-/// `struct io_req` of <`device/io_req.h>`: the IO request a driver is handed,
-/// and the queue node its first two fields form.
+/// The I/O request a driver is handed, and the queue node its first two fields
+/// form.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct IoReq {
-    /// `io_next`/`io_prev`: the queue node the first two C fields formed.
+    /// The queue node the first two fields form.
     pub node: simple_queue::Link,
     pub device: *mut c_void,
     pub dev_ptr: *mut c_char,
@@ -49,7 +49,7 @@ pub struct IoReq {
     pub count: c_long,
     pub alloc_size: usize,
     pub residual: c_long,
-    /// `io_error`: how the request completed.
+    /// How the request completed.
     pub error: Result<(), DeviceError>,
     pub done: Option<IoDone>,
     pub reply_port: *mut c_void,
@@ -141,22 +141,22 @@ impl IoReq {
         self.count
     }
 
-    /// `io_mode`: the open/read/write mode.
+    /// The open/read/write mode.
     pub const fn mode(&self) -> c_uint {
         self.mode
     }
 
-    /// Set `io_done`, the completion callback.
+    /// Sets the completion callback.
     pub fn set_done(&mut self, done: IoDone) {
         self.done = Some(done);
     }
 
-    /// `io_data`: the buffer `device_read_alloc()` set up.
+    /// The buffer `device_read_alloc()` set up.
     pub const fn data(&self) -> *mut c_char {
         self.data
     }
 
-    /// Set `io_residual` to the bytes not done.
+    /// Sets the bytes not done.
     pub const fn set_residual(&mut self, residual: c_long) {
         self.residual = residual;
     }
@@ -189,10 +189,9 @@ pub const fn drain(queue: &mut KdEventQueue, ior: &mut IoReq) -> c_long {
     count
 }
 
-/// `D_NOWAIT` of <`device/device_types.h`>: the request must not block.
+/// The request must not block.
 pub const D_NOWAIT: c_uint = 0x8;
-/// `DEV_GET_SIZE` of <`device/device_types.h`>: the get-status flavor that
-/// reports the device and record sizes.
+/// The get-status flavor that reports the device and record sizes.
 pub const DEV_GET_SIZE: c_uint = 0;
 /// The `DEV_GET_SIZE` reply slot holding the device size.
 pub const DEV_GET_SIZE_DEVICE_SIZE: usize = 0;

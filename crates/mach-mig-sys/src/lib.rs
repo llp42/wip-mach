@@ -12,14 +12,14 @@
 
 use core::ffi::{c_char, c_int, c_uint, c_void};
 
-/// `vm_offset_t`: a type-neutral pointer, `uintptr_t` in the C.
+/// `vm_offset_t`: a type-neutral pointer, the width of an address.
 pub type VmOffset = usize;
 
-/// `vm_size_t`: the difference between two `vm_offset_t`s, likewise a
-/// `uintptr_t` in the C.
+/// `vm_size_t`: the difference between two `vm_offset_t`s, likewise the width
+/// of an address.
 pub type VmSize = usize;
 
-/// `mig_routine_t` of <mach/mig.h>: one generated MIG server entry point.
+/// One generated MIG server entry point.
 pub type MigRoutine = Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>;
 
 unsafe extern "C" {
@@ -31,8 +31,7 @@ unsafe extern "C" {
         parent: *mut c_void,
     ) -> c_int;
 
-    /// `r_memory_object_data_error()` of the MIG `memory_object_reply`
-    /// user stubs.
+    /// `r_memory_object_data_error()` of the MIG `mach` user stubs.
     pub fn r_memory_object_data_error(
         memory_control: *mut c_void,
         offset: VmOffset,
@@ -40,8 +39,7 @@ unsafe extern "C" {
         error_value: c_int,
     ) -> c_int;
 
-    /// `r_memory_object_ready()` of the MIG `memory_object_reply` user
-    /// stubs.
+    /// `r_memory_object_ready()` of the MIG `mach` user stubs.
     pub fn r_memory_object_ready(
         memory_control: *mut c_void,
         may_cache: c_int,
@@ -91,9 +89,9 @@ unsafe extern "C" {
         data_count: c_uint,
     ) -> c_int;
 
-    /// The `*_server_routines[]` tables the generated `*.server.h` headers
-    /// declare, one per MIG subsystem.  Each is declared as its first
-    /// element, as the C header declares the array.
+    /// The server routine tables the generated server headers declare, one per
+    /// MIG subsystem.  Each is declared as its first element, as the header
+    /// declares the array.
     pub static mut mach_server_routines: MigRoutine;
     pub static mut mach_port_server_routines: MigRoutine;
     pub static mut mach_host_server_routines: MigRoutine;
@@ -105,8 +103,7 @@ unsafe extern "C" {
     pub static mut experimental_server_routines: MigRoutine;
     pub static mut mach_i386_server_routines: MigRoutine;
 
-    /// `memory_object_data_request()` of the MIG `memory_object_user`
-    /// stubs.
+    /// `memory_object_data_request()` of the MIG `memory_object` user stubs.
     pub fn memory_object_data_request(
         memory_object: *mut c_void,
         memory_control: *mut c_void,
@@ -115,8 +112,7 @@ unsafe extern "C" {
         desired_access: c_int,
     ) -> c_int;
 
-    /// `memory_object_data_unlock()` of the MIG `memory_object_user`
-    /// stubs.
+    /// `memory_object_data_unlock()` of the MIG `memory_object` user stubs.
     pub fn memory_object_data_unlock(
         memory_object: *mut c_void,
         memory_control: *mut c_void,
@@ -125,8 +121,7 @@ unsafe extern "C" {
         desired_access: c_int,
     ) -> c_int;
 
-    /// `memory_object_data_return()` of the MIG `memory_object_user`
-    /// stubs.
+    /// `memory_object_data_return()` of the MIG `memory_object` user stubs.
     pub fn memory_object_data_return(
         memory_object: *mut c_void,
         memory_control: *mut c_void,
@@ -137,8 +132,7 @@ unsafe extern "C" {
         kernel_copy: c_int,
     ) -> c_int;
 
-    /// `memory_object_lock_completed()` of the MIG `memory_object_user`
-    /// stubs.
+    /// `memory_object_lock_completed()` of the MIG `memory_object` user stubs.
     pub fn memory_object_lock_completed(
         memory_object: *mut c_void,
         memory_object_poly: c_uint,
@@ -147,7 +141,7 @@ unsafe extern "C" {
         length: VmSize,
     ) -> c_int;
 
-    /// `memory_object_supply_completed()` of the MIG `memory_object_user`
+    /// `memory_object_supply_completed()` of the MIG `memory_object` user
     /// stubs.
     pub fn memory_object_supply_completed(
         memory_object: *mut c_void,
@@ -159,7 +153,7 @@ unsafe extern "C" {
         error_offset: VmOffset,
     ) -> c_int;
 
-    /// `memory_object_change_completed()` of the MIG `memory_object_user`
+    /// `memory_object_change_completed()` of the MIG `memory_object` user
     /// stubs.
     pub fn memory_object_change_completed(
         memory_object: *mut c_void,

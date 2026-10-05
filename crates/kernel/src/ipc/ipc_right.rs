@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The capability-manipulation routines, which `ipc/ipc_right.c` used to
-//! define and `ipc/ipc_right.h` declares.
+//! The capability-manipulation routines.
 
 use crate::ipc::error::Error;
 use crate::ipc::ipc_entry;
@@ -20,71 +19,68 @@ use crate::kern::debug::kpanic;
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::{self, NonNull};
 
-/// `MACH_PORT_NULL` and `MACH_PORT_NAME_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NULL: c_uint = 0;
-/// `MACH_PORT_TYPE_NONE` of <mach/port.h>.
+/// No right.
 const MACH_PORT_TYPE_NONE: u32 = 0;
-/// `MACH_PORT_TYPE_SEND` of <mach/port.h>: `1 << (right + 16)` for the send
-/// right.
+/// The type bit of a send right: `1 << (right + 16)`.
 const MACH_PORT_TYPE_SEND: u32 = 1 << 16;
-/// `MACH_PORT_TYPE_RECEIVE` of <mach/port.h>.
+/// The type bit of a receive right.
 const MACH_PORT_TYPE_RECEIVE: u32 = 1 << 17;
-/// `MACH_PORT_TYPE_SEND_ONCE` of <mach/port.h>.
+/// The type bit of a send-once right.
 const MACH_PORT_TYPE_SEND_ONCE: u32 = 1 << 18;
-/// `MACH_PORT_TYPE_PORT_SET` of <mach/port.h>.
+/// The type bit of a port set.
 const MACH_PORT_TYPE_PORT_SET: u32 = 1 << 19;
-/// `MACH_PORT_TYPE_DEAD_NAME` of <mach/port.h>.
+/// The type bit of a dead name.
 const MACH_PORT_TYPE_DEAD_NAME: u32 = 1 << 20;
-/// `MACH_PORT_TYPE_SEND_RECEIVE` of <mach/port.h>.
+/// The type bits of a send right and a receive right together.
 const MACH_PORT_TYPE_SEND_RECEIVE: u32 =
     MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_RECEIVE;
-/// `MACH_PORT_TYPE_SEND_RIGHTS` of <mach/port.h>.
+/// The type bits of the rights that can send: send and send-once.
 const MACH_PORT_TYPE_SEND_RIGHTS: u32 =
     MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE;
-/// `MACH_PORT_TYPE_PORT_RIGHTS` of <mach/port.h>.
+/// The type bits of the port rights: send, receive and send-once.
 const MACH_PORT_TYPE_PORT_RIGHTS: u32 =
     MACH_PORT_TYPE_SEND_RIGHTS | MACH_PORT_TYPE_RECEIVE;
-/// `MACH_PORT_TYPE_PORT_OR_DEAD` of <mach/port.h>.
+/// The type bits of the port rights and dead names.
 const MACH_PORT_TYPE_PORT_OR_DEAD: u32 =
     MACH_PORT_TYPE_PORT_RIGHTS | MACH_PORT_TYPE_DEAD_NAME;
-/// `MACH_PORT_TYPE_DNREQUEST` of <mach/port.h>: the dummy type bit
-/// `ipc_right_info()` reports for a dead-name request.
+/// The dummy type bit [`info`] reports for a dead-name request.
 const MACH_PORT_TYPE_DNREQUEST: u32 = 0x8000_0000;
-/// `MACH_PORT_TYPE_MAREQUEST` of <mach/port.h>: the dummy type bit for a
-/// msg-accepted request.
+/// The dummy type bit for a msg-accepted request.
 const MACH_PORT_TYPE_MAREQUEST: u32 = 0x4000_0000;
 
-/// `IE_BITS_UREFS_MASK` of <`ipc/ipc_entry.h`>.
+/// The user-reference count bits of an entry.
 const IE_BITS_UREFS_MASK: u32 = 0x0000_ffff;
-/// `IE_BITS_MAREQUEST` of <`ipc/ipc_entry.h`>.
+/// The entry bit of a pending msg-accepted request.
 const IE_BITS_MAREQUEST: u32 = 0x0020_0000;
-/// `IE_BITS_RIGHT_MASK` of <`ipc/ipc_entry.h`>.
+/// The bits of an entry that describe its right.
 const IE_BITS_RIGHT_MASK: u32 = 0x003f_ffff;
-/// `MACH_PORT_UREFS_MAX` of <ipc/port.h>.
+/// The most user references an entry may hold.
 const MACH_PORT_UREFS_MAX: u32 = (1 << 16) - 1;
 
-/// `MACH_PORT_RIGHT_SEND` of <mach/port.h>.
+/// The right number of a send right.
 const MACH_PORT_RIGHT_SEND: c_uint = 0;
-/// `MACH_PORT_RIGHT_RECEIVE` of <mach/port.h>.
+/// The right number of a receive right.
 const MACH_PORT_RIGHT_RECEIVE: c_uint = 1;
-/// `MACH_PORT_RIGHT_SEND_ONCE` of <mach/port.h>.
+/// The right number of a send-once right.
 const MACH_PORT_RIGHT_SEND_ONCE: c_uint = 2;
-/// `MACH_PORT_RIGHT_PORT_SET` of <mach/port.h>.
+/// The right number of a port set.
 const MACH_PORT_RIGHT_PORT_SET: c_uint = 3;
-/// `MACH_PORT_RIGHT_DEAD_NAME` of <mach/port.h>.
+/// The right number of a dead name.
 const MACH_PORT_RIGHT_DEAD_NAME: c_uint = 4;
 
-/// `MACH_MSG_TYPE_MOVE_RECEIVE` of <mach/message.h>.
+/// The disposition that moves a receive right.
 const MACH_MSG_TYPE_MOVE_RECEIVE: c_uint = 16;
-/// `MACH_MSG_TYPE_MOVE_SEND` of <mach/message.h>.
+/// The disposition that moves a send right.
 const MACH_MSG_TYPE_MOVE_SEND: c_uint = 17;
-/// `MACH_MSG_TYPE_MOVE_SEND_ONCE` of <mach/message.h>.
+/// The disposition that moves a send-once right.
 const MACH_MSG_TYPE_MOVE_SEND_ONCE: c_uint = 18;
-/// `MACH_MSG_TYPE_COPY_SEND` of <mach/message.h>.
+/// The disposition that copies a send right.
 const MACH_MSG_TYPE_COPY_SEND: c_uint = 19;
-/// `MACH_MSG_TYPE_MAKE_SEND` of <mach/message.h>.
+/// The disposition that makes a send right from a receive right.
 const MACH_MSG_TYPE_MAKE_SEND: c_uint = 20;
-/// `MACH_MSG_TYPE_MAKE_SEND_ONCE` of <mach/message.h>.
+/// The disposition that makes a send-once right from a receive right.
 const MACH_MSG_TYPE_MAKE_SEND_ONCE: c_uint = 21;
 
 /// The C `default: panic()` arm of a rights switch.
@@ -92,8 +88,8 @@ fn strange_rights(fun: &'static str, message: &'static str) -> ! {
     kpanic!(fun, "{}", message)
 }
 
-/// `MACH_PORT_UREFS_OVERFLOW()` of <ipc/port.h>: the C adds the signed delta
-/// to the unsigned count, so the same wrapping sum decides it here.
+/// Whether adding the signed `delta` to `urefs` overflows the count, decided
+/// on the wrapping sum.
 const fn urefs_overflow(urefs: u32, delta: c_int) -> bool {
     if delta <= 0 {
         return false;
@@ -104,14 +100,14 @@ const fn urefs_overflow(urefs: u32, delta: c_int) -> bool {
     sum <= urefs || sum > MACH_PORT_UREFS_MAX
 }
 
-/// `MACH_PORT_UREFS_UNDERFLOW()` of <ipc/port.h>.
+/// Whether adding the negative `delta` to `urefs` underflows the count.
 const fn urefs_underflow(urefs: u32, delta: c_int) -> bool {
     // The negated delta is positive except at `c_int::MIN`, whose bit pattern
     // still compares greater than any 16-bit count.
     delta < 0 && delta.wrapping_neg() as u32 > urefs
 }
 
-/// `ipc_right_lookup_write()` in C.
+/// Finds the entry `name` names in `space`, leaving the space write-locked.
 ///
 /// # Safety
 ///
@@ -137,7 +133,8 @@ pub(crate) unsafe fn lookup_write(
     Ok(entry)
 }
 
-/// `ipc_right_reverse()` in C.
+/// Finds the name and entry under which `space` holds a receive or send right
+/// to the port `object`, leaving the port locked.
 ///
 /// # Safety
 ///
@@ -179,7 +176,8 @@ pub(crate) unsafe fn reverse(
     Some((name, entry))
 }
 
-/// `ipc_right_dnrequest()` in C.
+/// Registers a dead-name request for `name` in `space`, returning the
+/// previously registered send-once right.
 ///
 /// # Safety
 ///
@@ -275,13 +273,13 @@ pub(crate) unsafe fn dnrequest(
     }
 }
 
-/// `ipc_right_dncancel()` in C: cancel the entry's dead-name request and
-/// return the registered send-once right.
+/// Cancels the entry's dead-name request and returns the registered send-once
+/// right.
 ///
 /// # Safety
 ///
-/// `port` must be live and locked, and `entry`'s `ie_request` must name a live
-/// request in the port's table.
+/// `port` must be live and locked, and `entry`'s request index must name a
+/// live request in the port's table.
 pub(crate) unsafe fn dncancel(
     port: IpcPort,
     entry: *mut IpcEntry,
@@ -292,8 +290,8 @@ pub(crate) unsafe fn dncancel(
     unsafe { ipc_port::dncancel(port, request) }
 }
 
-/// The `ipc_right_dncancel_macro()` of <`ipc/ipc_right.h>`: `IP_NULL` unless the
-/// entry holds a dead-name request.
+/// Cancels the entry's dead-name request when it holds one, returning its
+/// send-once right, or null.
 ///
 /// # Safety
 ///
@@ -310,7 +308,7 @@ unsafe fn dncancel_if_requested(
     unsafe { dncancel(port, entry) }
 }
 
-/// `ipc_right_inuse()` in C.
+/// Whether `entry` is in use; when it is, the space is unlocked.
 ///
 /// # Safety
 ///
@@ -327,7 +325,8 @@ pub(crate) unsafe fn inuse(space: IpcSpace, entry: *mut IpcEntry) -> bool {
     false
 }
 
-/// `ipc_right_check()` in C.
+/// Whether the port behind `entry` died; when it did, the entry becomes a dead
+/// name.
 ///
 /// # Safety
 ///
@@ -358,8 +357,7 @@ pub(crate) unsafe fn check(
         let _ = unsafe { space.reverse_remove(port.as_ptr()) };
     }
 
-    // SAFETY: the port is dead, so its lock is free; this is the C's
-    // `ipc_port_release()`.
+    // SAFETY: the port is dead, so its lock is free; this drops its reference.
     unsafe { port.release() };
 
     bits = (bits & !IE_BITS_TYPE_MASK) | MACH_PORT_TYPE_DEAD_NAME;
@@ -382,7 +380,7 @@ pub(crate) unsafe fn check(
     true
 }
 
-/// `ipc_right_clean()` in C: release a dead space's entry.
+/// Releases a dead space's entry.
 ///
 /// # Safety
 ///
@@ -419,8 +417,8 @@ pub(crate) unsafe fn clean(name: c_uint, entry: *mut IpcEntry) {
 
             // SAFETY: the port lock is held.
             if !unsafe { port.is_active() } {
-                // SAFETY: the port is dead and its lock is held; this is the
-                // C's `ip_release()` and `ip_check_unlock()`.
+                // SAFETY: the port is dead and its lock is held; dropping the
+                // reference and `check_unlock` release it.
                 unsafe {
                     port.decrement_references();
                     port.check_unlock();
@@ -490,7 +488,7 @@ pub(crate) unsafe fn clean(name: c_uint, entry: *mut IpcEntry) {
     }
 }
 
-/// `ipc_right_destroy()` in C.
+/// Destroys the right `entry` holds under `name` in `space`.
 ///
 /// # Safety
 ///
@@ -553,9 +551,9 @@ pub(crate) unsafe fn destroy(
 
             // SAFETY: the port lock is held.
             if !unsafe { port.is_active() } {
-                // SAFETY: the port is dead and its lock is held; this is the
-                // C's `ip_release()` and `ip_check_unlock()`, and the entry
-                // is freed under the space lock.
+                // SAFETY: the port is dead and its lock is held; dropping the
+                // reference and `check_unlock` release it, and the entry is
+                // freed under the space lock.
                 unsafe {
                     port.decrement_references();
                     port.check_unlock();
@@ -637,7 +635,7 @@ pub(crate) unsafe fn destroy(
     }
 }
 
-/// The `dead_name:` label of the C `ipc_right_dealloc()`.
+/// Releases one user reference to the dead name `entry` holds.
 ///
 /// # Safety
 ///
@@ -658,7 +656,8 @@ unsafe fn dealloc_dead_name(
     unsafe { space.lock_done() };
 }
 
-/// `ipc_right_dealloc()` in C.
+/// Releases one user reference to the send, send-once or dead-name right
+/// `entry` holds.
 ///
 /// # Safety
 ///
@@ -862,7 +861,8 @@ unsafe fn dealloc_send_once(
     }
 }
 
-/// `ipc_right_delta()` in C.
+/// Adds `delta` to the user references of `right` in `entry`, destroying the
+/// right when they reach zero.
 ///
 /// # Safety
 ///
@@ -1255,7 +1255,7 @@ unsafe fn delta_dead_name(
     Ok(())
 }
 
-/// `ipc_right_info()` in C: the entry's type bits and user-reference count.
+/// The entry's type bits and user-reference count.
 ///
 /// # Safety
 ///
@@ -1295,7 +1295,7 @@ pub(crate) unsafe fn info(
     (type_, bits & IE_BITS_UREFS_MASK)
 }
 
-/// `ipc_right_copyin_check()` in C.
+/// Whether a copyin of `entry` with `msgt_name` would succeed.
 ///
 /// # Safety
 ///
@@ -1351,7 +1351,8 @@ pub(crate) unsafe fn copyin_check(
     }
 }
 
-/// The `copy_dead:` label of the C `ipc_right_copyin()`.
+/// The copyin of a dead name with a copy disposition: the dead value, when
+/// dead names are accepted.
 const fn copy_dead(deadok: bool) -> Result<(*mut c_void, *mut c_void), Error> {
     if !deadok {
         return Err(Error::InvalidRight);
@@ -1360,7 +1361,8 @@ const fn copy_dead(deadok: bool) -> Result<(*mut c_void, *mut c_void), Error> {
     Ok((IO_DEAD, ptr::null_mut()))
 }
 
-/// The `move_dead:` label of the C `ipc_right_copyin()`.
+/// The copyin of a dead name with a move disposition: drops a user reference
+/// and yields the dead value, when dead names are accepted.
 ///
 /// # Safety
 ///
@@ -1386,7 +1388,8 @@ unsafe fn move_dead(
     Ok((IO_DEAD, ptr::null_mut()))
 }
 
-/// `ipc_right_copyin()` in C.
+/// Takes the right `entry` holds out of `space` for a message, as `msgt_name`
+/// disposes it.
 ///
 /// # Safety
 ///
@@ -1631,7 +1634,7 @@ unsafe fn copyin_send_rights(
     Ok((port.as_ptr(), dnrequest))
 }
 
-/// `ipc_right_copyin_undo()` in C.
+/// Undoes the copyin of a send or send-once right that turned out dead.
 ///
 /// # Safety
 ///
@@ -1681,7 +1684,8 @@ pub(crate) unsafe fn copyin_undo(
     }
 }
 
-/// `ipc_right_copyin_two()` in C.
+/// Moves two send rights out of `entry` at once, for a message whose
+/// destination and reply are the same name.
 ///
 /// # Safety
 ///
@@ -1764,7 +1768,7 @@ pub(crate) unsafe fn copyin_two(
     Ok((port.as_ptr(), dnrequest))
 }
 
-/// `ipc_right_copyout()` in C.
+/// Puts a right to `object` from a message into `entry` of `space`.
 ///
 /// # Safety
 ///
@@ -1889,7 +1893,7 @@ pub(crate) unsafe fn copyout(
     }
 }
 
-/// `ipc_right_rename()` in C.
+/// Moves the right of `oentry` under `oname` to `nentry` under `nname`.
 ///
 /// # Safety
 ///
@@ -1917,8 +1921,7 @@ pub(crate) unsafe fn rename(
             request = 0;
             object = ptr::null_mut();
         } else {
-            // The port is locked and active.  This is the
-            // `ipc_port_dnrename()` macro of <ipc/ipc_port.h>.
+            // The port is locked and active.
             // SAFETY: the port is live and locked, and the request names a
             // live slot.
             unsafe { ipc_port::dnrename(port, request, nname) };

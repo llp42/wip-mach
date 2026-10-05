@@ -4,9 +4,7 @@
 //   the Computer Systems Laboratory (CSL).  All rights reserved.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The console package and the machine's console table, which
-//! `device/cons.c` and `i386/i386at/cons_conf.c` used to define and
-//! <device/cons.h> declares.
+//! The console package and the machine's console table.
 
 use crate::arch::x86_64::com::{comcngetc, comcninit, comcnprobe, comcnputc};
 use crate::arch::x86_64::kd::ConsDev;
@@ -22,12 +20,11 @@ use core::ffi::{c_char, c_int, c_short};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-/// The `constab[]` entries `i386/i386at/cons_conf.c` spelled out, terminator
-/// included.
+/// The number of console table entries, terminator included.
 const CONSTAB_COUNT: usize = 3;
 
-/// `constab[]` of `i386/i386at/cons_conf.c`: the console candidates `cninit()`
-/// probes in order, terminated by an entry whose `cn_probe` is null.
+/// The console candidates [`init`] probes in order, terminated by an entry
+/// whose `cn_probe` is null.
 static CONSTAB: SyncCell<[ConsDev; CONSTAB_COUNT]> =
     SyncCell(UnsafeCell::new([
         ConsDev {
@@ -59,20 +56,19 @@ static CONSTAB: SyncCell<[ConsDev; CONSTAB_COUNT]> =
         },
     ]));
 
-/// `CN_DEAD` of <device/cons.h>: a console that does not exist.
+/// A console that does not exist.
 const CN_DEAD: c_short = 0;
 
-/// `CONSBUFSIZE` of <device/cons.h>.
+/// The size of the output held before a console is chosen.
 const CONSBUFSIZE: usize = 1024;
 
-/// `cn_inited` of `device/cons.c`.
+/// Whether a console is chosen and initialized.
 static CN_INITED: AtomicBool = AtomicBool::new(false);
 
-/// `cn_tab` of `device/cons.c`: the chosen console.
+/// The chosen console.
 static CN_TAB: AtomicPtr<ConsDev> = AtomicPtr::new(ptr::null_mut());
 
-/// `consbuf`, `consbp` and `consbufused` of `device/cons.c`: the output held
-/// until a console is chosen, a ring only the boot CPU fills.
+/// The output held until a console is chosen: a ring only the boot CPU fills.
 struct PendingOutput {
     buf: [c_char; CONSBUFSIZE],
     /// The slot the next byte goes to, which is also the oldest byte once
@@ -88,7 +84,7 @@ static PENDING: SyncCell<PendingOutput> =
         used: false,
     }));
 
-/// `cninit()` of `device/cons.c`: find and initialize the console.
+/// Finds and initializes the console.
 ///
 /// # Safety
 ///
@@ -140,7 +136,7 @@ pub(crate) unsafe fn init() {
     else {
         kpanic!("cninit", "cninit: dev_name_lookup failed")
     };
-    // `minor()` of <sys/types.h>: the low byte of the device number.
+    // The low byte of the device number is its minor number.
     // SAFETY: `chosen` is a live table entry.
     let minor = c_int::from(unsafe { (*chosen).cn_dev } & 0xff);
     // SAFETY: the indirect table is the C's, and `ops` is a live entry point
@@ -155,7 +151,7 @@ pub(crate) unsafe fn init() {
     CN_INITED.store(true, Ordering::Relaxed);
 }
 
-/// The `consbufused` flush at the end of `cninit()`.
+/// Writes the output held before the console was chosen to it.
 ///
 /// # Safety
 ///
@@ -186,7 +182,8 @@ unsafe fn flush_pending() {
     unsafe { (*pending).used = false };
 }
 
-/// `cngetc()` and `cnmaygetc()` of `device/cons.c`.
+/// Reads a character from the console, waiting for one when `wait` is set;
+/// returns 0 before a console is chosen.
 ///
 /// # Safety
 ///
@@ -204,7 +201,7 @@ pub(crate) unsafe fn getc(wait: c_int) -> c_int {
     0
 }
 
-/// `cnputc()` of `device/cons.c`.
+/// Writes `c` to the console, or holds it until a console is chosen.
 ///
 /// # Safety
 ///
@@ -234,8 +231,7 @@ pub(crate) unsafe fn putc(c: c_char) {
     }
 }
 
-/// Hold `c` in `consbuf` until a console is chosen, as the `CONSBUFSIZE > 0`
-/// arm of `cnputc()` did.
+/// Holds `c` in the pending ring until a console is chosen.
 ///
 /// # Safety
 ///

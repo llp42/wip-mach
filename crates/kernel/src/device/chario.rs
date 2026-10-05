@@ -5,8 +5,7 @@
 //   Copyright (c) 1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The tty line discipline of `device/chario.c`, the `struct tty` of
-//! <device/tty.h> and the `struct tty_status` of <`device/tty_status.h`>.
+//! The tty line discipline, the tty record and its status record.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::x86_64::clock_platform::{MachCallout, wheel};
@@ -27,12 +26,10 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
 
-/// `NSPEEDS` of <`device/tty_status.h>`: how many baud-rate slots the `tt*` and
-/// `pdma_*` tables have.
+/// How many baud-rate slots the speed tables have.
 pub(crate) const NSPEEDS: usize = 18;
 
-/// The `B*` speed indices of <`device/tty_status.h`>, the rows of the `pdma_*`
-/// tables.
+/// The speed indices, the rows of the pseudo-DMA tables.
 const B0: usize = 0;
 const B300: usize = 7;
 const B600: usize = 8;
@@ -46,7 +43,7 @@ const EXTB: usize = 15;
 const B57600: usize = 16;
 const B115200: usize = 17;
 
-/// `TS_*` of <device/tty.h>.
+/// The line state bits.
 pub(crate) const TS_INIT: c_int = 0x0000_0001;
 pub(crate) const TS_TIMEOUT: c_int = 0x0000_0002;
 pub(crate) const TS_WOPEN: c_int = 0x0000_0004;
@@ -62,7 +59,7 @@ const TS_MIN_TO: c_int = 0x0000_8000;
 const TS_RTS_DOWN: c_int = 0x0002_0000;
 const TS_MIN_TO_RCV: c_int = 0x0040_0000;
 
-/// `TF_*` of <`device/tty_status.h`>.
+/// The line flag bits.
 pub(crate) const TF_ODDP: c_int = 0x0000_0002;
 pub(crate) const TF_EVENP: c_int = 0x0000_0004;
 pub(crate) const TF_LITOUT: c_int = 0x0000_0008;
@@ -73,13 +70,13 @@ pub(crate) const TF_ECHO: c_int = 0x0000_0080;
 pub(crate) const TF_CRMOD: c_int = 0x0000_0100;
 pub(crate) const TF_XTABS: c_int = 0x0000_0200;
 
-/// `DMSET`, `DMBIS`, `DMBIC` and `DMGET` of <device/tty.h>.
+/// The modem-control operations: set, set bits, clear bits and get.
 pub(crate) const DMSET: c_int = 0;
 pub(crate) const DMBIS: c_int = 1;
 pub(crate) const DMBIC: c_int = 2;
 pub(crate) const DMGET: c_int = 3;
 
-/// `TM_*` modem signals of <`device/tty_status.h`>.
+/// The modem signals.
 pub(crate) const TM_DTR: c_int = 0x0002;
 pub(crate) const TM_RTS: c_int = 0x0004;
 pub(crate) const TM_CTS: c_int = 0x0020;
@@ -89,12 +86,12 @@ pub(crate) const TM_DSR: c_int = 0x0100;
 pub(crate) const TM_BRK: c_int = 0x0200;
 pub(crate) const TM_HUP: c_int = 0;
 
-/// `D_READ`, `D_WRITE` and `D_NODELAY` of <`device/device_types.h`>.
+/// The open modes and the no-delay flag of a device call.
 pub(crate) const D_READ: c_int = 0x1;
 pub(crate) const D_WRITE: c_int = 0x2;
 const D_NODELAY: c_uint = 0x4;
 
-/// `IO_INBAND` of <`device/io_req.h`>.
+/// The request flag of an in-band transfer.
 const IO_INBAND: c_int = 0x0000_4000;
 
 /// One row of the PDMA tick table: a speed's `B*` index and the baud rate its
@@ -113,8 +110,7 @@ const PDMA_TIMEOUT_ROWS: [(usize, c_int); 11] = [
     (B115200, 11520),
 ];
 
-/// The slow speeds' water marks, the integers `device/chario.c`'s floating
-/// point expressions truncate to.
+/// The slow speeds' water marks, as integers.
 const PDMA_SLOW_MARK_ROWS: [(usize, c_int); 6] = [
     (B300, 24),
     (B600, 24),
@@ -140,10 +136,10 @@ type TtyGetstat =
 type TtySetstat =
     unsafe fn(u16, c_uint, *mut c_int, u32) -> Result<(), DeviceError>;
 
-/// `struct tty` of <device/tty.h>, field for field.
+/// A tty line.
 #[repr(C)]
 #[allow(missing_docs)]
-// The field names are the C `struct tty`'s `t_*` members.
+// The fields keep their `t_` prefix.
 #[allow(clippy::struct_field_names)]
 pub struct Tty {
     pub(crate) t_lock: SimpleLock,
@@ -176,9 +172,8 @@ pub struct Tty {
     t_tops: Option<NonNull<c_void>>,
 }
 
-// The GNU Mach size and field offsets of `struct tty` are gone (ADR
-// 0002): `t_timeout` is now a `Callout`, and nothing MIG-visible reads
-// the record.
+// The record has no fixed size or field offsets: `t_timeout` is a `Callout`,
+// and nothing MIG-visible reads it.
 
 impl Tty {
     /// The zero image a C `static` began with, ready for [`chars`].
@@ -209,7 +204,7 @@ impl Tty {
     }
 }
 
-/// `struct tty_status` of <`device/tty_status.h`>.
+/// `struct tty_status`: a line's settings, as the status calls exchange them.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -231,23 +226,22 @@ const _: () = {
     assert!(offset_of!(TtyStatus, tt_flags) == 12);
 };
 
-/// `TTY_STATUS` of <`device/tty_status.h>`: `('t'<<16) + 1`.
+/// `TTY_STATUS`: `('t'<<16) + 1`, the status flavor of a line's settings.
 const TTY_STATUS: c_uint = 0x0074_0001;
 /// `TTY_STATUS_COUNT`: the four integers of `struct tty_status`.
 const TTY_STATUS_COUNT: u32 = 4;
-/// `TTY_FLUSH` of <`device/tty_status.h>`: `('t'<<16) + 3`.
+/// `TTY_FLUSH`: `('t'<<16) + 3`, the status flavor that flushes the line.
 const TTY_FLUSH: c_uint = 0x0074_0003;
 /// `TTY_FLUSH_COUNT`: one flags integer.
 const TTY_FLUSH_COUNT: u32 = 1;
-/// `TTY_STOP` of <`device/tty_status.h>`: `('t'<<16) + 4`.
+/// `TTY_STOP`: `('t'<<16) + 4`, the status flavor that stops the output.
 const TTY_STOP: c_uint = 0x0074_0004;
-/// `TTY_START` of <`device/tty_status.h>`: `('t'<<16) + 5`.
+/// `TTY_START`: `('t'<<16) + 5`, the status flavor that restarts the output.
 const TTY_START: c_uint = 0x0074_0005;
 
-/// `struct ldisc_switch` of <device/tty.h>: the entry points one line
-/// discipline provides.
+/// The entry points one line discipline provides.
 #[repr(C)]
-// The field names are the C `struct ldisc_switch`'s `l_*` members.
+// The fields keep their `l_` prefix.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct LdiscSwitch {
     /// Invoked with a live tty and a live read request, as [`char_read()`]
@@ -276,8 +270,7 @@ const _: () = {
     assert!(offset_of!(LdiscSwitch, l_start) == 4 * PTR);
 };
 
-/// `linesw[]` of <device/tty.h>: the fake line discipline the console
-/// driver calls through.
+/// The fake line discipline the console driver calls through.
 pub(crate) static LINESW: [LdiscSwitch; 1] = [LdiscSwitch {
     l_read: Some(char_read),
     l_write: Some(char_write),
@@ -286,32 +279,31 @@ pub(crate) static LINESW: [LdiscSwitch; 1] = [LdiscSwitch {
     l_start: Some(tty_output),
 }];
 
-/// `tthiwat[]` of <device/tty.h>, read through the `TTHIWAT()` macro.
+/// The high water mark of each speed.
 static TTHIWAT: [c_short; NSPEEDS] = [
     100, 100, 100, 100, 100, 100, 100, 200, 200, 400, 400, 400, 650, 650,
     1300, 2000, 2000, 2000,
 ];
 
-/// `ttlowat[]` of <device/tty.h>, read through the `TTLOWAT()` macro and by
-/// the C `com.c` driver.
+/// The low water mark of each speed, which the serial driver reads too.
 pub(crate) static TTLOWAT: [c_short; NSPEEDS] = [
     30, 30, 30, 30, 30, 30, 30, 50, 50, 120, 120, 120, 125, 125, 125, 125,
     125, 125,
 ];
 
-/// `tty_inq_size` of device/chario.c: the input buffer's allocation.
+/// The input buffer's allocation.
 static TTY_INQ_SIZE: c_uint = 4096;
 
-/// `tty_outq_size` of device/chario.c: the output buffer's allocation.
+/// The output buffer's allocation.
 static TTY_OUTQ_SIZE: c_uint = 2048;
 
-/// `pdma_default` of device/chario.c: pseudo-DMA on for every line.
+/// Pseudo-DMA on for every line.
 static PDMA_DEFAULT: c_int = 1;
 
-/// `pdma_timeouts[]` of device/chario.c: ticks per speed's receive timeout.
+/// The ticks of each speed's receive timeout.
 static mut PDMA_TIMEOUTS: [c_int; NSPEEDS] = [0; NSPEEDS];
 
-/// `pdma_water_mark[]` of device/chario.c: input-queue water marks.
+/// Input-queue water marks.
 static mut PDMA_WATER_MARK: [c_int; NSPEEDS] = [0; NSPEEDS];
 
 /// The table row `speed` names, or `None` when it is outside the tables.
@@ -324,17 +316,17 @@ fn speed_row(speed: c_int) -> Option<u8> {
     }
 }
 
-/// `TTHIWAT(tp)` of <device/tty.h>.
+/// The high water mark of `tp`'s speed.
 fn high_water(tp: &Tty) -> c_short {
     TTHIWAT.get(usize::from(tp.t_ospeed)).copied().unwrap_or(0)
 }
 
-/// `TTLOWAT(tp)` of <device/tty.h>.
+/// The low water mark of `tp`'s speed.
 pub(crate) fn low_water(tp: &Tty) -> c_short {
     TTLOWAT.get(usize::from(tp.t_ospeed)).copied().unwrap_or(0)
 }
 
-/// `pdma_timeouts[speed]` of device/chario.c.
+/// The receive timeout of `speed`, in ticks.
 fn pdma_timeout(speed: u8) -> c_int {
     let index = usize::from(speed);
     if index < NSPEEDS {
@@ -346,7 +338,7 @@ fn pdma_timeout(speed: u8) -> c_int {
     }
 }
 
-/// `pdma_water_mark[speed]` of device/chario.c.
+/// The input-queue water mark of `speed`.
 fn pdma_water(speed: u8) -> c_int {
     let index = usize::from(speed);
     if index < NSPEEDS {
@@ -357,18 +349,18 @@ fn pdma_water(speed: u8) -> c_int {
     }
 }
 
-/// Take `tp`'s lock at `splhigh`, as the `simple_lock_irq()` macro did.
+/// Takes `tp`'s lock at `splhigh`.
 fn lock_irq(tp: &Tty) -> c_int {
-    // SAFETY: `splhigh()` is the asm entry of <machine/spl.h>.
+    // SAFETY: the caller runs in kernel mode, as raising the level requires.
     let level = unsafe { spl::splhigh() };
     tp.t_lock.lock();
     level
 }
 
-/// Release `tp`'s lock and restore `level`, as `simple_unlock_irq()` did.
+/// Releases `tp`'s lock and restores `level`.
 fn unlock_irq(tp: &Tty, level: c_int) {
     tp.t_lock.unlock();
-    // SAFETY: `level` is the value [`lock_irq()`] returned for this tty.
+    // SAFETY: `level` is the value `lock_irq()` returned for this tty.
     unsafe { spl::splx(level) };
 }
 
@@ -387,7 +379,7 @@ unsafe fn pinned<'a>(head: *mut IoReqQueue) -> Pin<&'a mut IoReqQueue> {
     unsafe { Pin::new_unchecked(&mut *head) }
 }
 
-/// `queue_delayed_reply()` of device/chario.c.
+/// Queues `ior` on `head`, to be completed later through `done`.
 ///
 /// # Safety
 ///
@@ -419,7 +411,7 @@ unsafe fn complete(head: *mut IoReqQueue) {
     }
 }
 
-/// `tty_queue_completion()` of device/chario.c.
+/// Completes every request on `queue`, when it is not null.
 ///
 /// # Safety
 ///
@@ -433,7 +425,7 @@ pub(crate) unsafe fn complete_queue(queue: *mut IoReqQueue) {
     unsafe { complete(queue) };
 }
 
-/// `tty_queue_completion()` of device/chario.c.
+/// [`complete_queue`] under its interface name.
 ///
 /// # Safety
 ///
@@ -500,7 +492,8 @@ unsafe fn clean_queue(
     true
 }
 
-/// `tty_close_open_reply()` of device/chario.c.
+/// The done routine of an open pending when the line closes: fails it with the
+/// device down.
 ///
 /// # Safety
 ///
@@ -515,7 +508,8 @@ unsafe fn tty_close_open_reply(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `tty_close_write_reply()` of device/chario.c.
+/// The done routine of a write pending when the line closes: fails it with the
+/// device down.
 ///
 /// # Safety
 ///
@@ -531,7 +525,8 @@ unsafe fn tty_close_write_reply(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `tty_close_read_reply()` of device/chario.c.
+/// The done routine of a read pending when the line closes: fails it with the
+/// device down.
 ///
 /// # Safety
 ///
@@ -598,7 +593,7 @@ pub(crate) fn open(
     DeviceSuccess::Success
 }
 
-/// `char_open_done()` of device/chario.c.
+/// The done routine of a delayed open: completes it once the carrier is up.
 ///
 /// # Safety
 ///
@@ -648,8 +643,8 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
     let mut addr: VmOffset = 0;
     let mut data = ior.data;
     if !inband {
-        // SAFETY: the request's data is a live `vm_map_copy`, `device_io_map`
-        // is the boot map `ds_routines` owns, and `addr` is writable.
+        // SAFETY: the request's data is a live map copy, `DEVICE_IO_MAP` is
+        // the boot map `ds_routines` owns, and `addr` is writable.
         let copied = NonNull::new(data.cast::<VmMapCopy>())
             .map_or(Ok(0), |copy| unsafe {
                 (*ds_routines::DEVICE_IO_MAP).copyout(copy)
@@ -678,7 +673,7 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
 
     if !inband {
         // SAFETY: the copyout above mapped `count` bytes at `addr` in
-        // `device_io_map`, and the request still owns them.
+        // `DEVICE_IO_MAP`, and the request still owns them.
         let _ = vm_user::deallocate(
             unsafe { &mut *ds_routines::DEVICE_IO_MAP },
             addr,
@@ -689,7 +684,8 @@ pub(crate) fn write(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
     result
 }
 
-/// `char_write()` of device/chario.c.
+/// Starts writing `ior`'s data to the line, queueing the request until the
+/// output drains.
 ///
 /// # Safety
 ///
@@ -705,15 +701,15 @@ fn write_output(
     data: *mut c_char,
     count: c_long,
 ) -> DeviceSuccess {
-    // A negative `io_count` is outside the device layer's contract and the
-    // ported `b_to_q` treated it as empty; `unwrap_or(0)` keeps that.
+    // A negative `count` is outside the device layer's contract and counts
+    // as empty.
     let len = usize::try_from(count).unwrap_or(0);
     // SAFETY: the caller guarantees `len` readable bytes at `data`: the
     // inband buffer or the copyout mapping.
     let input = unsafe { slice::from_raw_parts(data.cast::<u8>(), len) };
     let entered = tp.t_outq.write(input);
-    // The ported `b_to_q()` clamped a negative count to zero, and the
-    // residual the C stored came from the clamped value.
+    // A negative count is clamped to zero, and the residual comes from the
+    // clamped value.
     ior.residual = len as c_long - entered as c_long;
 
     tp.t_state &= !TS_TTSTOP;
@@ -735,7 +731,8 @@ fn write_output(
     DeviceSuccess::Success
 }
 
-/// `char_write_done()` of device/chario.c.
+/// The done routine of a queued write: copies more data to the line, or
+/// completes the write.
 ///
 /// # Safety
 ///
@@ -826,8 +823,8 @@ pub(crate) fn read(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
     let out = if ior.count <= 0 {
         None
     } else {
-        // SAFETY: `device_read_alloc()` allocated `io_count` writable bytes at
-        // `io_data` above.
+        // SAFETY: `device_read_alloc()` allocated `count` writable bytes at
+        // `data` above.
         Some(unsafe {
             slice::from_raw_parts_mut(
                 ior.data.cast::<u8>(),
@@ -854,7 +851,7 @@ pub(crate) fn read(tp: &mut Tty, ior: &mut IoReq) -> IoResult {
     Ok(DeviceSuccess::Success)
 }
 
-/// `char_read()` of device/chario.c.
+/// Reads from the line into `ior`, queueing the request until input arrives.
 ///
 /// # Safety
 ///
@@ -863,7 +860,8 @@ pub(crate) unsafe fn char_read(tp: *mut Tty, ior: *mut IoReq) -> IoResult {
     unsafe { read(&mut *tp, &mut *ior) }
 }
 
-/// `char_read_done()` of device/chario.c.
+/// The done routine of a queued read: copies the input that arrived, or keeps
+/// waiting.
 ///
 /// # Safety
 ///
@@ -890,8 +888,8 @@ pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> bool {
     let out = if ior.count <= 0 {
         None
     } else {
-        // SAFETY: `device_read_alloc()` allocated `io_count` writable bytes at
-        // `io_data` when the request was queued.
+        // SAFETY: `device_read_alloc()` allocated `count` writable bytes at
+        // `data` when the request was queued.
         Some(unsafe {
             slice::from_raw_parts_mut(
                 ior.data.cast::<u8>(),
@@ -920,7 +918,7 @@ pub(crate) unsafe fn char_read_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `ttyclose()` of device/chario.c: complete the delayed replies and hang up.
+/// Completes the delayed replies and hangs up.
 ///
 /// # Safety
 ///
@@ -953,7 +951,7 @@ pub(crate) fn close(tp: &mut Tty) {
     tp.t_state &= TS_MIN | TS_CARR_ON;
 }
 
-/// `ttyclose()` of device/chario.c.
+/// [`close`] over a raw pointer.
 ///
 /// # Safety
 ///
@@ -963,8 +961,8 @@ pub(crate) unsafe fn ttyclose(tp: *mut Tty) {
     close(unsafe { &mut *tp });
 }
 
-/// `tty_portdeath()` of device/chario.c: complete the requests whose reply
-/// port died.
+/// Completes the requests whose reply port died, returning whether there was
+/// one.
 pub(crate) fn port_death(tp: &mut Tty, port: *mut c_void) -> bool {
     let level = lock_irq(tp);
 
@@ -984,7 +982,7 @@ pub(crate) fn port_death(tp: &mut Tty, port: *mut c_void) -> bool {
     result
 }
 
-/// `tty_portdeath()` of device/chario.c.
+/// [`port_death`] over a raw pointer.
 ///
 /// # Safety
 ///
@@ -1009,7 +1007,7 @@ pub(crate) fn status(tp: &Tty) -> TtyStatus {
     status
 }
 
-/// `tty_get_status()` of device/chario.c.
+/// Reports the line's status flavor `flavor` into `data`.
 ///
 /// # Safety
 ///
@@ -1091,7 +1089,7 @@ pub(crate) fn start_output(tp: &mut Tty) {
     unlock_irq(tp, level);
 }
 
-/// `tty_set_status()` of device/chario.c.
+/// Applies the status flavor `flavor` from `data` to the line.
 ///
 /// # Safety
 ///
@@ -1132,7 +1130,7 @@ pub(crate) unsafe fn tty_set_status(
     }
 }
 
-/// `ttychars()` of device/chario.c.
+/// Initializes the line's request queues and buffers on its first use.
 pub(crate) fn chars(tp: &mut Tty) {
     // The C tested `t_flags`, not `t_state`; `TS_INIT` is 1, the same value
     // as `TF_TANDEM`, so the test is kept exactly.
@@ -1171,7 +1169,7 @@ pub(crate) fn chars(tp: &mut Tty) {
     tp.t_breakc = 0;
 }
 
-/// `ttychars()` of device/chario.c.
+/// [`chars`] over a raw pointer.
 ///
 /// # Safety
 ///
@@ -1181,7 +1179,8 @@ pub(crate) unsafe fn ttychars(tp: *mut Tty) {
     chars(unsafe { &mut *tp });
 }
 
-/// `tty_flush()` of device/chario.c.
+/// Discards the input, the output or both, as `rw` says, and completes the
+/// waiting reads or writes.
 ///
 /// # Safety
 ///
@@ -1205,8 +1204,7 @@ pub(crate) fn flush(tp: &mut Tty, rw: c_int) {
     }
 }
 
-/// `ttstart()` and `tty_output()` of device/chario.c, whose bodies are the
-/// same.
+/// Starts the line's output when it is not already running.
 ///
 /// # Safety
 ///
@@ -1226,7 +1224,7 @@ pub(crate) fn start(tp: &mut Tty) {
     }
 }
 
-/// `tty_output()` of device/chario.c.
+/// [`start`] over a raw pointer.
 ///
 /// # Safety
 ///
@@ -1256,7 +1254,8 @@ unsafe fn tty_from_timeout(callout: *const MachCallout) -> *mut Tty {
     with_exposed_provenance_mut(base)
 }
 
-/// `ttypush()` of device/chario.c: the PDMA receive timeout callback.
+/// The pseudo-DMA receive timeout callback: hands the buffered input to the
+/// reader.
 ///
 /// # Safety
 ///
@@ -1339,7 +1338,7 @@ pub(crate) fn input(tp: &mut Tty, c: c_uint) {
     }
 }
 
-/// `ttyinput()` of device/chario.c.
+/// Takes the character `c` from the line into its input queue.
 ///
 /// # Safety
 ///
@@ -1349,7 +1348,8 @@ pub(crate) unsafe fn ttyinput(c: c_uint, tp: *mut Tty) {
     input(unsafe { &mut *tp }, c);
 }
 
-/// Handle a carrier transition, the `ttymodem()` of device/chario.c.
+/// Handles a carrier transition; returns `false` when a carrier loss hung the
+/// line up.
 ///
 /// # Safety
 ///
@@ -1381,7 +1381,7 @@ pub(crate) fn modem(tp: &mut Tty, carrier_up: bool) -> bool {
     true
 }
 
-/// `ttymodem()` of device/chario.c.
+/// [`modem`] over a raw pointer and an integer carrier flag.
 ///
 /// # Safety
 ///
@@ -1391,7 +1391,7 @@ pub(crate) unsafe fn ttymodem(tp: *mut Tty, carrier_up: c_int) -> bool {
     modem(unsafe { &mut *tp }, carrier_up != 0)
 }
 
-/// Handle a `ClearToSend` transition, the `tty_cts()` of device/chario.c.
+/// Handles a clear-to-send transition: stops or restarts the output.
 ///
 /// # Safety
 ///
@@ -1413,7 +1413,7 @@ pub(crate) fn cts(tp: &mut Tty, cts_up: bool) {
     }
 }
 
-/// `chario_init()` of device/chario.c: the PDMA tables.
+/// Fills the pseudo-DMA timeout and water-mark tables.
 pub(crate) fn chario_init() {
     for speed in B0..B300 {
         // SAFETY: `speed` is below `B300 < NSPEEDS`; the one writer runs at
@@ -1446,7 +1446,7 @@ pub(crate) fn chario_init() {
     }
 }
 
-/// Half `tty_inq_size`, the water mark device/chario.c gives the fast lines.
+/// Half the input buffer: the water mark of the fast lines.
 fn half_input_queue() -> c_int {
     // The C value is 4096, so half is far inside `c_int`; the C narrowed the
     // same unsigned half implicitly when it stored it in the `int` table.

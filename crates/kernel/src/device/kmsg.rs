@@ -4,8 +4,7 @@
 //   Written by OKUJI Yoshinori.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kernel message device, which `device/kmsg.c` used to define and
-//! <device/kmsg.h> declares.
+//! The kernel message device.
 
 use crate::arch::types::VmSize;
 use crate::arch::x86_64::io_req::{
@@ -22,12 +21,10 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use lock::IrqSpinLock;
 
-/// `KMSGBUFSIZE` of `device/kmsg.c`.
+/// The size of the message ring.
 const KMSGBUFSIZE: usize = 16 * 1024;
 
-/// `kmsg_buffer`, `kmsg_write_offset`, `kmsg_read_offset` and
-/// `kmsg_in_use` of `device/kmsg.c`: the ring of message bytes and whether the
-/// device is open.
+/// The ring of message bytes and whether the device is open.
 struct Ring {
     buffer: [u8; KMSGBUFSIZE],
     write: usize,
@@ -35,8 +32,8 @@ struct Ring {
     in_use: bool,
 }
 
-/// `kmsg_lock` of `device/kmsg.c`, holding the ring it guards.  An irq spin
-/// lock, since interrupt handlers print.
+/// The ring of message bytes, under an irq spin lock, since interrupt handlers
+/// print.
 static KMSG: IrqSpinLock<Ring, MachPlatform> = IrqSpinLock::new(Ring {
     buffer: [0; KMSGBUFSIZE],
     write: 0,
@@ -44,7 +41,7 @@ static KMSG: IrqSpinLock<Ring, MachPlatform> = IrqSpinLock::new(Ring {
     in_use: false,
 });
 
-/// `kmsg_read_queue` of `device/kmsg.c`: the blocked reads.
+/// The blocked reads.
 static KMSG_READ_QUEUE: SyncCell<IoReqQueue> =
     SyncCell(UnsafeCell::new(IoReqQueue::new()));
 
@@ -68,7 +65,7 @@ const GET_SIZE_REPLY: [c_int; DEV_GET_SIZE_COUNT as usize] = {
     reply
 };
 
-/// `kmsgopen()` of `device/kmsg.c`.
+/// Opens the device, which only one opener may hold.
 pub(crate) fn open() -> IoResult {
     let mut ring = KMSG.lock();
     if ring.in_use {
@@ -80,7 +77,7 @@ pub(crate) fn open() -> IoResult {
     Ok(DeviceSuccess::Success)
 }
 
-/// `kmsgclose()` of `device/kmsg.c`.
+/// Closes the device.
 pub(crate) fn close() {
     let mut ring = KMSG.lock();
     ring.in_use = false;
@@ -115,7 +112,7 @@ unsafe fn copy_out(ring: &mut Ring, ior: *mut IoReq) -> c_int {
     amt
 }
 
-/// `kmsgread()` of `device/kmsg.c`.
+/// Reads messages into `ior`, queueing the request when the ring is empty.
 ///
 /// # Safety
 ///
@@ -151,7 +148,7 @@ pub(crate) unsafe fn read(ior: *mut IoReq) -> IoResult {
     Ok(DeviceSuccess::Success)
 }
 
-/// `kmsg_read_done()` of `device/kmsg.c`: the queued read's completion.
+/// The queued read's completion.
 ///
 /// # Safety
 ///
@@ -181,7 +178,8 @@ unsafe fn kmsg_read_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `kmsg_putchar()` of `device/kmsg.c`.
+/// Puts `c` in the ring, dropping the oldest byte when the ring is full, and
+/// completes the queued reads.
 pub(crate) fn putchar(c: c_int) {
     let mut ring = KMSG.lock();
 
@@ -211,7 +209,7 @@ pub(crate) const fn getstat(
         _ => None,
     }
 }
-/// `kmsggetstat()` in C.
+/// Reports the device's status flavor `flavor` into `data`.
 ///
 /// # Safety
 ///
@@ -238,7 +236,7 @@ pub(crate) unsafe fn kmsggetstat(
     }
 }
 
-/// `kmsgopen()` in C.
+/// [`open`] in the device-operations shape.
 ///
 /// # Safety
 ///
@@ -251,7 +249,7 @@ pub(crate) unsafe fn kmsgopen(
     open()
 }
 
-/// `kmsgclose()` in C.
+/// [`close`] in the device-operations shape.
 ///
 /// # Safety
 ///
@@ -260,7 +258,7 @@ pub(crate) unsafe fn kmsgclose(_dev: DevT, _flag: c_int) {
     close();
 }
 
-/// `kmsgread()` in C.
+/// [`read`] in the device-operations shape.
 ///
 /// # Safety
 ///

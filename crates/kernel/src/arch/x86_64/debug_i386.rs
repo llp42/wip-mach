@@ -4,11 +4,7 @@
 //   Laboratory at the University of Utah (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The saved-state dump, which `i386/i386/debug_i386.c` used to define and
-//! `i386/i386/debug.h` declares.
-//!
-//! The C's debug trace sat under `#ifdef DEBUG`, which no configured kernel
-//! defines, and is not carried.
+//! The saved-state dump.
 
 use crate::arch::x86_64::pcb::I386SavedState;
 use crate::arch::x86_64::trap;
@@ -16,7 +12,7 @@ use crate::kern::console::{CStrArg, kprint};
 use core::ffi::{c_long, c_uint};
 use core::ptr;
 
-/// `dump_ss()` of <i386/debug.h>.
+/// Prints the saved registers at `st`.
 ///
 /// # Safety
 ///

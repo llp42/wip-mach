@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989,1988 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The device lookup table, which `device/dev_lookup.c` used to define and
-//! <`device/dev_hdr.h`> declares.
+//! The device lookup table.
 //!
 //! The C table's number lock was a file `static`; the Rust one is a
 //! [`SpinLock`], still held before any device's `ref_lock`.
@@ -26,23 +25,22 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use lock::SpinLock;
 
-/// `NDEVHASH` of `device/dev_lookup.c`: the device-number buckets.
+/// The device-number buckets.
 const NDEVHASH: usize = 8;
 
-/// `DEV_BSIZE` of <device/param.h>.
+/// The device block size.
 const DEV_BSIZE: c_int = 512;
 
-/// `DEV_STATE_INIT` of <`device/dev_hdr.h`>.
+/// The state of a device that is not open yet.
 const DEV_STATE_INIT: c_short = 0;
 
-/// `IKOT_DEVICE` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a device port.
 const IKOT_DEVICE: c_uint = 10;
 
-/// `IKOT_NONE` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a port bound to no kernel object.
 const IKOT_NONE: c_uint = 0;
 
-/// `dev_number_hash_table` of `device/dev_lookup.c`: one bucket per
-/// `DEV_NUMBER_HASH()` result.
+/// One bucket per [`number_hash`] result.
 static mut DEV_NUMBER_HASH_TABLE: [NumberBucket; NDEVHASH] =
     [const { NumberBucket::new() }; NDEVHASH];
 
@@ -50,14 +48,13 @@ static mut DEV_NUMBER_HASH_TABLE: [NumberBucket; NDEVHASH] =
 /// a bucket is unobservable.
 type NumberBucket = List<'static, MachDeviceNumberAdapter>;
 
-/// `dev_number_lock`: serializes the table, and is held before any device's
-/// `ref_lock`, as <`device/dev_hdr.h`> requires.
+/// Serializes the table, and is held before any device's `ref_lock`.
 static DEV_NUMBER_LOCK: SpinLock<(), MachPlatform> = SpinLock::new(());
 
-/// `dev_hdr_cache`: the `struct mach_device` slab cache.
+/// The slab cache of [`MachDevice`] records.
 static mut DEV_HDR_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `DEV_NUMBER_HASH()` of `device/dev_lookup.c`.
+/// The bucket of `dev_number`.
 const fn number_hash(dev_number: c_int) -> usize {
     // The mask leaves a value below `NDEVHASH`, so the cast cannot lose
     // anything that matters.
@@ -83,8 +80,8 @@ unsafe fn number_bucket(dev_number: c_int) -> Pin<&'static mut NumberBucket> {
     }
 }
 
-/// `kmem_cache_alloc(&dev_hdr_cache)` and the field writes the C ran after
-/// it.
+/// Allocates a device record for `dev_ops` and `dev_number`, with one
+/// reference, not open.
 ///
 /// # Safety
 ///
@@ -97,8 +94,8 @@ unsafe fn alloc_device(
     // SAFETY: the cache is live after `init()`.
     let buf = unsafe { (*ptr::addr_of_mut!(DEV_HDR_CACHE)).alloc() }?;
     let device = buf.as_ptr().cast::<MachDevice>();
-    // SAFETY: the cache object is a fresh, unshared `struct mach_device`,
-    // and the C wrote every field the mirror carries.
+    // SAFETY: the cache object is a fresh, unshared `MachDevice`, and every
+    // field of it is written.
     unsafe {
         ptr::write(
             device,
@@ -126,7 +123,7 @@ unsafe fn alloc_device(
     NonNull::new(device)
 }
 
-/// `kmem_cache_free(&dev_hdr_cache, device)` of the C.
+/// Returns `device` to the cache.
 ///
 /// # Safety
 ///
@@ -139,7 +136,7 @@ unsafe fn free_device(device: *mut MachDevice) {
     }
 }
 
-/// `dev_number_enter()` of `device/dev_lookup.c`.
+/// Enters `device` in the number table.
 ///
 /// # Safety
 ///
@@ -153,7 +150,7 @@ unsafe fn number_enter(device: *mut MachDevice) {
     unsafe { head.as_mut().push_front_ptr(NonNull::new_unchecked(device)) };
 }
 
-/// `dev_number_remove()` of `device/dev_lookup.c`.
+/// Removes `device` from the number table.
 ///
 /// # Safety
 ///
@@ -165,7 +162,7 @@ unsafe fn number_remove(device: *mut MachDevice) {
     unsafe { NumberBucket::remove_ptr(NonNull::new_unchecked(device)) };
 }
 
-/// `dev_number_lookup()` of `device/dev_lookup.c`.
+/// The device of `dev_ops` and `dev_number`, or null.
 ///
 /// # Safety
 ///
@@ -188,7 +185,8 @@ unsafe fn number_lookup(
     ptr::null_mut()
 }
 
-/// `device_lookup()` of `device/dev_lookup.c`.
+/// The device `name` names, with a reference, created when it does not exist
+/// yet.
 ///
 /// # Safety
 ///
@@ -234,7 +232,7 @@ pub(crate) unsafe fn lookup(
     }
 }
 
-/// `mach_device_reference()` of `device/dev_lookup.c`.
+/// Takes a reference on `device`.
 ///
 /// # Safety
 ///
@@ -247,7 +245,7 @@ pub(crate) unsafe fn reference(device: *mut MachDevice) {
     }
 }
 
-/// `mach_device_deallocate()` of `device/dev_lookup.c`.
+/// Drops a reference on `device`, removing and freeing it on the last one.
 ///
 /// # Safety
 ///
@@ -282,7 +280,7 @@ pub(crate) unsafe fn deallocate(device: *mut MachDevice) {
     unsafe { free_device(device) };
 }
 
-/// `mach_device_reference()` of `device/dev_lookup.c`.
+/// [`reference()`] over an untyped pointer.
 ///
 /// # Safety
 ///
@@ -291,7 +289,7 @@ pub(crate) unsafe fn mach_device_reference(device: *mut c_void) {
     unsafe { reference(device.cast()) };
 }
 
-/// `mach_device_deallocate()` of `device/dev_lookup.c`.
+/// [`deallocate`] over an untyped pointer.
 ///
 /// # Safety
 ///
@@ -300,7 +298,7 @@ pub(crate) unsafe fn mach_device_deallocate(device: *mut c_void) {
     unsafe { deallocate(device.cast()) };
 }
 
-/// `dev_port_enter()` of `device/dev_lookup.c`.
+/// Binds `device` to its port, taking a reference for the binding.
 ///
 /// # Safety
 ///
@@ -319,7 +317,7 @@ pub(crate) unsafe fn port_enter(device: *mut MachDevice) {
     }
 }
 
-/// `dev_port_remove()` of `device/dev_lookup.c`.
+/// Unbinds `device` from its port.
 ///
 /// # Safety
 ///
@@ -332,7 +330,7 @@ pub(crate) unsafe fn port_remove(device: *mut MachDevice) {
     }
 }
 
-/// `dev_port_lookup()` of `device/dev_lookup.c`.
+/// The device the port `port` names, with a reference, or null.
 ///
 /// # Safety
 ///
@@ -342,9 +340,9 @@ pub(crate) unsafe fn port_lookup(port: *mut c_void) -> *mut Device {
         return ptr::null_mut();
     };
 
-    // SAFETY: the live port's lock serializes the kobject read, and a
-    // `IKOT_DEVICE` kobject is the embedded `struct device` of a live
-    // `mach_device`.
+    // SAFETY: the live port's lock serializes the kernel-object read, and a
+    // device-port kernel object is the embedded `Device` of a live
+    // `MachDevice`.
     unsafe {
         port.lock();
         let device = if port.is_active() && port.kotype() == IKOT_DEVICE {
@@ -364,7 +362,7 @@ pub(crate) unsafe fn port_lookup(port: *mut c_void) -> *mut Device {
     }
 }
 
-/// `convert_device_to_port()` of `device/dev_lookup.c`.
+/// A send right for `device`'s port, through its emulation, or null.
 ///
 /// # Safety
 ///
@@ -389,7 +387,7 @@ pub(crate) unsafe fn convert_to_port(
     }
 }
 
-/// `dev_lookup_init()` of `device/dev_lookup.c`.
+/// Creates the device record cache.
 ///
 /// # Safety
 ///

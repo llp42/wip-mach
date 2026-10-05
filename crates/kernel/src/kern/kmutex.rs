@@ -4,7 +4,7 @@
 //   Contributed by Agustina Arzille <avarzille@riseup.net>, 2017.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kernel mutex, which `kern/kmutex.c` used to define.
+//! The kernel mutex.
 
 use crate::arch::x86_64::per_cpu;
 use crate::kern::error::Error;
@@ -17,15 +17,15 @@ use core::mem::offset_of;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// The three states of a mutex, the `KMUTEX_*` constants of <kern/kmutex.h>.
+/// The three states of a mutex.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 enum State {
-    /// `KMUTEX_AVAIL`: unowned.
+    /// Unowned.
     Avail = 0,
-    /// `KMUTEX_LOCKED`: owned, with no known sleeper.
+    /// Owned, with no known sleeper.
     Locked = 1,
-    /// `KMUTEX_CONTENDED`: owned, with a sleeper to wake.
+    /// Owned, with a sleeper to wake.
     Contended = 2,
 }
 
@@ -36,7 +36,7 @@ impl State {
     }
 }
 
-/// `struct kmutex` of <kern/kmutex.h>: the three-state sleepable mutex.
+/// The three-state sleepable mutex.
 ///
 /// # Invariants
 ///
@@ -64,9 +64,10 @@ impl KMutex {
         }
     }
 
-    /// `kmutex_trylock()` in C.  The compare-exchange acquires on success;
-    /// its failure is `Relaxed`, since the failure path takes the interlock
-    /// before it reads anything the state protects.
+    /// Takes the mutex when it is free, without sleeping.  The
+    /// compare-exchange acquires on success; its failure is `Relaxed`, since
+    /// the failure path takes the interlock before it reads anything the state
+    /// protects.
     ///
     /// # Errors
     ///
@@ -88,7 +89,8 @@ impl KMutex {
         }
     }
 
-    /// `kmutex_lock()` in C.
+    /// Takes the mutex, sleeping until it is free, interruptibly when
+    /// `interruptible` is set.
     ///
     /// # Errors
     ///
@@ -132,9 +134,9 @@ impl KMutex {
         }
     }
 
-    /// `kmutex_unlock()` in C.  The compare-exchange releases on success,
-    /// like the C `atomic_cas_rel()`; its failure and the later reset store
-    /// are `Relaxed`, since the interlock orders the slow path.
+    /// Releases the mutex, waking a sleeper when there is one.  The
+    /// compare-exchange releases on success; its failure and the later reset
+    /// store are `Relaxed`, since the interlock orders the slow path.
     pub fn unlock(&self) {
         if self
             .state

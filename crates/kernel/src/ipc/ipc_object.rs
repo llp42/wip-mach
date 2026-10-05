@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The IPC object routines, which `ipc/ipc_object.c` used to define and
-//! `ipc/ipc_object.h` declares.
+//! The IPC object routines.
 
 use crate::ipc::error::Error;
 use crate::ipc::ipc_entry;
@@ -20,21 +19,19 @@ use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 
-/// `MACH_MSG_TYPE_PORT_SEND_ONCE` of <mach/message.h>, an alias of
+/// The send-once right disposition, an alias of
 /// `MACH_MSG_TYPE_MOVE_SEND_ONCE`.
 const MACH_MSG_TYPE_PORT_SEND_ONCE: c_uint = 18;
-/// `MACH_PORT_TYPE_DEAD_NAME` of <mach/port.h>: `1 << (right + 16)` for the
-/// dead-name right.
+/// The type bit of a dead name: `1 << (right + 16)` for the dead-name right.
 const MACH_PORT_TYPE_DEAD_NAME: c_uint = 1 << (4 + 16);
-/// `MACH_PORT_NAME_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NAME_NULL: c_uint = 0;
-/// `IOT_PORT` of <`ipc/ipc_object.h`> as the `ipc_object_type_t` callers pass.
+/// The port object type, as callers pass it.
 const IOT_PORT_OBJECT: c_uint = IOT_PORT as c_uint;
-/// `IOT_PORT_SET` as the `ipc_object_type_t` callers pass.
+/// The port-set object type, as callers pass it.
 const IOT_PORT_SET_OBJECT: c_uint = IOT_PORT_SET as c_uint;
 
-/// `ipc_object_caches` of `ipc/ipc_object.c`: the port and port-set caches
-/// `io_alloc()` and `io_free()` select.
+/// The port and port-set caches [`io_alloc`] and [`io_free`] select.
 pub(crate) static mut IPC_OBJECT_CACHES: [KmemCache; crate::ipc::IOT_NUMBER] =
     [const { KmemCache::zeroed() }; crate::ipc::IOT_NUMBER];
 
@@ -92,20 +89,21 @@ fn strange_rights(fun: &'static str, message: &'static str) -> ! {
     kpanic!(fun, "{}", message)
 }
 
-/// `MACH_PORT_TYPE(right)` of <mach/port.h>: `1 << (right + 16)`.
+/// The type bit of `right`: `1 << (right + 16)`.
 const fn mach_port_type(right: c_uint) -> c_uint {
     // The C shifts by `right + 16`; the target masks the shift count the
     // same way.
     1u32.wrapping_shl(right.wrapping_add(16))
 }
 
-/// `io_makebits()` of <`ipc/ipc_object.h`>.
+/// The object bits of an active or inactive object of type `otype` and
+/// kernel-object type `kotype`.
 const fn io_makebits(active: bool, otype: c_uint, kotype: c_uint) -> c_uint {
     let active = if active { IO_BITS_ACTIVE } else { 0 };
     active | otype.wrapping_shl(16) | kotype
 }
 
-/// `io_alloc()` of <`ipc/ipc_object.h`>.
+/// Allocates an object of type `otype` from its cache.
 fn io_alloc(otype: c_uint) -> Option<*mut c_void> {
     // SAFETY: `ipc_bootstrap()` initialized both caches before any object
     // could exist, and the C callers pass one of the two types.
@@ -116,7 +114,7 @@ fn io_alloc(otype: c_uint) -> Option<*mut c_void> {
     cache.alloc().map(|buf| buf.as_ptr().cast())
 }
 
-/// `io_free()` of <`ipc/ipc_object.h`>.
+/// Returns `object` of type `otype` to its cache.
 ///
 /// # Safety
 ///
@@ -152,8 +150,7 @@ const unsafe fn zero_object(otype: c_uint, object: *mut c_void) {
     }
 }
 
-/// The `io_lock_data` initialization and acquisition `ipc_object_alloc()`
-/// performs on a fresh object.
+/// Initializes and takes the lock of a fresh object.
 ///
 /// # Safety
 ///
@@ -166,8 +163,7 @@ unsafe fn lock_object(object: *mut c_void) {
     }
 }
 
-/// The `object->io_references = 1` and `object->io_bits = ...` tail of
-/// `ipc_object_alloc()`.
+/// Gives a fresh object its first reference and its active type bits.
 ///
 /// # Safety
 ///
@@ -180,7 +176,7 @@ unsafe fn activate_object(object: *mut c_void, otype: c_uint) {
     }
 }
 
-/// `ipc_object_reference()` in C.
+/// Takes a reference on `object`.
 ///
 /// # Safety
 ///
@@ -194,7 +190,7 @@ pub(crate) unsafe fn reference(object: *mut c_void) {
     }
 }
 
-/// `ipc_object_release()` in C.
+/// Drops a reference on `object`, destroying it on the last one.
 ///
 /// # Safety
 ///
@@ -208,8 +204,7 @@ pub(crate) unsafe fn release(object: *mut c_void) {
     }
 }
 
-/// `ipc_object_translate()` in C: look `name` up and return its object,
-/// locked.
+/// Looks `name` up and returns its object, locked.
 ///
 /// # Safety
 ///
@@ -240,7 +235,7 @@ pub(crate) unsafe fn translate(
     Ok(object)
 }
 
-/// `ipc_object_alloc_dead()` in C.
+/// Allocates a dead name in `space` under a fresh name.
 ///
 /// # Safety
 ///
@@ -267,7 +262,7 @@ pub(crate) unsafe fn alloc_dead(space: IpcSpace) -> Result<c_uint, Error> {
     Ok(name)
 }
 
-/// `ipc_object_alloc_dead_name()` in C.
+/// Allocates a dead name in `space` under `name`.
 ///
 /// # Safety
 ///
@@ -288,8 +283,7 @@ pub(crate) unsafe fn alloc_dead_name(
         }
     };
 
-    // SAFETY: `ipc_right_inuse` unlocks the space when the entry is in use,
-    // as the C's did.
+    // SAFETY: `ipc_right::inuse` unlocks the space when the entry is in use.
     if unsafe { ipc_right::inuse(space, entry) } {
         return Err(Error::NameExists);
     }
@@ -303,7 +297,8 @@ pub(crate) unsafe fn alloc_dead_name(
     Ok(())
 }
 
-/// `ipc_object_alloc()` in C.
+/// Allocates an object of type `otype` in `space` under a fresh name, with a
+/// right of `type_` and `urefs` user references.
 ///
 /// # Safety
 ///
@@ -349,7 +344,8 @@ pub(crate) unsafe fn alloc(
     Ok((name, object))
 }
 
-/// `ipc_object_alloc_name()` in C.
+/// Allocates an object of type `otype` in `space` under `name`, with a right
+/// of `type_` and `urefs` user references.
 ///
 /// # Safety
 ///
@@ -383,8 +379,7 @@ pub(crate) unsafe fn alloc_name(
         }
     };
 
-    // SAFETY: `ipc_right_inuse` unlocks the space when the entry is in use,
-    // as the C's did.
+    // SAFETY: `ipc_right::inuse` unlocks the space when the entry is in use.
     if unsafe { ipc_right::inuse(space, entry) } {
         // SAFETY: the object is the fresh allocation from above.
         unsafe { io_free(otype, object) };
@@ -404,7 +399,8 @@ pub(crate) unsafe fn alloc_name(
     Ok(object)
 }
 
-/// `ipc_object_copyin()` in C.
+/// Takes the right `name` names in `space` out for a message, as `msgt_name`
+/// disposes it.
 ///
 /// # Safety
 ///
@@ -421,8 +417,8 @@ pub(crate) unsafe fn copyin(
     let result =
         unsafe { ipc_right::copyin(space, name, entry, msgt_name, true) };
 
-    // SAFETY: the space lock is held; an entry left with no type is freed as
-    // the C's `ipc_entry_dealloc()` did.
+    // SAFETY: the space lock is held; an entry left with no type goes back to
+    // the free list.
     unsafe {
         if (*entry).bits() & IE_BITS_TYPE_MASK == 0 {
             ipc_entry::dealloc(space, name, entry);
@@ -441,7 +437,8 @@ pub(crate) unsafe fn copyin(
     Ok(object)
 }
 
-/// `ipc_object_copyin_from_kernel()` in C.
+/// Takes a right the kernel holds on `object` for a message, as `msgt_name`
+/// disposes it.
 ///
 /// # Safety
 ///
@@ -505,7 +502,7 @@ pub(crate) unsafe fn copyin_from_kernel(
     }
 }
 
-/// `ipc_object_copyout()` in C.
+/// Puts a right to `object` from a message into `space`, returning its name.
 ///
 /// # Safety
 ///
@@ -565,7 +562,7 @@ pub(crate) unsafe fn copyout(
     };
 
     // SAFETY: the space is write-locked and active, and the object is locked
-    // and active; `ipc_right_copyout` unlocks the object.
+    // and active; `ipc_right::copyout` unlocks the object.
     let result = unsafe {
         ipc_right::copyout(space, name, entry, msgt_name, overflow, object)
     };
@@ -576,7 +573,7 @@ pub(crate) unsafe fn copyout(
     result.map(|()| name)
 }
 
-/// `ipc_object_copyout_name()` in C.
+/// Puts a right to `object` from a message into `space` under `name`.
 ///
 /// # Safety
 ///
@@ -623,8 +620,8 @@ pub(crate) unsafe fn copyout_name(
             return Err(Error::RightExists);
         }
     } else {
-        // SAFETY: `ipc_right_inuse` unlocks the space when the entry is in
-        // use, as the C's did.
+        // SAFETY: `ipc_right::inuse` unlocks the space when the entry is in
+        // use.
         if unsafe { ipc_right::inuse(space, entry) } {
             return Err(Error::NameExists);
         }
@@ -644,7 +641,7 @@ pub(crate) unsafe fn copyout_name(
     }
 
     // SAFETY: the space is write-locked and active, and the object is locked
-    // and active; `ipc_right_copyout` unlocks the object.
+    // and active; `ipc_right::copyout` unlocks the object.
     let result = unsafe {
         ipc_right::copyout(space, name, entry, msgt_name, overflow, object)
     };
@@ -655,8 +652,8 @@ pub(crate) unsafe fn copyout_name(
     result
 }
 
-/// `ipc_object_copyout_dest()` in C: quietly consume a message's destination
-/// right and return the receiver's name for it, or `MACH_PORT_NAME_NULL`.
+/// Quietly consumes a message's destination right and returns the receiver's
+/// name for it, or `MACH_PORT_NAME_NULL`.
 ///
 /// # Safety
 ///
@@ -729,7 +726,7 @@ pub(crate) unsafe fn copyout_dest(
     }
 }
 
-/// `ipc_object_rename()` in C.
+/// Moves the right `oname` names in `space` to `nname`.
 ///
 /// # Safety
 ///
@@ -751,8 +748,7 @@ pub(crate) unsafe fn rename(
         }
     };
 
-    // SAFETY: `ipc_right_inuse` unlocks the space when the entry is in use,
-    // as the C's did.
+    // SAFETY: `ipc_right::inuse` unlocks the space when the entry is in use.
     if unsafe { ipc_right::inuse(space, nentry) } {
         return Err(Error::NameExists);
     }
@@ -774,12 +770,12 @@ pub(crate) unsafe fn rename(
     };
 
     // SAFETY: the space is write-locked and both entries are live;
-    // `ipc_right_rename` unlocks the space.
+    // `ipc_right::rename` unlocks the space.
     unsafe { ipc_right::rename(space, oname, oentry, nname, nentry) };
     Ok(())
 }
 
-/// `ipc_object_copyin_type()` in C.
+/// The disposition a right carried with `msgt_name` arrives with.
 ///
 /// # Panics
 ///
@@ -824,7 +820,7 @@ unsafe fn destroy(port: IpcPort, name: MsgTypeName) {
     }
 }
 
-/// The `ipc_object_destroy()` core.
+/// Releases a right to `object` a message carried with `msgt_name`.
 ///
 /// # Safety
 ///

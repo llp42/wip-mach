@@ -3,8 +3,7 @@
 //   Copyright (C) 2022 Free Software Foundation
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The Multiboot header and the first-stage entry, which
-//! `i386/i386at/boothdr.S` and `x86_64/boothdr.S` used to define.
+//! The Multiboot header and the first-stage entry.
 
 mod x86_64 {
     use crate::arch::x86_64::apic::{
@@ -24,18 +23,18 @@ mod x86_64 {
     use crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS;
     use core::arch::global_asm;
 
-    /// `MULTIBOOT_MAGIC`, `MULTIBOOT_PAGE_ALIGN` and
-    /// `MULTIBOOT_MEMORY_INFO` of <mach/i386/multiboot.h>.
+    /// The Multiboot header's magic and the flags it sets: page-aligned
+    /// modules and a memory map.
     const MULTIBOOT_MAGIC: u32 = 0x1bad_b002;
     const MULTIBOOT_PAGE_ALIGN: u32 = 0x0000_0001;
     const MULTIBOOT_MEMORY_INFO: u32 = 0x0000_0002;
-    /// `MULTIBOOT_FLAGS` of `x86_64/boothdr.S`.
+    /// The flags the header asks the loader for.
     const MULTIBOOT_FLAGS: u32 = MULTIBOOT_PAGE_ALIGN | MULTIBOOT_MEMORY_INFO;
     /// The header checksum, `-(MULTIBOOT_MAGIC+MULTIBOOT_FLAGS)`.
     const MULTIBOOT_CHECKSUM: u32 =
         MULTIBOOT_MAGIC.wrapping_add(MULTIBOOT_FLAGS).wrapping_neg();
 
-    /// `BOOT_CS` and `BOOT_DS` of `x86_64/boothdr.S`.
+    /// The code and data selectors of the boot GDT.
     const BOOT_CS: u32 = 0x8;
     const BOOT_DS: u32 = 0x10;
 
@@ -54,8 +53,8 @@ mod x86_64 {
     const P3_KERNEL_INDEX: u64 = (KERNEL_MAP_BASE >> 30) & 0x1ff;
     const _: () = assert!(KERNEL_MAP_BASE >= (1 << 39));
 
-    /// `SEG_ACCESS_OFS`, `SEG_FLAGS_OFS` and the two descriptors of
-    /// `x86_64/boothdr.S`.
+    /// The access and flag offsets of a descriptor, and the boot GDT's two
+    /// descriptors.
     const SEG_ACCESS_OFS: u64 = 40;
     const SEG_FLAGS_OFS: u64 = 52;
     const BOOT_GDT64_CODE: u64 = ((ACC_P | ACC_CODE_R) as u64)

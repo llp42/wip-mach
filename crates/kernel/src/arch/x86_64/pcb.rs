@@ -8,10 +8,6 @@
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
 //! The PCB, the user-state save and restore and the context switch.
-//!
-//! `i386/i386/pcb.c` used to define them, and `i386/i386/pcb.h`,
-//! `i386/i386/thread.h` and
-//! `i386/include/mach/i386/thread_status.h` declare them.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{KERNEL_STACK_SIZE, VM_MAX_USER_ADDRESS};
@@ -32,79 +28,77 @@ use core::ffi::{c_int, c_long, c_uint, c_ulong, c_ushort, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
 
-/// `KERNEL_STACK_ALIGN` of <i386/thread.h>.
+/// The alignment of a kernel stack.
 const KERNEL_STACK_ALIGN: usize = 16;
 
-/// `USER_STACK_ALIGN` of <i386/thread.h>.
+/// The alignment of a user stack.
 const USER_STACK_ALIGN: VmSize = 16;
 
-/// `USER_CS` and `USER_DS` of <i386/ldt.h>.
+/// The user code and data selectors.
 const USER_CS: c_ulong = 0x1f;
 const USER_DS: c_ulong = 0x17;
 
-/// `KERNEL_LDT`, `USER_LDT` and `USER_GDT` of <i386/gdt.h>.
+/// The kernel LDT, user LDT and user GDT selectors.
 const KERNEL_LDT: c_ushort = 0x18;
 const USER_LDT: c_ushort = 0x28;
 const USER_GDT: c_ushort = 0x48;
-/// `USER_GDT_SLOTS` of <i386/gdt.h>: the per-thread GDT entries.
+/// The per-thread GDT entries.
 const USER_GDT_SLOTS: usize = 2;
 
-/// `IOPB_INVAL` of <`i386/io_perm.h>`: an offset outside the permission
-/// bitmap, which disables all permission.
+/// An offset outside the permission bitmap, which disables all permission.
 const IOPB_INVAL: c_ushort = 0x2fff;
-/// `EFL_IF` of <mach/i386/eflags.h>.
+/// The interrupt-enable flag.
 const EFL_IF: c_ulong = 0x0000_0200;
-/// `EFL_USER_SET` and `EFL_USER_CLEAR` of <i386/eflags.h>.
+/// The flags a user state always has set, and always has clear.
 const EFL_USER_SET: c_ulong = EFL_IF;
 const EFL_USER_CLEAR: c_ulong = 0x3000 | 0x4000 | 0x0001_0000;
 
-/// `SEL_PL` and `SEL_PL_U` of <i386/seg.h>.
+/// The selector privilege-level mask and the user level.
 const SEL_PL: c_uint = 0x03;
 const SEL_PL_U: c_uint = 0x03;
 
-/// `MSR_REG_FSBASE`, `MSR_REG_GSBASE` and `MSR_REG_KGSBASE` of <i386/msr.h>;
-/// the other registers below are the ones `ldt.rs` and `gdt.rs` write.
+/// The FS, GS and kernel-GS base MSRs; the other registers below are the ones
+/// [`ldt`](crate::arch::x86_64::ldt) and [`gdt`](crate::arch::x86_64::gdt)
+/// write.
 pub(crate) const MSR_REG_FSBASE: u32 = 0xc000_0100;
 pub(crate) const MSR_REG_GSBASE: u32 = 0xc000_0101;
 pub(crate) const MSR_REG_KGSBASE: u32 = 0xc000_0102;
-/// `MSR_REG_EFER`, `MSR_REG_STAR`, `MSR_REG_LSTAR` and `MSR_REG_FMASK` of
-/// <i386/msr.h>.
+/// The EFER, STAR, LSTAR and FMASK MSRs.
 pub(crate) const MSR_REG_EFER: u32 = 0xc000_0080;
 pub(crate) const MSR_REG_STAR: u32 = 0xc000_0081;
 pub(crate) const MSR_REG_LSTAR: u32 = 0xc000_0082;
 pub(crate) const MSR_REG_FMASK: u32 = 0xc000_0084;
-/// `MSR_EFER_SCE` of <i386/msr.h>: enable `syscall`/`sysret`.
+/// The EFER bit that enables SYSCALL/SYSRET.
 pub(crate) const MSR_EFER_SCE: u64 = 0x1;
-/// `MSR_REG_EFER_LONG_MODE_EN` of <i386/msr.h>: enter long mode.
+/// The EFER bit that enables long mode.
 pub(crate) const MSR_REG_EFER_LONG_MODE_EN: u64 = 1 << 8;
 
-/// The thread-state flavors of <`mach/i386/thread_status.h`>.
+/// The thread-state flavors.
 pub(crate) const I386_THREAD_STATE: c_int = 1;
 pub(crate) const I386_ISA_PORT_MAP_STATE: c_int = 3;
 pub(crate) const I386_REGS_SEGS_STATE: c_int = 5;
 pub(crate) const I386_DEBUG_STATE: c_int = 6;
 pub(crate) const I386_FSGS_BASE_STATE: c_int = 7;
-/// `THREAD_STATE_FLAVOR_LIST` of <`mach/thread_status.h`>.
+/// The flavor that lists the flavors.
 const THREAD_STATE_FLAVOR_LIST: c_int = 0;
 
-/// `i386_THREAD_STATE_COUNT` of <`mach/i386/thread_status.h`>.
+/// The size of an [`I386ThreadState`], in integers.
 const I386_THREAD_STATE_COUNT: c_uint =
     (size_of::<I386ThreadState>() / size_of::<c_uint>()) as c_uint;
-/// `i386_FLOAT_STATE_COUNT` of <`mach/i386/thread_status.h`>.
+/// The size of a float state, in integers.
 const I386_FLOAT_STATE_COUNT: c_uint =
     (size_of::<fpu::I386FloatState>() / size_of::<c_uint>()) as c_uint;
-/// `i386_ISA_PORT_MAP_STATE_COUNT` of <`mach/i386/thread_status.h`>.
+/// The size of an [`I386IsaPortMapState`], in integers.
 const I386_ISA_PORT_MAP_STATE_COUNT: c_uint =
     (size_of::<I386IsaPortMapState>() / size_of::<c_uint>()) as c_uint;
-/// `i386_DEBUG_STATE_COUNT` of <`mach/i386/thread_status.h`>.
+/// The size of an [`I386DebugState`], in integers.
 const I386_DEBUG_STATE_COUNT: c_uint =
     (size_of::<I386DebugState>() / size_of::<c_uint>()) as c_uint;
-/// `i386_FSGS_BASE_STATE_COUNT` of <`mach/i386/thread_status.h`>.
+/// The size of an [`I386FsgsBaseState`], in integers.
 const I386_FSGS_BASE_STATE_COUNT: c_uint = 4;
 
-/// `struct i386_saved_state` of <i386/thread.h>: the user registers as saved
-/// on kernel entry.  It lives in the pcb and is pushed on the stack for
-/// kernel exceptions.
+/// The user registers as saved on kernel entry.  It lives in the pcb and is
+/// pushed on the stack for kernel exceptions.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -149,8 +143,8 @@ const _: () = {
     assert!(offset_of!(I386SavedState, ss) == 176);
 };
 
-/// `struct i386_interrupt_state` of <i386/thread.h>: the registers an
-/// interrupt pushes before the kernel can switch to the interrupt stack.
+/// The registers an interrupt pushes before the kernel can switch to the
+/// interrupt stack.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -180,8 +174,8 @@ const _: () = {
     assert!(offset_of!(I386InterruptState, efl) == 96);
 };
 
-/// `struct i386_kernel_state` of <i386/thread.h>: the kernel registers as
-/// saved in a context switch, at the base of the stack.
+/// The kernel registers as saved in a context switch, at the base of the
+/// stack.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -203,8 +197,8 @@ const _: () = {
     assert!(offset_of!(I386KernelState, k_r12) == 32);
 };
 
-/// `struct i386_exception_link` of <i386/thread.h>: the pointer to the
-/// current thread's user registers at the high end of the kernel stack.
+/// The pointer to the current thread's user registers at the high end of the
+/// kernel stack.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -218,7 +212,7 @@ const _: () = {
     assert!(offset_of!(I386ExceptionLink, saved_state) == 0);
 };
 
-/// `struct i386_debug_state` of <`machine/thread_status.h`>.
+/// `struct i386_debug_state`: the debug registers of a thread.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -232,7 +226,7 @@ const _: () = {
     assert!(offset_of!(I386DebugState, dr) == 0);
 };
 
-/// `struct i386_segment_base_state` of <i386/thread.h>.
+/// The FS and GS bases of a thread.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -248,8 +242,7 @@ const _: () = {
     assert!(offset_of!(I386SegmentBaseState, gsbase) == 8);
 };
 
-/// `struct real_descriptor` of <i386/seg.h>, whose bitfields are kept as two
-/// words because Rust cannot express them.
+/// A segment descriptor, whose bitfields are kept as two words.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -299,8 +292,8 @@ pub(crate) struct DescriptorTable<const N: usize>(
     pub(crate) [RealDescriptor; N],
 );
 
-/// `struct user_ldt` of <`i386/user_ldt.h>`: the descriptor for the table
-/// itself followed by the table, which is larger than one entry in practice.
+/// The descriptor for the table itself followed by the table, which is larger
+/// than one entry in practice.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -316,10 +309,10 @@ const _: () = {
     assert!(offset_of!(UserLdt, ldt) == 8);
 };
 
-/// `IOPB_BYTES` of <`i386/io_perm.h>`: one bit per I/O port, 8192 bytes.
+/// The bytes of an I/O permission bitmap: one bit per I/O port.
 const IOPB_BYTES: usize = 0x2000;
 
-/// The x86 task state segment, `struct i386_tss` of <i386/tss.h>.
+/// The x86 task state segment.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -348,8 +341,7 @@ const _: () = {
     assert!(offset_of!(I386Tss, io_bit_map_offset) == 102);
 };
 
-/// `struct task_tss` of <i386/tss.h>: the TSS plus the I/O permission
-/// bitmap and its terminating barrier byte.
+/// The TSS plus the I/O permission bitmap and its terminating barrier byte.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -366,8 +358,7 @@ const _: () = {
     assert!(offset_of!(TaskTss, barrier) == 8296);
 };
 
-/// `struct i386_machine_state` of <i386/thread.h>: the machine-dependent
-/// part of a pcb that is not saved by default.
+/// The machine-dependent part of a pcb that is not saved by default.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct I386MachineState {
@@ -388,7 +379,7 @@ const _: () = {
     assert!(offset_of!(I386MachineState, sbs) == 64);
 };
 
-/// `struct pcb` of <i386/thread.h>: the process control block.
+/// The process control block.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct Pcb {
@@ -411,7 +402,7 @@ const _: () = {
     assert!(offset_of!(Pcb, init_control) == 484);
 };
 
-/// `struct i386_thread_state` of <`machine/thread_status.h`>.
+/// `struct i386_thread_state`: the user registers of a thread.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -451,7 +442,7 @@ const _: () = {
     assert!(offset_of!(I386ThreadState, ss) == 160);
 };
 
-/// `struct i386_isa_port_map_state` of <`machine/thread_status.h`>.
+/// `struct i386_isa_port_map_state`: a thread's I/O permission bitmap.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -465,7 +456,7 @@ const _: () = {
     assert!(offset_of!(I386IsaPortMapState, pm) == 0);
 };
 
-/// `struct i386_fsgs_base_state` of <`machine/thread_status.h`>.
+/// `struct i386_fsgs_base_state`: a thread's FS and GS bases.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -481,7 +472,7 @@ const _: () = {
     assert!(offset_of!(I386FsgsBaseState, gs_base) == 8);
 };
 
-/// `struct exec_info` of <mach/exec/exec.h>, of which `set_user_regs()`
+/// The program's entry point and loaded ranges, of which [`set_user_regs`]
 /// reads the entry point.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -500,27 +491,27 @@ const _: () = {
     assert!(offset_of!(ExecInfo, entry) == 8);
 };
 
-/// `pcb_cache` of i386/i386/pcb.c: the `struct pcb` slab cache.
+/// The slab cache of [`Pcb`] records.
 static mut PCB_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `kernel_stack` of i386/i386/pcb.c: the top of each CPU's active stack,
-/// which `locore.rs` and `cswitch.S` index by CPU number.
+/// The top of each CPU's active stack, which the low-level entries index by
+/// CPU number.
 pub static mut KERNEL_STACK: [VmOffset; crate::config::MAX_NCPUS] =
     [0; crate::config::MAX_NCPUS];
 
-/// `sel_idx()` of <i386/seg.h>.
+/// The descriptor index of `selector`.
 fn sel_idx(selector: c_ushort) -> usize {
     usize::from(selector >> 3)
 }
 
-/// `STACK_IKS()` of <i386/thread.h>.
+/// The kernel state at the top of `stack`.
 const fn stack_iks(stack: VmOffset) -> *mut I386KernelState {
     ptr::with_exposed_provenance_mut(
         stack + KERNEL_STACK_SIZE - size_of::<I386KernelState>(),
     )
 }
 
-/// `STACK_IEL()` of <i386/thread.h>.
+/// The exception link at the top of `stack`.
 const fn stack_iel(stack: VmOffset) -> *mut I386ExceptionLink {
     ptr::with_exposed_provenance_mut(
         stack + KERNEL_STACK_SIZE
@@ -529,7 +520,7 @@ const fn stack_iel(stack: VmOffset) -> *mut I386ExceptionLink {
     )
 }
 
-/// The C's `get_ldt()` of <`i386/proc_reg.h`>.
+/// Reads the LDT register.
 fn get_ldt() -> c_ushort {
     let segment: c_ushort;
     // SAFETY: `sldt` reads the local descriptor table register at CPL0.
@@ -539,7 +530,7 @@ fn get_ldt() -> c_ushort {
     segment
 }
 
-/// The C's `set_ldt()` of <`i386/proc_reg.h`>.
+/// Loads the LDT register with `segment`.
 fn set_ldt(segment: c_ushort) {
     // SAFETY: `lldt` loads the LDT register with a descriptor the kernel
     // built in its GDT.
@@ -548,10 +539,10 @@ fn set_ldt(segment: c_ushort) {
     };
 }
 
-/// The C's `wrmsr()` of <i386/msr.h>.
+/// Writes `value` to the MSR `register`.
 pub(crate) fn write_msr(register: u32, value: u64) {
-    // SAFETY: `wrmsr` writes a model-specific register at CPL0; the caller
-    // names one the CPU has.
+    // SAFETY: WRMSR writes a model-specific register at CPL0; the caller names
+    // one the CPU has.
     unsafe {
         core::arch::asm!(
             "wrmsr",
@@ -563,12 +554,12 @@ pub(crate) fn write_msr(register: u32, value: u64) {
     };
 }
 
-/// The C's `rdmsr()` of <i386/msr.h>.
+/// Reads the MSR `register`.
 pub(crate) fn read_msr(register: u32) -> u64 {
     let low: u32;
     let high: u32;
-    // SAFETY: `rdmsr` reads a model-specific register at CPL0; the caller
-    // names one the CPU has.
+    // SAFETY: RDMSR reads a model-specific register at CPL0; the caller names
+    // one the CPU has.
     unsafe {
         core::arch::asm!(
             "rdmsr",
@@ -581,7 +572,7 @@ pub(crate) fn read_msr(register: u32) -> u64 {
     (u64::from(high) << 32) | u64::from(low)
 }
 
-/// `fpu_save_context()` of <i386/fpu.h>: save the registers if they are live.
+/// Saves the registers if they are live.
 ///
 /// # Safety
 ///
@@ -595,7 +586,7 @@ unsafe fn fpu_save_context(thread: *mut Thread) {
     }
 }
 
-/// `stack_attach()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c` defined.
+/// Attaches the kernel `stack` to `thread`, so it resumes in `continuation`.
 ///
 /// # Safety
 ///
@@ -624,7 +615,7 @@ pub(crate) unsafe fn stack_attach(
     }
 }
 
-/// `switch_ktss()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c` defined.
+/// Points this CPU's TSS and descriptors at the thread whose pcb is `pcb`.
 ///
 /// # Safety
 ///
@@ -635,8 +626,8 @@ pub(crate) unsafe fn switch_ktss(pcb: *mut Pcb) {
     let pcb_stack_top =
         unsafe { ptr::addr_of!((*pcb).iss).add(1) as VmOffset };
 
-    // SAFETY: `mp_ktss` holds one live TSS per CPU, and `mycpu` names the
-    // CPU this code runs on.
+    // SAFETY: `MP_KTSS` holds one live TSS per CPU, and `mycpu` names the CPU
+    // this code runs on.
     let ktss_ref = unsafe {
         (*ptr::addr_of!(crate::arch::x86_64::mp_desc::MP_KTSS))
             [mycpu.as_usize()]
@@ -673,8 +664,8 @@ pub(crate) unsafe fn switch_ktss(pcb: *mut Pcb) {
     unsafe { db_interface::load_context(pcb) };
 }
 
-/// `update_ktss_iopb()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c`
-/// defined.
+/// Loads `size` bytes of the I/O permission bitmap `new_iopb` into this CPU's
+/// TSS, or none.
 ///
 /// # Safety
 ///
@@ -684,7 +675,7 @@ pub(crate) unsafe fn update_ktss_iopb(
     new_iopb: Option<NonNull<u8>>,
     size: c_ushort,
 ) {
-    // SAFETY: `mp_ktss` holds one live TSS per CPU.
+    // SAFETY: `MP_KTSS` holds one live TSS per CPU.
     let tss = unsafe {
         (*ptr::addr_of!(crate::arch::x86_64::mp_desc::MP_KTSS))
             [cpu_id().as_usize()]
@@ -712,8 +703,7 @@ pub(crate) unsafe fn update_ktss_iopb(
     }
 }
 
-/// `stack_handoff()` of `kern/sched_prim.h`, which `i386/i386/pcb.c`
-/// defined.
+/// Hands the kernel stack of `old` to `new`, switching the address space.
 ///
 /// # Safety
 ///
@@ -754,8 +744,8 @@ pub(crate) unsafe fn stack_handoff(old: *mut Thread, new: *mut Thread) {
     }
 }
 
-/// `switch_context()` of <`kern/sched_prim.h`>, which `i386/i386/pcb.c`
-/// defined.
+/// Switches from `old` to `new`, saving `old`'s kernel context with
+/// `continuation`; returns the thread switched away from.
 ///
 /// # Safety
 ///
@@ -786,16 +776,15 @@ pub(crate) unsafe fn switch_context(
             (*new_task).machine.iopb_lock.unlock();
         }
 
-        // SAFETY: the new thread's pcb is live, and `Switch_context()`
-        // switches to its saved kernel context.
+        // SAFETY: the new thread's pcb is live, and the switch resumes its
+        // saved kernel context.
         switch_ktss((*new).pcb);
 
         cswitch::switch_context(old, continuation, new)
     }
 }
 
-/// `pcb_module_init()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c`
-/// defined.
+/// Creates the pcb cache and sets the FPU module up.
 ///
 /// # Safety
 ///
@@ -819,7 +808,7 @@ fn panic_no_pcb() -> ! {
     kpanic!("pcb_init", "pcb_init")
 }
 
-/// `pcb_init()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c` defined.
+/// Gives `thread` a fresh pcb with the user segments and flags.
 ///
 /// # Safety
 ///
@@ -851,7 +840,7 @@ pub(crate) unsafe fn pcb_init(parent_task: *mut Task, thread: *mut Thread) {
     }
 }
 
-/// `pcb_terminate()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c` defined.
+/// Frees `thread`'s pcb, with its FPU state and LDT.
 ///
 /// # Safety
 ///
@@ -875,8 +864,7 @@ pub(crate) unsafe fn pcb_terminate(thread: *mut Thread) {
     }
 }
 
-/// `thread_setstatus()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c`
-/// defined.
+/// Sets `thread`'s machine state of `flavor`.
 ///
 /// # Safety
 ///
@@ -1003,8 +991,7 @@ pub(crate) unsafe fn thread_setstatus(
     }
 }
 
-/// `thread_getstatus()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c`
-/// defined.
+/// Reports `thread`'s machine state of `flavor`.
 ///
 /// # Safety
 ///
@@ -1176,8 +1163,7 @@ unsafe fn get_thread_state(
     Ok(())
 }
 
-/// `thread_set_syscall_return()` of `i386/i386/pcb.h`, which
-/// `i386/i386/pcb.c` defined.
+/// Sets `retval` as the value `thread`'s system call returns.
 ///
 /// # Safety
 ///
@@ -1189,13 +1175,14 @@ pub(crate) unsafe fn thread_set_syscall_return(
     unsafe { (*(*thread).pcb).iss.eax = retval as c_ulong };
 }
 
-/// `user_stack_low()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c`
-/// defined.
+/// The lowest address of a user stack of `stack_size` bytes.
 pub(crate) const fn user_stack_low(stack_size: VmSize) -> VmOffset {
     VM_MAX_USER_ADDRESS.wrapping_sub(stack_size)
 }
 
-/// `set_user_regs()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c` defined.
+/// Points the current thread's user registers at the entry of `exec_info`,
+/// with its stack below `arg_size` bytes of arguments, and returns the
+/// arguments' address.
 ///
 /// # Safety
 ///
@@ -1220,7 +1207,7 @@ pub(crate) unsafe fn set_user_regs(
     arg_addr
 }
 
-/// `stack_detach()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c` defined.
+/// Detaches and returns `thread`'s kernel stack.
 ///
 /// # Safety
 ///
@@ -1231,7 +1218,7 @@ pub(crate) unsafe fn stack_detach(thread: *mut Thread) -> VmOffset {
     unsafe { core::mem::replace(&mut (*thread).kernel_stack, 0) }
 }
 
-/// `load_context()` of `i386/i386/pcb.h`, which `i386/i386/pcb.c` defined.
+/// Runs `new` as this CPU's first thread.
 ///
 /// # Safety
 ///

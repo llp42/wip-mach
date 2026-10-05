@@ -5,8 +5,7 @@
 //   Copyright (C) 2006, 2007 Free Software Foundation, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The Mach factor computation, which `kern/mach_factor.c` used to define
-//! for <`kern/mach_factor.h`>.
+//! The Mach factor computation.
 
 use crate::kern::processor;
 use crate::kern::sched::{SCHED_SCALE, SCHED_SHIFT};
@@ -15,19 +14,16 @@ use core::ptr;
 use core::sync::atomic::AtomicI64 as AtomicLong;
 use core::sync::atomic::Ordering;
 
-/// `LOAD_SCALE` in <`mach/processor_info.h>`: the fixed-point unit of the load
-/// averages and the mach factor.
+/// The fixed-point unit of the load averages and the mach factor.
 const LOAD_SCALE: c_long = 1000;
 
-/// The `fract[]` of `kern/mach_factor.c`: the decay weights, `LOAD_SCALE`ths.
+/// The decay weights, `LOAD_SCALE`ths.
 const FRACT: [c_long; 3] = [800, 966, 983];
 
-/// `avenrun` of `kern/mach_factor.c`: the three load averages `host_info()`
-/// reports.
+/// The three load averages `host_info()` reports.
 static AVENRUN: [AtomicLong; 3] = [const { AtomicLong::new(0) }; 3];
 
-/// `mach_factor` of `kern/mach_factor.c`: the three scaled factors `host_info()`
-/// reports.
+/// The three scaled factors `host_info()` reports.
 static MACH_FACTOR: [AtomicLong; 3] = [const { AtomicLong::new(0) }; 3];
 
 /// The `avenrun` counters, as `host_info()` reports them.
@@ -48,11 +44,12 @@ pub(crate) fn mach_factor() -> [c_long; 3] {
         .map(|value| value.load(Ordering::Relaxed))
 }
 
-/// `compute_mach_factor()` of `kern/mach_factor.c`.
+/// Updates the load averages and the mach factors from each processor set's
+/// run queues.
 pub(crate) fn compute() {
     let lock = processor::all_psets_lock();
-    // `pset_sys_bootstrap()` initialized the lock and the list, and
-    // the lock serializes this walk with every list update.
+    // The boot path initialized the lock and the list, and the lock serializes
+    // this walk with every list update.
     lock.lock();
     // SAFETY: the list head is initialized and stays at its address, and the
     // lock serializes the walk with every list update.

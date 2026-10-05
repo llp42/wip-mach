@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989,1988 Carnegie Mellon University
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Kernel startup, which `kern/startup.c` used to define and `kern/startup.h`
-//! declares.
+//! Kernel startup.
 
 use crate::arch::x86_64::clock_platform;
 use crate::arch::x86_64::model_dep;
@@ -34,13 +33,12 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// `KERNEL_MAJOR_VERSION` of <mach/version.h>.
+/// The major version `host_info()` reports.
 const KERNEL_MAJOR_VERSION: c_int = 4;
-/// `KERNEL_MINOR_VERSION` of <mach/version.h>.
+/// The minor version `host_info()` reports.
 const KERNEL_MINOR_VERSION: c_int = 0;
 
-/// `reboot_on_panic` of kern/startup.c: whether the panic path reboots or
-/// halts.  The C `Panic()` reads the same symbol.
+/// Whether the panic path reboots or halts.
 static REBOOT_ON_PANIC: AtomicU32 = AtomicU32::new(1);
 
 /// The `reboot_on_panic` flag as the panic path takes it.
@@ -49,18 +47,17 @@ pub(crate) fn reboot_on_panic() -> c_int {
     REBOOT_ON_PANIC.load(Ordering::Relaxed) as c_int
 }
 
-/// `setup_main()` in C: start the kernel from the boot processor.
+/// Starts the kernel from the boot processor.
 ///
 /// # Safety
 ///
 /// Runs once, on the interrupt stack of the boot processor, before any other
 /// CPU or thread exists.
 pub(crate) unsafe fn setup_main() {
-    // The C's `strstr(kernel_cmdline, "-H ")`.
+    // The `-H` option asks the panic path to halt instead of rebooting.
     let line = model_dep::kernel_cmdline().to_bytes();
     if line.windows(3).any(|window| window == b"-H ") {
-        // The store runs before any other CPU starts, and the C `Panic()`
-        // read the same word without synchronization.
+        // The store runs before any other CPU starts, so it needs no ordering.
         REBOOT_ON_PANIC.store(0, Ordering::Relaxed);
     }
 
@@ -119,8 +116,7 @@ pub(crate) unsafe fn setup_main() {
     }
 }
 
-/// `start_kernel_threads()` in C: create the kernel's service threads and the
-/// bootstrap task.
+/// Creates the kernel's service threads and the bootstrap task.
 ///
 /// # Safety
 ///
@@ -203,8 +199,7 @@ pub(crate) unsafe extern "C" fn start_kernel_threads() {
     }
 }
 
-/// `cpu_launch_first_thread()` in C: hand a CPU its first thread, never to
-/// return.
+/// Hands a CPU its first thread, never to return.
 ///
 /// # Safety
 ///
@@ -219,8 +214,6 @@ pub(crate) unsafe fn cpu_launch_first_thread(mut th: *mut Thread) -> ! {
     // processor.
     unsafe {
         machine::cpu_up(cpu);
-
-        // The C `start_timer()` is an empty macro in <kern/timer.h>.
 
         spl::splhigh();
 
@@ -240,8 +233,6 @@ pub(crate) unsafe fn cpu_launch_first_thread(mut th: *mut Thread) -> ! {
         (*th).lock.unlock();
         (*th).last_processor = per_cpu::processor().as_ptr();
 
-        // The C `timer_switch()` is an empty macro in <kern/timer.h>.
-
         let map = (*(*th).task).map.cast::<crate::vm::vm_map::VmMap>();
         pmap::activate_user((*map).pmap, cpu);
 
@@ -256,7 +247,7 @@ unsafe extern "C" fn swapin_thread_continuation() {
     unsafe { thread_swap::swapin_thread() }
 }
 
-/// The `panic("cpu_launch_first_thread")` of the C.
+/// Halts the kernel: the CPU has no thread to run first.
 fn panic_no_thread() -> ! {
     kpanic!("cpu_launch_first_thread", "cpu_launch_first_thread")
 }

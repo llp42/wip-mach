@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Kernel memory management, which `vm/vm_kern.c` used to define and
-//! `vm/vm_kern.h` declares.
+//! Kernel memory management.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
@@ -35,23 +34,22 @@ use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// `VM_PAGE_HIGHMEM` of <`vm/vm_page.h>`: the page may come from high physical
-/// memory.
+/// The allocation flag that lets the page come from high physical memory.
 const VM_PAGE_HIGHMEM: c_uint = 0x08;
 
-/// `VM_MIN_KERNEL_ADDRESS` of <`machine/vm_param.h>`: `KERNEL_MAP_BASE`.  A
-/// `kernel_object` offset is linear in the kernel virtual address, so a kernel
+/// The lowest kernel virtual address, where the kernel map begins. A
+/// `KERNEL_OBJECT` offset is linear in the kernel virtual address, so a kernel
 /// mapping is stored at `addr - VM_MIN_KERNEL_ADDRESS`, and `phystokv()` adds
 /// it back.
 pub(crate) const VM_MIN_KERNEL_ADDRESS: VmOffset = 0xffff_ffff_8000_0000;
 
-/// `kernel_map_store`, file-private in the C: the boot kernel map's storage.
+/// The storage of the boot kernel map.
 static mut KERNEL_MAP_STORE: VmMap = VmMap::zeroed();
 
-/// `kernel_map` of <`vm/vm_kern.h>`: the kernel map `kmem_init()` builds.
+/// The kernel map `kmem_init()` builds.
 pub static mut KERNEL_MAP: *mut VmMap = &raw mut KERNEL_MAP_STORE;
 
-/// `projected_buffer_collect()` in C: unmap every projected buffer of `map`.
+/// Unmaps every projected buffer of `map`.
 pub(crate) fn projected_buffer_collect(
     map: NonNull<VmMap>,
 ) -> Result<(), Error> {
@@ -60,8 +58,8 @@ pub(crate) fn projected_buffer_collect(
         return Err(Error::InvalidArgument);
     }
 
-    // SAFETY: the caller promises a live map, and the sentinel is the
-    // header's links as `vm_map_to_entry()` computes it.
+    // SAFETY: the caller promises a live map, and the sentinel is the header's
+    // links as `to_entry()` computes them.
     let sentinel = unsafe { (*map.as_ptr()).to_entry() };
     // SAFETY: the header's `next` is the sentinel or a live entry.
     let mut entry =
@@ -91,8 +89,7 @@ pub(crate) fn projected_buffer_collect(
     Ok(())
 }
 
-/// `projected_buffer_in_range()` in C: whether a projected buffer overlaps
-/// `start..end`.
+/// Whether a projected buffer overlaps `start..end`.
 pub(crate) fn projected_buffer_in_range(
     map: &VmMap,
     start: VmOffset,
@@ -127,8 +124,7 @@ pub(crate) fn projected_buffer_in_range(
     entry != sentinel && unsafe { (*entry.as_ptr()).links.start } <= end
 }
 
-/// `kmem_alloc_wired_flags()` in C: reserve kernel virtual space and wire
-/// memory for it.
+/// Reserves kernel virtual space and wires memory for it.
 pub(crate) fn kmem_alloc_wired_flags(
     map: NonNull<VmMap>,
     size: VmSize,
@@ -137,7 +133,7 @@ pub(crate) fn kmem_alloc_wired_flags(
     let addr = kmem_valloc(map, size)?;
 
     let offset = addr.wrapping_sub(VM_MIN_KERNEL_ADDRESS);
-    // SAFETY: `kernel_object` is the boot object every kernel mapping maps,
+    // SAFETY: `KERNEL_OBJECT` is the boot object every kernel mapping maps,
     // and `addr..addr + size` is the region `kmem_valloc` just reserved.
     unsafe {
         alloc_pages(
@@ -153,8 +149,8 @@ pub(crate) fn kmem_alloc_wired_flags(
     Ok(addr)
 }
 
-/// `kmem_alloc_wired()` in C: `kmem_alloc_wired_flags()` with
-/// `VM_PAGE_HIGHMEM`.
+/// Like [`kmem_alloc_wired_flags`], with the pages allowed to come from high
+/// memory.
 pub(crate) fn kmem_alloc_wired(
     map: NonNull<VmMap>,
     size: VmSize,
@@ -162,8 +158,8 @@ pub(crate) fn kmem_alloc_wired(
     kmem_alloc_wired_flags(map, size, VM_PAGE_HIGHMEM)
 }
 
-/// `kmem_map_aligned_table()` in C: map a physical table at a kernel address
-/// with the physical address's in-page offset.
+/// Maps a physical table at a kernel address with the physical address's
+/// in-page offset.
 pub(crate) fn kmem_map_aligned_table(
     map: NonNull<VmMap>,
     phys_address: VmOffset,
@@ -196,7 +192,7 @@ pub(crate) fn kmem_map_aligned_table(
     })
 }
 
-/// `kmem_alloc_pageable()` in C: reserve pageable space in the kernel map.
+/// Reserves pageable space in the kernel map.
 pub(crate) fn kmem_alloc_pageable(
     map: &mut VmMap,
     size: VmSize,
@@ -236,7 +232,7 @@ pub(crate) fn kmem_alloc_pageable(
     }
 }
 
-/// `kmem_free()` in C: release a region a `kmem_alloc*` call made.
+/// Releases a region a `kmem_alloc*` call made.
 pub(crate) fn kmem_free(
     map: &mut VmMap,
     addr: VmOffset,
@@ -245,7 +241,7 @@ pub(crate) fn kmem_free(
     map.remove(trunc_page(addr), round_page(addr.wrapping_add(size)))
 }
 
-/// `kmem_submap()` in C: build `map` as a submap of `parent`.
+/// Builds `map` as a submap of `parent`.
 pub(crate) fn kmem_submap(
     map: &mut VmMap,
     parent: NonNull<VmMap>,
@@ -253,7 +249,7 @@ pub(crate) fn kmem_submap(
 ) -> Result<(VmOffset, VmOffset), Error> {
     let size = round_page(size);
 
-    // SAFETY: `vm_submap_object` is the boot placeholder and is live for the
+    // SAFETY: `VM_SUBMAP_OBJECT` is the boot placeholder and is live for the
     // life of the kernel.
     let object = unsafe { VM_SUBMAP_OBJECT };
     // SAFETY: the parent's new entry holds the reference taken here, as the C
@@ -283,13 +279,13 @@ pub(crate) fn kmem_submap(
     VmMap::setup(map, pmap, addr, addr.wrapping_add(size));
 
     // The caller promises the parent is a live map and `map` the storage just
-    // set up, which is what `vm_map_submap()` requires.
+    // set up, which is what `submap()` requires.
     parent.submap(addr, addr.wrapping_add(size), ptr::from_mut(map))?;
 
     Ok((addr, addr.wrapping_add(size)))
 }
 
-/// `kmem_init()` in C: initialize the kernel map's address range.
+/// Initializes the kernel map's address range.
 pub(crate) fn kmem_init(
     map: NonNull<VmMap>,
     pmap: *mut Pmap,
@@ -324,8 +320,8 @@ pub(crate) fn kmem_init(
     }
 }
 
-/// `kmem_io_map_deallocate()` in C: drop the mapping `kmem_io_map_copyout()`
-/// established.
+/// Drops the I/O mapping of `addr..addr + size` from `map` and from its
+/// physical map.
 pub(crate) fn kmem_io_map_deallocate(
     map: &mut VmMap,
     addr: VmOffset,
@@ -345,8 +341,8 @@ fn kernel_map_non_null() -> NonNull<VmMap> {
     unsafe { NonNull::new_unchecked(ptr::addr_of_mut!(KERNEL_MAP_STORE)) }
 }
 
-/// `projected_buffer_deallocate()` in C: unmap a projected buffer from `map`,
-/// and from the kernel map when it was the last non-persistent use.
+/// Unmaps a projected buffer from `map`, and from the kernel map when it was
+/// the last non-persistent use.
 pub(crate) fn projected_buffer_deallocate(
     map: NonNull<VmMap>,
     start: VmOffset,
@@ -424,8 +420,7 @@ pub(crate) fn projected_buffer_deallocate(
     Ok(())
 }
 
-/// `kmem_alloc()` in C: allocate wired-down memory in a kernel map or
-/// submap, not zeroed.
+/// Allocates wired-down memory in a kernel map or submap, not zeroed.
 pub(crate) fn kmem_alloc(
     map: NonNull<VmMap>,
     size: VmSize,
@@ -503,14 +498,14 @@ pub(crate) fn kmem_alloc(
     }
 }
 
-/// `kmem_valloc()` in C: reserve addressing space in a kernel map or submap
-/// without mapping anything.
+/// Reserves addressing space in a kernel map or submap without mapping
+/// anything.
 pub(crate) fn kmem_valloc(
     map: NonNull<VmMap>,
     size: VmSize,
 ) -> Result<VmOffset, Error> {
     let size = round_page(size);
-    // SAFETY: `kernel_object` is the boot object of every kernel mapping.
+    // SAFETY: `KERNEL_OBJECT` is the boot object of every kernel mapping.
     let object = unsafe { KERNEL_OBJECT };
 
     let mut attempts = 0;
@@ -571,8 +566,7 @@ pub(crate) fn kmem_valloc(
     }
 }
 
-/// `kmem_alloc_aligned()` in C: `kmem_valloc()` with an aligned address and
-/// the pages wired in.
+/// Like [`kmem_valloc`], with an aligned address and the pages wired in.
 ///
 /// # Panics
 ///
@@ -587,7 +581,7 @@ pub(crate) fn kmem_alloc_aligned(
     }
 
     let size = round_page(size);
-    // SAFETY: `kernel_object` is the boot object of every kernel mapping.
+    // SAFETY: `KERNEL_OBJECT` is the boot object of every kernel mapping.
     let object = unsafe { KERNEL_OBJECT };
 
     let mut attempts = 0;
@@ -660,8 +654,7 @@ pub(crate) fn kmem_alloc_aligned(
     }
 }
 
-/// `kmem_alloc_pages()` in C: allocate wired pages of `object` in
-/// `start..end`.
+/// Allocates wired pages of `object` in `start..end`.
 ///
 /// # Safety
 ///
@@ -683,11 +676,9 @@ pub(crate) unsafe fn alloc_pages(
         unsafe { (*object).lock.lock() };
 
         let mem = loop {
-            // SAFETY: the object lock is held, as `vm_page_alloc_flags`
-            // requires.
+            // SAFETY: the object lock is held, as `alloc_flags` requires.
             if let Some(page) =
-                // SAFETY: the object lock is held, as `vm_page_alloc_flags`
-                // requires.
+                // SAFETY: the object lock is held, as `alloc_flags` requires.
                 unsafe {
                     vm_resident::alloc_flags(object_ref, offset, flags)
                 }
@@ -713,8 +704,9 @@ pub(crate) unsafe fn alloc_pages(
         // the mapping.
         unsafe { (*object).lock.unlock() };
 
-        // SAFETY: `kernel_pmap` is the boot pmap, and the page's physical
-        // address is live; the C masks the page's lock bits out.
+        // SAFETY: `kernel_pmap_ptr()` is the boot pmap, and the page's
+        // physical address is live; the page's lock bits are masked out of the
+        // protection.
         unsafe {
             pmap_enter(
                 NonNull::new(kernel_pmap_ptr()),
@@ -737,7 +729,7 @@ pub(crate) unsafe fn alloc_pages(
     }
 }
 
-/// `copyinmap()` in C: `copyin()` from a kernel map or the current user map.
+/// Copies bytes in from a kernel map or from the current user map.
 ///
 /// # Safety
 ///
@@ -749,7 +741,7 @@ pub(crate) unsafe fn copyinmap(
     toaddr: *mut c_char,
     length: c_int,
 ) -> Result<(), UserFault> {
-    // SAFETY: `kernel_pmap` is the boot pmap.
+    // SAFETY: `kernel_pmap_ptr()` is the boot pmap.
     if map.pmap == kernel_pmap_ptr() {
         unsafe {
             ptr::copy_nonoverlapping(
@@ -778,8 +770,7 @@ pub(crate) unsafe fn copyinmap(
     Err(UserFault)
 }
 
-/// `copyoutmap()` in C: `copyout()` into a kernel map or the current user
-/// map.
+/// Copies bytes out into a kernel map or into the current user map.
 ///
 /// # Safety
 ///
@@ -791,7 +782,7 @@ pub(crate) unsafe fn copyoutmap(
     toaddr: *mut c_char,
     length: c_int,
 ) -> Result<(), UserFault> {
-    // SAFETY: `kernel_pmap` is the boot pmap.
+    // SAFETY: `kernel_pmap_ptr()` is the boot pmap.
     if map.pmap == kernel_pmap_ptr() {
         unsafe {
             ptr::copy_nonoverlapping(

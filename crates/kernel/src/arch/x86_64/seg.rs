@@ -17,9 +17,7 @@
 //   Laboratory at the University of Utah (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The descriptor table constants and fillers of `i386/i386/seg.h`, with
-//! the selector constants of `i386/i386/gdt.h`, `i386/i386/ldt.h` and
-//! `i386/i386at/idt-gen.h`.
+//! The descriptor table constants, selectors and fillers.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::mp_desc::RealGate;
@@ -28,90 +26,91 @@ use core::arch::asm;
 use core::ffi::{c_int, c_ulong, c_ushort};
 use core::mem::{align_of, offset_of, size_of};
 
-/// `SZ_64` of <i386/seg.h>: a 64-bit segment.
+/// A 64-bit segment.
 pub(crate) const SZ_64: u8 = 0x2;
-/// `SZ_32` of <i386/seg.h>: a 32-bit segment.
+/// A 32-bit segment.
 pub(crate) const SZ_32: u8 = 0x4;
-/// `SZ_G` of <i386/seg.h>: a 4K granularity limit field.
+/// A 4K granularity limit field.
 pub(crate) const SZ_G: u8 = 0x8;
 
-/// `ACC_A` of <i386/seg.h>: the accessed bit.
+/// The accessed bit.
 pub(crate) const ACC_A: u8 = 0x01;
-/// `ACC_TYPE_USER` of <i386/seg.h>: the user descriptor type bit.
+/// The user descriptor type bit.
 pub(crate) const ACC_TYPE_USER: u8 = 0x10;
 
-/// `ACC_LDT` of <i386/seg.h>: a local descriptor table.
+/// A local descriptor table.
 pub(crate) const ACC_LDT: u8 = 0x02;
-/// `ACC_CALL_GATE_16` of <i386/seg.h>: a 16-bit call gate.
+/// A 16-bit call gate.
 pub(crate) const ACC_CALL_GATE_16: u8 = 0x04;
-/// `ACC_TSS` of <i386/seg.h>: a task state segment.
+/// A task state segment.
 pub(crate) const ACC_TSS: u8 = 0x09;
-/// `ACC_CALL_GATE` of <i386/seg.h>: a call gate.
+/// A call gate.
 pub(crate) const ACC_CALL_GATE: u8 = 0x0c;
-/// `ACC_INTR_GATE` of <i386/seg.h>: an interrupt gate.
+/// An interrupt gate.
 pub(crate) const ACC_INTR_GATE: u8 = 0x0e;
-/// `ACC_TRAP_GATE` of <i386/seg.h>: a trap gate.
+/// A trap gate.
 pub(crate) const ACC_TRAP_GATE: u8 = 0x0f;
 
-/// `ACC_DATA` of <i386/seg.h>: a data segment.
+/// A data segment.
 pub(crate) const ACC_DATA: u8 = 0x10;
-/// `ACC_DATA_W` of <i386/seg.h>: a writable data segment.
+/// A writable data segment.
 pub(crate) const ACC_DATA_W: u8 = 0x12;
-/// `ACC_DATA_E` of <i386/seg.h>: an expand-down data segment.
+/// An expand-down data segment.
 pub(crate) const ACC_DATA_E: u8 = 0x14;
-/// `ACC_DATA_EW` of <i386/seg.h>: an expand-down writable data segment.
+/// An expand-down writable data segment.
 pub(crate) const ACC_DATA_EW: u8 = 0x16;
-/// `ACC_CODE` of <i386/seg.h>: a code segment.
+/// A code segment.
 pub(crate) const ACC_CODE: u8 = 0x18;
-/// `ACC_CODE_R` of <i386/seg.h>: a readable code segment.
+/// A readable code segment.
 pub(crate) const ACC_CODE_R: u8 = 0x1a;
-/// `ACC_CODE_C` of <i386/seg.h>: a conforming code segment.
+/// A conforming code segment.
 pub(crate) const ACC_CODE_C: u8 = 0x1c;
-/// `ACC_CODE_CR` of <i386/seg.h>: a conforming readable code segment.
+/// A conforming readable code segment.
 pub(crate) const ACC_CODE_CR: u8 = 0x1e;
 
-/// `ACC_PL` of <i386/seg.h>: the privilege-level mask.
+/// The privilege-level mask.
 pub(crate) const ACC_PL: u8 = 0x60;
-/// `ACC_PL_K` of <i386/seg.h>: kernel access only.
+/// Kernel access only.
 pub(crate) const ACC_PL_K: u8 = 0;
-/// `ACC_PL_U` of <i386/seg.h>: user access.
+/// User access.
 pub(crate) const ACC_PL_U: u8 = 0x60;
-/// `ACC_P` of <i386/seg.h>: the segment-present bit.
+/// The segment-present bit.
 pub(crate) const ACC_P: u8 = 0x80;
 
-/// `SEL_LDT` of <i386/seg.h>: the local selector bit.
+/// The local selector bit.
 pub(crate) const SEL_LDT: c_int = 0x04;
-/// `SEL_PL` of <i386/seg.h>: the privilege-level mask.
+/// The privilege-level mask.
 pub(crate) const SEL_PL: c_int = 0x03;
-/// `SEL_PL_U` of <i386/seg.h>: the user privilege level.
+/// The user privilege level.
 pub(crate) const SEL_PL_U: c_int = 0x03;
 
-/// `KERNEL_CS` of <i386/gdt.h>.
+/// The kernel code selector.
 pub(crate) const KERNEL_CS: c_int = 0x08;
-/// `KERNEL_DS` of <i386/gdt.h>.
+/// The kernel data selector.
 pub(crate) const KERNEL_DS: c_int = 0x10;
-/// `KERNEL_LDT` of <i386/gdt.h>.
+/// The selector of the kernel's LDT.
 pub(crate) const KERNEL_LDT: c_int = 0x18;
-/// `KERNEL_TSS` of <i386/gdt.h>; the 64-bit TSS descriptor takes two entries.
+/// The selector of the kernel TSS; the 64-bit TSS descriptor takes two
+/// entries.
 pub(crate) const KERNEL_TSS: c_int = 0x40;
-/// `LINEAR_DS` of <i386/gdt.h>.
+/// The linear data selector.
 pub(crate) const LINEAR_DS: c_int = 0x38;
-/// `USER_GDT` of <i386/gdt.h>: the per-thread GDT entries.
+/// The first of the per-thread GDT entries.
 pub(crate) const USER_GDT: c_int = 0x48;
-/// `USER_GDT_SLOTS` of <i386/gdt.h>.
+/// The number of per-thread GDT entries.
 pub(crate) const USER_GDT_SLOTS: usize = 2;
 
-/// `USER_SCALL` of <i386/ldt.h>.
+/// The user system-call gate selector.
 pub(crate) const USER_SCALL: c_int = 0x07;
-/// `USER_CS` of <i386/ldt.h>.
+/// The user code selector.
 pub(crate) const USER_CS: c_int = 0x1f;
-/// `USER_DS` of <i386/ldt.h>.
+/// The user data selector.
 pub(crate) const USER_DS: c_int = 0x17;
-/// `LDTSZ` of <i386/ldt.h>.
+/// The number of LDT descriptors.
 pub(crate) const LDTSZ: usize = 4;
 
-/// `struct real_descriptor64` of <i386/seg.h>: the two-word descriptor plus
-/// the extension an `x86_64` system descriptor carries.
+/// The two-word descriptor plus the extension an `x86_64` system descriptor
+/// carries.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -131,8 +130,7 @@ const _: () = {
     assert!(offset_of!(RealDescriptor64, reserved) == 12);
 };
 
-/// `struct pseudo_descriptor` of <i386/seg.h>: the operand `LGDT` and `LIDT`
-/// read.  The C's trailing `pad` is not part of that operand.
+/// The operand LGDT and LIDT read.
 #[repr(C, packed)]
 #[allow(missing_docs)]
 pub(crate) struct PseudoDescriptor {
@@ -148,14 +146,14 @@ const _: () = {
     assert!(offset_of!(PseudoDescriptor, linear_base) == 2);
 };
 
-/// `sel_idx()` of <i386/seg.h>.
+/// The descriptor index of `selector`.
 pub(crate) const fn sel_idx(selector: c_int) -> usize {
     // Every caller passes a segment constant or a hardware selector, so the
     // arithmetic shift is never negative.
     (selector >> 3) as usize
 }
 
-/// `fill_descriptor()` of <i386/seg.h>.
+/// Fills `desc` with a base, a limit, an access byte and size bits.
 pub(crate) fn fill_descriptor(
     desc: &mut RealDescriptor,
     base: VmOffset,
@@ -182,7 +180,8 @@ pub(crate) fn fill_descriptor(
         | (base_high << 24);
 }
 
-/// `fill_descriptor64()` of <i386/seg.h>.
+/// Fills the 16-byte system descriptor `desc` with a base, a limit, an access
+/// byte and size bits.
 pub(crate) fn fill_descriptor64(
     desc: &mut RealDescriptor64,
     base: VmOffset,
@@ -211,7 +210,8 @@ pub(crate) fn fill_descriptor64(
     desc.reserved = 0;
 }
 
-/// `fill_gate()` of <i386/seg.h>.
+/// Fills `gate` with an entry `offset`, a selector, an access byte and a word
+/// count.
 pub(crate) fn fill_gate(
     gate: &mut RealGate,
     offset: VmOffset,
@@ -229,7 +229,7 @@ pub(crate) fn fill_gate(
     gate.reserved = 0;
 }
 
-/// `_fill_gdt_descriptor()` of <i386/gdt.h>.
+/// Fills the descriptor `segment` of the GDT at `gdt`.
 ///
 /// # Safety
 ///
@@ -246,7 +246,7 @@ pub(crate) unsafe fn fill_gdt_descriptor(
     fill_descriptor(desc, base, limit, access, sizebits);
 }
 
-/// `_fill_gdt_sys_descriptor()` of <i386/gdt.h>.
+/// Fills the system descriptor `segment` of the GDT at `gdt`.
 ///
 /// # Safety
 ///
@@ -267,7 +267,7 @@ pub(crate) unsafe fn fill_gdt_sys_descriptor(
     fill_descriptor64(desc, base, limit as u32, access, sizebits);
 }
 
-/// `fill_ldt_descriptor()` of <i386/ldt.h>.
+/// Fills the descriptor `selector` of the LDT at `ldt`.
 ///
 /// # Safety
 ///
@@ -284,7 +284,7 @@ pub(crate) unsafe fn fill_ldt_descriptor(
     fill_descriptor(desc, base, limit, access, sizebits);
 }
 
-/// `fill_idt_gate()` of <i386/i386at/idt-gen.h>.
+/// Fills the gate `int_num` of the IDT at `idt`.
 ///
 /// # Safety
 ///
@@ -301,7 +301,7 @@ pub(crate) unsafe fn fill_idt_gate(
     fill_gate(gate, entry, selector as c_ushort, access, dword_count);
 }
 
-/// `lgdt()` of <i386/seg.h>.
+/// Loads the GDT `pdesc` describes.
 pub(crate) fn lgdt(pdesc: &PseudoDescriptor) {
     // SAFETY: `lgdt` reads the operand at CPL0; the reference guarantees the
     // record is live for the load.
@@ -310,7 +310,7 @@ pub(crate) fn lgdt(pdesc: &PseudoDescriptor) {
     };
 }
 
-/// `lidt()` of <i386/seg.h>.
+/// Loads the IDT `pdesc` describes.
 pub(crate) fn lidt(pdesc: &PseudoDescriptor) {
     // SAFETY: `lidt` reads the operand at CPL0; the reference guarantees the
     // record is live for the load.
@@ -319,7 +319,7 @@ pub(crate) fn lidt(pdesc: &PseudoDescriptor) {
     };
 }
 
-/// `lldt()` of <i386/seg.h>.
+/// Loads the LDT `selector` names.
 pub(crate) fn lldt(selector: c_ushort) {
     // SAFETY: `lldt` loads the LDT register with a selector the kernel built
     // in its GDT.
@@ -328,7 +328,7 @@ pub(crate) fn lldt(selector: c_ushort) {
     };
 }
 
-/// `ltr()` of <i386/tss.h>.
+/// Loads the task register with `selector`.
 pub(crate) fn ltr(selector: c_ushort) {
     // SAFETY: `ltr` loads the task register with a selector the kernel built
     // in its GDT.

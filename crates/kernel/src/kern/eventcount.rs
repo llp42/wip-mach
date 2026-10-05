@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Eventcounters, which `kern/eventcount.c` used to define for
-//! `kern/eventcount.h`.
+//! Eventcounters.
 
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
@@ -21,10 +20,10 @@ use core::ffi::{c_int, c_uint};
 use core::mem::offset_of;
 use core::ptr::{self, NonNull};
 
-/// `MAX_EVCS` in kern/eventcount.c: the eventcounter table's length.
+/// The eventcounter table's length.
 const MAX_EVCS: usize = 10;
 
-/// `struct evc` of <kern/eventcount.h>: one eventcounter.
+/// One eventcounter.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct EventCounter {
@@ -48,7 +47,7 @@ const _: () = {
     assert!(offset_of!(EventCounter, lock) == 32);
 };
 
-/// `all_eventcounters[MAX_EVCS]` of kern/eventcount.c.
+/// The registered eventcounters, by id.
 static ALL_EVENTCOUNTERS: SyncCell<[*mut EventCounter; MAX_EVCS]> =
     SyncCell(UnsafeCell::new([ptr::null_mut(); MAX_EVCS]));
 
@@ -77,8 +76,7 @@ fn counter(ev_id: c_uint) -> Option<NonNull<EventCounter>> {
     Some(ev)
 }
 
-/// `evc_continue()` of kern/eventcount.c: give the blocked waiter the stack
-/// back with success as the syscall answer.
+/// Gives the blocked waiter the stack back with success as the syscall answer.
 unsafe extern "C" fn evc_continue() {
     // SAFETY: `thread_syscall_return()` never returns.
     unsafe {
@@ -86,7 +84,7 @@ unsafe extern "C" fn evc_continue() {
     }
 }
 
-/// `evc_notify_abort()` of kern/eventcount.c: let go of a dying waiter.
+/// Lets go of a dying waiter.
 ///
 /// # Safety
 ///
@@ -116,7 +114,7 @@ pub(crate) unsafe fn notify_abort(thread: *mut Thread) {
     }
 }
 
-/// `evc_wait()` of kern/eventcount.c.
+/// Waits for the eventcounter `ev_id` to count, consuming one count.
 pub(crate) fn wait(ev_id: c_uint) -> Result<(), Error> {
     let Some(ev) = counter(ev_id) else {
         return Err(Error::InvalidArgument);
@@ -150,7 +148,7 @@ pub(crate) fn wait(ev_id: c_uint) -> Result<(), Error> {
     }
 }
 
-/// `evc_wait_clear()` of kern/eventcount.c: clear the count before blocking.
+/// Clears the count before blocking.
 pub(crate) fn wait_clear(ev_id: c_uint) -> Result<(), Error> {
     let Some(ev) = counter(ev_id) else {
         return Err(Error::InvalidArgument);
@@ -177,7 +175,7 @@ pub(crate) fn wait_clear(ev_id: c_uint) -> Result<(), Error> {
     }
 }
 
-/// `evc_wait()` of kern/eventcount.c, the trap <`mach/syscall_sw.h`> declares.
+/// The `evc_wait` trap entry.
 ///
 /// # Safety
 ///
@@ -187,8 +185,7 @@ pub(crate) unsafe extern "C" fn evc_wait(ev_id: c_uint) -> c_int {
     kern_return(wait(ev_id))
 }
 
-/// `evc_wait_clear()` of kern/eventcount.c, the trap <`mach/syscall_sw.h`>
-/// declares.
+/// The `evc_wait_clear` trap entry.
 ///
 /// # Safety
 ///

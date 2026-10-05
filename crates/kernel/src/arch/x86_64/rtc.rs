@@ -4,8 +4,7 @@
 //   Copyright 1988, 1989 by Intel Corporation, Santa Clara, California.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The CMOS clock, which `i386/i386at/rtc.c` used to define and
-//! `i386/i386at/rtc.h` declares.
+//! The CMOS clock.
 
 use crate::arch::x86_64::pio::Port;
 use crate::arch::x86_64::spl;
@@ -13,13 +12,12 @@ use crate::kern::console::kprint;
 use core::mem::{align_of, offset_of, size_of};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// The first year the two-digit year field can name, `CENTURY_START` in
-/// `rtc.c`.
+/// The first year the two-digit year field can name.
 const CENTURY_START: u32 = 1970;
 
-/// The register select port, `RTC_ADDR` of <i386at/rtc.h>.
+/// The register select port.
 const RTC_ADDR: Port = Port::new(0x70);
-/// The data port, `RTC_DATA` of <i386at/rtc.h>.
+/// The data port.
 const RTC_DATA: Port = Port::new(0x71);
 
 /// Register A: the time base and update rate, `RTC_A`.
@@ -40,12 +38,12 @@ const RTC_SET: u8 = 0x80;
 const RTC_HM: u8 = 0x02;
 /// `RTC_VRT`: RAM and time are valid, in register D.
 const RTC_VRT: u8 = 0x80;
-/// `RTC_NREG`: how many registers `load_rtc` reads.
+/// How many registers [`RtcSt::load`] reads.
 const RTC_NREG: u8 = 0x0e;
-/// `RTC_NREGP`: how many registers `save_rtc` writes.
+/// How many registers [`RtcSt::save`] writes.
 const RTC_NREGP: u8 = 0x0a;
 
-/// The month lengths, `month` in `rtc.c`, with February at 28.
+/// The month lengths, with February at 28.
 const MONTH: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /// Why the clock cannot supply a time.
@@ -55,10 +53,10 @@ pub(crate) enum RtcError {
     NotValid,
 }
 
-/// `struct rtc_st` of <i386at/rtc.h>: the fourteen CMOS registers in order.
+/// The fourteen CMOS registers in order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-// The field names are the C `struct rtc_st`'s `rtc_*` members.
+// The field names keep their `rtc_` prefix.
 #[allow(clippy::struct_field_names)]
 #[allow(missing_docs)]
 struct RtcSt {
@@ -99,8 +97,7 @@ const _: () = assert!(offset_of!(RtcSt, rtc_statusc) == 12);
 const _: () = assert!(offset_of!(RtcSt, rtc_statusd) == 13);
 
 impl RtcSt {
-    /// `load_rtc` of <i386at/rtc.h>: read registers 0 through `RTC_NREG - 1`
-    /// into the fields.
+    /// Reads registers 0 through `RTC_NREG - 1` into the fields.
     fn load(&mut self) {
         let registers = [
             &mut self.rtc_sec,
@@ -124,8 +121,7 @@ impl RtcSt {
         }
     }
 
-    /// `save_rtc` of <i386at/rtc.h>: write the time and alarm fields back,
-    /// leaving the status bytes alone.
+    /// Writes the time and alarm fields back, leaving the status bytes alone.
     fn save(&self) {
         let registers = [
             &self.rtc_sec,
@@ -146,10 +142,10 @@ impl RtcSt {
     }
 }
 
-/// Whether [`rtcinit()`] has run, the C's `first_rtcopen_ever`.
+/// Whether [`rtcinit()`] has run.
 static RTC_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Program registers A and B: `rtcinit()` of `rtc.c`.
+/// Programs registers A and B.
 fn rtcinit() {
     RTC_ADDR.write_u8(RTC_A);
     RTC_DATA.write_u8(RTC_DIV2 | RTC_RATE6);
@@ -157,15 +153,14 @@ fn rtcinit() {
     RTC_DATA.write_u8(RTC_HM);
 }
 
-/// Run [`rtcinit()`] on the first call ever, the C's `first_rtcopen_ever`
-/// check.
+/// Runs [`rtcinit()`] on the first call ever.
 fn rtcinit_once() {
     if !RTC_INITIALIZED.swap(true, Ordering::Relaxed) {
         rtcinit();
     }
 }
 
-/// Read the register block: `rtcget()` of `rtc.c`.
+/// Reads the register block.
 fn rtcget() -> Result<RtcSt, RtcError> {
     rtcinit_once();
     RTC_ADDR.write_u8(RTC_D);
@@ -181,7 +176,7 @@ fn rtcget() -> Result<RtcSt, RtcError> {
     Ok(st)
 }
 
-/// Program the time registers back: `rtcput()` of `rtc.c`.
+/// Programs the time registers back.
 fn rtcput(st: &RtcSt) {
     rtcinit_once();
     RTC_ADDR.write_u8(RTC_B);
@@ -193,21 +188,19 @@ fn rtcput(st: &RtcSt) {
     RTC_DATA.write_u8(saved & !RTC_SET);
 }
 
-/// The decimal value of the binary-coded-decimal byte `byte`: `hexdectodec()`
-/// of `rtc.c`.
+/// The decimal value of the binary-coded-decimal byte `byte`.
 fn hexdectodec(byte: u8) -> u32 {
     u32::from((byte >> 4) & 0x0F) * 10 + u32::from(byte & 0x0F)
 }
 
-/// The binary-coded-decimal byte for the two decimal digits of `value`:
-/// `dectohexdec()` of `rtc.c`.
+/// The binary-coded-decimal byte for the two decimal digits of `value`.
 const fn dectohexdec(value: u64) -> u8 {
     // In contract `value` is below 100, so the two nibbles are its two digits
     // and the C's `char` conversion loses nothing.
     ((((value / 10) << 4) & 0xF0) | ((value % 10) & 0x0F)) as u8
 }
 
-/// The number of days in `year`: `yeartoday()` of `rtc.c`.
+/// The number of days in `year`.
 const fn yeartoday(year: u32) -> u32 {
     if !year.is_multiple_of(4) {
         return 365;
@@ -232,8 +225,8 @@ const fn month_lengths(bissextile: bool) -> [u8; 12] {
 
 /// Read the wall clock.
 pub(crate) fn read_todc() -> Result<u64, RtcError> {
-    // SAFETY: `splclock()` is the real asm function <i386/spl.h> declares, and
-    // the value it returns is only handed back to `splx()`.
+    // SAFETY: raising to `splclock` has no precondition, and the value it
+    // returns is only handed back to `splx()`.
     let ospl = unsafe { spl::splclock() };
     let st = match rtcget() {
         Ok(st) => st,
@@ -295,8 +288,8 @@ pub(crate) fn read_todc() -> Result<u64, RtcError> {
 
 /// Program the wall clock with `seconds` since the Unix epoch.
 pub(crate) fn write_todc(seconds: i64) -> Result<(), RtcError> {
-    // SAFETY: `splclock()` is the real asm function <i386/spl.h> declares, and
-    // the value it returns is only handed back to `splx()`.
+    // SAFETY: raising to `splclock` has no precondition, and the value it
+    // returns is only handed back to `splx()`.
     let ospl = unsafe { spl::splclock() };
     let mut st = match rtcget() {
         Ok(st) => st,
@@ -309,9 +302,8 @@ pub(crate) fn write_todc(seconds: i64) -> Result<(), RtcError> {
     // SAFETY: `ospl` is the level `splclock()` returned.
     unsafe { spl::splx(ospl) };
 
-    // `time_t` is `unsigned long long`, and the C assigned the int64 wall
-    // clock to it; the clock is a post-epoch count, so the sign-extending cast
-    // is that conversion.
+    // The clock is a post-epoch count, so the sign-extending cast keeps its
+    // value.
     let seconds = seconds as u64;
 
     let mut n = seconds % (3600 * 24);

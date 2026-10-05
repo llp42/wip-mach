@@ -3,22 +3,22 @@
 //   Copyright (c) 1991,1990,1989,1988,1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The time records of `include/mach/time_value.h`.
+//! The time records of the Mach interface: seconds with microseconds or
+//! nanoseconds, and the clock page the user side maps.
 
 use core::ffi::{c_int, c_long};
 use core::mem::offset_of;
 use core::time::Duration;
 
-/// `TIME_NANOS_MAX` in <`mach/time_value.h>`: one second in nanoseconds, the
-/// carry bound of the `time_value64` macros.
+/// One second in nanoseconds, the carry bound of the `time_value64` macros.
 pub const TIME_NANOS_MAX: i64 = 1_000_000_000;
 
-/// `MACH_ADJTIME_NSECS_OMIT` in <`mach/time_value.h>`: the nanoseconds component
-/// that asks `host_adjust_time64()` to report the outstanding adjustment
-/// without changing it.
+/// The nanoseconds component that asks `host_adjust_time64()` to report the
+/// outstanding adjustment without changing it.
 pub const MACH_ADJTIME_NSECS_OMIT: i64 = TIME_NANOS_MAX;
 
-/// `struct rpc_time_value` of <`mach/time_value.h`> as the kernel compiles it.
+/// `struct rpc_time_value`: the time value RPCs carry, as the kernel compiles
+/// it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -27,8 +27,8 @@ pub struct RpcTimeValue {
     pub microseconds: c_int,
 }
 
-/// `struct time_value` of <`mach/time_value.h>`: the legacy seconds/microseconds
-/// record the kernel interfaces use.
+/// `struct time_value`: the legacy seconds/microseconds record the kernel
+/// interfaces use.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -37,8 +37,7 @@ pub struct TimeValue {
     pub microseconds: c_int,
 }
 
-/// `struct time_value64` of <`mach/time_value.h>`: 64-bit seconds and
-/// nanoseconds.
+/// `struct time_value64`: 64-bit seconds and nanoseconds.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -48,8 +47,7 @@ pub struct TimeValue64 {
 }
 
 impl TimeValue64 {
-    /// The `time_value64_add_nanos()` macro of <`mach/time_value.h>`: add
-    /// `nanos` and carry one whole second.
+    /// Adds `nanos`, carrying one whole second.
     #[must_use]
     pub const fn add_nanos(self, nanos: i64) -> Self {
         let nanoseconds = self.nanoseconds.wrapping_add(nanos);
@@ -66,8 +64,7 @@ impl TimeValue64 {
         }
     }
 
-    /// The `time_value64_add()` macro of <`mach/time_value.h>`: add the whole
-    /// seconds, then the nanoseconds with their carry.
+    /// Adds the whole seconds, then the nanoseconds with their carry.
     #[must_use]
     pub const fn add(self, addend: Self) -> Self {
         Self {
@@ -77,8 +74,8 @@ impl TimeValue64 {
         .add_nanos(addend.nanoseconds)
     }
 
-    /// The `time_value64_sub()` macro of <`mach/time_value.h>`: subtract
-    /// `subtrahend`, borrowing one second when the nanoseconds go negative.
+    /// Subtracts `subtrahend`, borrowing one second when the nanoseconds go
+    /// negative.
     #[must_use]
     pub const fn sub(self, subtrahend: Self) -> Self {
         let nanoseconds =
@@ -125,8 +122,9 @@ impl TimeValue64 {
     }
 }
 
-/// `mapped_time_value_t` of <`mach/time_value.h>`: the clock page the user side
-/// maps, read with the double-check idiom the header documents.
+/// `mapped_time_value_t`: the clock page the user side maps, read with a
+/// double check: each `check_*` copy is written before its value and read
+/// after it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MappedTimeValue {
@@ -146,7 +144,7 @@ pub struct MappedTimeValue {
     pub check_upseconds64: i64,
 }
 
-/// The `convert_time_value_to_user()` inline of <`mach/time_value.h`>.
+/// Converts the value to the form RPCs carry.
 impl From<TimeValue> for RpcTimeValue {
     fn from(value: TimeValue) -> Self {
         Self {
@@ -156,7 +154,7 @@ impl From<TimeValue> for RpcTimeValue {
     }
 }
 
-/// The `convert_time_value_from_user()` inline of <`mach/time_value.h`>.
+/// Converts the value from the form RPCs carry.
 impl From<RpcTimeValue> for TimeValue {
     fn from(value: RpcTimeValue) -> Self {
         Self {
@@ -166,7 +164,7 @@ impl From<RpcTimeValue> for TimeValue {
     }
 }
 
-/// The `TIME_VALUE_TO_TIME_VALUE64()` macro of <`mach/time_value.h`>.
+/// Widens the microseconds to nanoseconds.
 impl From<TimeValue> for TimeValue64 {
     #[expect(clippy::useless_conversion)]
     fn from(value: TimeValue) -> Self {
@@ -177,7 +175,7 @@ impl From<TimeValue> for TimeValue64 {
     }
 }
 
-/// The `TIME_VALUE64_TO_TIME_VALUE()` macro of <`mach/time_value.h`>.
+/// Narrows the nanoseconds to microseconds, truncating.
 impl From<TimeValue64> for TimeValue {
     fn from(value: TimeValue64) -> Self {
         Self {

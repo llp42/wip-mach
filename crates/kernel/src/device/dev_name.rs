@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The device-name lookup of `device/dev_name.c` and the AT device tables of
-//! `i386/i386at/conf.c`, declared in <`device/dev_hdr.h`> and <device/conf.h>.
+//! The device-name lookup and the machine's device tables.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::com::{
@@ -48,8 +47,7 @@ use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::slice;
 
-/// `struct dev_indirect` of <device/conf.h>: the operation vector and unit one
-/// indirect name stands for.
+/// The operation vector and unit one indirect name stands for.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct DevIndirect {
@@ -66,13 +64,13 @@ const _: () = {
     assert!(core::mem::offset_of!(DevIndirect, d_unit) == 16);
 };
 
-/// The entries of `dev_name_list[]` of `i386/i386at/conf.c`.
+/// The number of entries in [`DEV_NAME_LIST`].
 const DEV_NAME_COUNT: usize = 10;
 
-/// The entries of `dev_indirect_list[]` of `i386/i386at/conf.c`.
+/// The number of entries in [`DEV_INDIRECT_LIST`].
 const DEV_INDIRECT_COUNT: usize = 1;
 
-/// `nulldev_reset()` in C.
+/// The reset of a device that needs none: succeeds.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the device switch entry has this signature"
@@ -81,7 +79,7 @@ pub(crate) const fn nulldev_reset(_dev: DevT) -> Result<(), DeviceError> {
     Ok(())
 }
 
-/// `nulldev_open()` in C.
+/// The open of a device that needs none: succeeds.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the device switch entry has this signature"
@@ -94,10 +92,10 @@ pub(crate) const fn nulldev_open(
     Ok(DeviceSuccess::Success)
 }
 
-/// `nulldev_close()` in C.
+/// The close of a device that needs none.
 pub(crate) const fn nulldev_close(_dev: DevT, _flags: c_int) {}
 
-/// `nulldev_read()` in C.
+/// The read of a device with no data: succeeds.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the device switch entry has this signature"
@@ -106,7 +104,7 @@ pub(crate) const fn nulldev_read(_dev: DevT, _ior: *mut IoReq) -> IoResult {
     Ok(DeviceSuccess::Success)
 }
 
-/// `nulldev_write()` in C.
+/// The write of a device that drops data: succeeds.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the device switch entry has this signature"
@@ -115,7 +113,7 @@ pub(crate) const fn nulldev_write(_dev: DevT, _ior: *mut IoReq) -> IoResult {
     Ok(DeviceSuccess::Success)
 }
 
-/// `nulldev_getstat()` in C.
+/// The status read of a device with no status: succeeds.
 pub(crate) const fn nulldev_getstat(
     _dev: DevT,
     _flavor: c_uint,
@@ -125,7 +123,7 @@ pub(crate) const fn nulldev_getstat(
     Err(DeviceError::InvalidOperation)
 }
 
-/// `nulldev_setstat()` in C.
+/// The status write of a device with no status: succeeds.
 pub(crate) const fn nulldev_setstat(
     _dev: DevT,
     _flavor: c_uint,
@@ -135,12 +133,12 @@ pub(crate) const fn nulldev_setstat(
     Err(DeviceError::InvalidOperation)
 }
 
-/// `nulldev_portdeath()` in C.
+/// The port-death hook of a device that keeps no ports: claims nothing.
 pub(crate) const fn nulldev_portdeath(_dev: DevT, _port: VmOffset) -> bool {
     false
 }
 
-/// `nodev_async_in()` in C.
+/// The asynchronous input of a device without it: fails.
 pub(crate) const fn nodev_async_in(
     _dev: DevT,
     _port: *mut c_void,
@@ -151,7 +149,7 @@ pub(crate) const fn nodev_async_in(
     Err(DeviceError::InvalidOperation)
 }
 
-/// `nodev_info()` in C.
+/// The information call of a device without it: fails.
 pub(crate) const fn nodev_info(
     _dev: DevT,
     _a: c_int,
@@ -160,7 +158,7 @@ pub(crate) const fn nodev_info(
     Err(DeviceError::InvalidOperation)
 }
 
-/// `nomap()` in C.
+/// The mapping of a device that cannot be mapped: fails.
 pub(crate) const fn nomap(
     _dev: DevT,
     _off: VmOffset,
@@ -169,9 +167,8 @@ pub(crate) const fn nomap(
     VmOffset::MAX
 }
 
-/// `dev_name_list[]` of `i386/i386at/conf.c`: the major-device table
-/// [`lookup`] searches.  Slot 0 is the console placeholder `cninit()` fills
-/// through [`set_indirection`].
+/// The major-device table [`lookup`] searches.  Slot 0 is the console
+/// placeholder the console init fills through [`set_indirection`].
 static DEV_NAME_LIST: SyncCell<[DevOps; DEV_NAME_COUNT]> =
     SyncCell(UnsafeCell::new([
         DevOps {
@@ -326,9 +323,8 @@ static DEV_NAME_LIST: SyncCell<[DevOps; DEV_NAME_COUNT]> =
         },
     ]));
 
-/// `dev_indirect_list[]` of `i386/i386at/conf.c`: the indirect-device table
-/// [`lookup`] falls back to.  `cninit()` rewrites the console entry's
-/// operations through [`set_indirection`].
+/// The indirect-device table [`lookup`] falls back to.  The console init
+/// rewrites the console entry's operations through [`set_indirection`].
 static DEV_INDIRECT_LIST: SyncCell<[DevIndirect; DEV_INDIRECT_COUNT]> =
     SyncCell(UnsafeCell::new([DevIndirect {
         d_name: c"console".as_ptr().cast_mut(),
@@ -341,8 +337,7 @@ const fn is_digit(c: c_char) -> bool {
     b'0' as c_char <= c && c <= b'9' as c_char
 }
 
-/// `name_equal()` of <`device/dev_hdr.h>`: whether `target` begins with the
-/// `len` bytes at `src` and ends there.
+/// Whether `target` begins with the `len` bytes at `src` and ends there.
 ///
 /// # Safety
 ///
@@ -374,7 +369,7 @@ pub(crate) unsafe fn name_equal(
     (unsafe { *target.add(len) }) == 0
 }
 
-/// The unit arithmetic `dev_name_lookup()` applies once a name matched.
+/// The unit number of a matched name, with its sub-device letter folded in.
 ///
 /// # Safety
 ///
@@ -415,7 +410,7 @@ unsafe fn subdev_unit(
     unit
 }
 
-/// `dev_name_lookup()` of `device/dev_name.c`.
+/// The operations and device number `name` names, or `None`.
 ///
 /// # Safety
 ///
@@ -485,7 +480,7 @@ pub(crate) unsafe fn lookup(
     None
 }
 
-/// `dev_set_indirection()` of `device/dev_name.c`.
+/// Points the indirect device `name` at `ops` and `unit`.
 ///
 /// # Safety
 ///

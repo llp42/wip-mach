@@ -3,9 +3,8 @@
 //   Copyright (c) 1993,1992,1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The debug register interface, which `i386/i386/db_interface.c` used to
-//! define and `i386/i386/db_interface.h` declares.
-//!
+//! The debug-register interface: each thread's breakpoints, loaded when it
+//! runs.
 
 use crate::arch::types::VmOffset;
 use crate::arch::vm_param::VM_MAX_USER_ADDRESS;
@@ -16,13 +15,12 @@ use core::arch::asm;
 use core::ffi::c_ulong;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// `zero_dr` of `i386/i386/db_interface.c`: whether the current debug
-/// registers are zero.  The `Relaxed` ordering is enough because the value
-/// only skips redundant register writes and no other thread synchronizes on
-/// it.
+/// Whether the current debug registers are zero.  The `Relaxed` ordering is
+/// enough because the value only skips redundant register writes and no other
+/// thread synchronizes on it.
 static ZERO_DR: AtomicBool = AtomicBool::new(false);
 
-/// The C's `set_dr0()` of <`i386/proc_reg.h`>.
+/// Writes `%dr0`.
 fn set_dr0(value: c_ulong) {
     // SAFETY: a debug-register write is a CPL0 operation.
     unsafe {
@@ -30,7 +28,7 @@ fn set_dr0(value: c_ulong) {
     };
 }
 
-/// The C's `set_dr1()` of <`i386/proc_reg.h`>.
+/// Writes `%dr1`.
 fn set_dr1(value: c_ulong) {
     // SAFETY: a debug-register write is a CPL0 operation.
     unsafe {
@@ -38,7 +36,7 @@ fn set_dr1(value: c_ulong) {
     };
 }
 
-/// The C's `set_dr2()` of <`i386/proc_reg.h`>.
+/// Writes `%dr2`.
 fn set_dr2(value: c_ulong) {
     // SAFETY: a debug-register write is a CPL0 operation.
     unsafe {
@@ -46,7 +44,7 @@ fn set_dr2(value: c_ulong) {
     };
 }
 
-/// The C's `set_dr3()` of <`i386/proc_reg.h`>.
+/// Writes `%dr3`.
 fn set_dr3(value: c_ulong) {
     // SAFETY: a debug-register write is a CPL0 operation.
     unsafe {
@@ -54,7 +52,7 @@ fn set_dr3(value: c_ulong) {
     };
 }
 
-/// The C's `set_dr7()` of <`i386/proc_reg.h`>.
+/// Writes `%dr7`.
 fn set_dr7(value: c_ulong) {
     // SAFETY: a debug-register write is a CPL0 operation.
     unsafe {
@@ -62,7 +60,8 @@ fn set_dr7(value: c_ulong) {
     };
 }
 
-/// `db_load_context()` of <`i386/db_interface.h`>.
+/// Loads the debug registers of `pcb`'s thread, skipping the writes when they
+/// and the loaded ones are all zero.
 ///
 /// # Safety
 ///
@@ -82,7 +81,7 @@ pub(crate) unsafe fn load_context(pcb: *mut Pcb) {
     }
 }
 
-/// `db_get_debug_state()` of <`i386/db_interface.h`>.
+/// Reports the debug state of `pcb`'s thread into `state`.
 ///
 /// # Safety
 ///
@@ -94,7 +93,7 @@ pub(crate) unsafe fn get_debug_state(
     unsafe { *state = (*pcb).ims.ids };
 }
 
-/// `db_set_debug_state()` of <`i386/db_interface.h`>.
+/// Sets the debug state of `pcb`'s thread from `state`.
 ///
 /// # Safety
 ///

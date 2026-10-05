@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The external memory management interface, which `vm/memory_object.c` used
-//! to define and `vm/memory_object.h` declares.
+//! The external memory management interface.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
@@ -31,8 +30,7 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::{NonNull, addr_of_mut, null_mut};
 use core::sync::atomic::Ordering;
 
-/// `MEMORY_OBJECT_RETURN_*` of <`mach/memory_object.h>`: what a lock request
-/// asks the kernel to return.
+/// `MEMORY_OBJECT_RETURN_*`: what a lock request asks the kernel to return.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Return {
     /// `MEMORY_OBJECT_RETURN_NONE`.
@@ -55,8 +53,7 @@ impl Return {
     }
 }
 
-/// `MEMORY_OBJECT_COPY_*` of <`mach/memory_object.h>`: the strategies a memory
-/// manager may ask for.
+/// `MEMORY_OBJECT_COPY_*`: the copy strategies a memory manager may ask for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CopyStrategy {
     /// `MEMORY_OBJECT_COPY_NONE`.
@@ -93,8 +90,7 @@ impl CopyStrategy {
     }
 }
 
-/// `MEMORY_OBJECT_LOCK_RESULT_*` of `vm/memory_object.c`: what a page lock
-/// did.
+/// What a page lock did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LockResult {
     Done,
@@ -103,13 +99,13 @@ enum LockResult {
     MustReturn,
 }
 
-/// `VM_EXTERNAL_SMALL_SIZE` and `VM_EXTERNAL_LARGE_SIZE` of
-/// <`vm/vm_external.h`>.
+/// The existence-map sizes: a data-unavailable reply for more than
+/// `VM_EXTERNAL_LARGE_SIZE` bytes from offset 0 only gives the object an
+/// existence map of `VM_EXTERNAL_SMALL_SIZE`.
 const VM_EXTERNAL_SMALL_SIZE: VmSize = 128;
 const VM_EXTERNAL_LARGE_SIZE: VmSize = 8192;
 
-/// `DATA_WRITE_MAX` of `vm/memory_object.c`: how many holding pages one
-/// data-return message may carry.
+/// How many holding pages one data-return message may carry.
 const DATA_WRITE_MAX: usize = 32;
 
 /// One `memory_object_lock_request()` in Rust terms.
@@ -136,17 +132,17 @@ pub(crate) struct SupplyRequest {
     pub(crate) reply_to_type: c_uint,
 }
 
-/// `atop()` of <`vm/vm_page.h`>.
+/// The page number of `address`.
 const fn atop(address: VmOffset) -> usize {
     address >> PAGE_SHIFT
 }
 
-/// `panic()` of `vm/memory_object.c`.
+/// Halts the kernel with `message`, under the `func` tag.
 fn die(func: &'static str, message: &'static str) -> ! {
     kpanic!(func, "{}", message)
 }
 
-/// `VM_PAGE_FREE()` of <`vm/vm_page.h`>.
+/// Frees `page` under the page-queues lock.
 ///
 /// # Safety
 ///
@@ -160,7 +156,7 @@ unsafe fn page_free(page: *mut VmPage) {
     }
 }
 
-/// `PAGE_WAKEUP()` of <`vm/vm_page.h`>.
+/// Wakes anything waiting for `page`, when something is.
 ///
 /// # Safety
 ///
@@ -169,7 +165,7 @@ unsafe fn page_wakeup(page: *mut VmPage) {
     unsafe { vm_object::page_wakeup(page) };
 }
 
-/// `memory_object_lock_page()` in C: apply the lock request to one page.
+/// Applies the lock request to one page.
 ///
 /// # Safety
 ///
@@ -287,8 +283,8 @@ unsafe fn lock_page(
     LockResult::Done
 }
 
-/// One run of pages collected for a `memory_object_data_return()` message;
-/// the state the C's `PAGEOUT_PAGES` macro carried between iterations.
+/// One run of pages collected for a `memory_object_data_return()` message,
+/// carried between the iterations of a lock request.
 struct PageoutBatch {
     new_object: *mut VmObject,
     new_offset: VmOffset,
@@ -308,7 +304,8 @@ impl PageoutBatch {
         }
     }
 
-    /// `PAGEOUT_PAGES` of `vm/memory_object.c`.
+    /// Sends the collected run back to the memory manager and starts a new
+    /// one.
     ///
     /// # Safety
     ///
@@ -358,8 +355,8 @@ impl PageoutBatch {
     }
 }
 
-/// Flush the pending batch and block on a page the lock request must wait
-/// for, as the C's `PAGE_ASSERT_WAIT` arm did.
+/// Flushes the pending batch, or blocks on a page the lock request must wait
+/// for.
 ///
 /// # Safety
 ///
@@ -377,8 +374,8 @@ unsafe fn lock_page_block(
         return;
     }
 
-    // SAFETY: the page is live and the object lock is held, as
-    // `PAGE_ASSERT_WAIT` requires.
+    // SAFETY: the page is live and the object lock is held, as the wait
+    // requires.
     unsafe {
         (*page).set_wanted(true);
         assert_wait(NonNull::new(page.cast()), 0);
@@ -454,8 +451,7 @@ unsafe fn lock_pageout(
     unsafe { (*object).lock.lock() };
 }
 
-/// `memory_object_lock_request()` in C: apply a lock request to every page of
-/// the object's range.
+/// Applies a lock request to every page of the object's range.
 ///
 /// # Safety
 ///
@@ -694,16 +690,16 @@ unsafe fn supply_target(
         // SAFETY: the target page is live and the object lock is held.
         let absent_busy = unsafe { (*page).is_absent() && (*page).is_busy() };
         if absent_busy {
-            // SAFETY: the page is live; `VM_PAGE_FREE` takes the queue
-            // lock and keeps the object lock the caller holds.
+            // SAFETY: the page is live; `page_free` takes the queue lock and
+            // keeps the object lock the caller holds.
             unsafe { page_free(page) };
             return Some(true);
         }
 
         // SAFETY: the page is live and the object lock is held.
         if unsafe { (*page).is_busy() } {
-            // SAFETY: the page is live and the object lock is held, as
-            // `PAGE_ASSERT_WAIT` requires.
+            // SAFETY: the page is live and the object lock is held, as the
+            // wait requires.
             unsafe {
                 (*page).set_wanted(true);
                 assert_wait(NonNull::new(page.cast()), 0);
@@ -834,14 +830,13 @@ unsafe fn supply_continuation(
     false
 }
 
-/// `memory_object_data_supply()` in C: take the pages of a page-list copy
-/// into the object.
+/// Takes the pages of a page-list copy into the object.
 ///
 /// # Safety
 ///
-/// A non-null `object` must be a live object the call may deallocate;
-/// `vm_data_copy` must name a live page-list copy of `data_cnt` bytes;
-/// `reply_to` must be `IP_NULL` or a live port.
+/// A non-null `object` must be a live object the call may deallocate; the
+/// request's `data` must name a live page-list copy of `data_cnt` bytes, and
+/// its `reply_to` must be null or a live port.
 pub(crate) unsafe fn data_supply(
     object: *mut VmObject,
     request: &SupplyRequest,
@@ -1002,8 +997,7 @@ unsafe fn supply_finish(
     result
 }
 
-/// `memory_object_data_error()` in C: mark the waiting absent pages of a
-/// range as failed.
+/// Marks the waiting absent pages of a range as failed.
 ///
 /// # Safety
 ///
@@ -1061,8 +1055,7 @@ pub(crate) unsafe fn data_error(
     Ok(())
 }
 
-/// `memory_object_data_unavailable()` in C: clear the waiting absent pages of
-/// a range without providing data.
+/// Clears the waiting absent pages of a range without providing data.
 ///
 /// # Safety
 ///
@@ -1145,11 +1138,9 @@ pub(crate) unsafe fn data_unavailable(
 
 /// Types and functions for the default memory manager.
 ///
-/// `memory_manager_default` of `vm/memory_object.h` lives in an [`Rcu`]:
-/// the pageout path reads it for every page it considers, and only the
-/// default pager's `vm_set_default_memory_manager()` changes it, about once
-/// per boot. Readers take no lock; the C's `memory_manager_default_lock`
-/// is gone.
+/// The default manager's port lives in an [`Rcu`]: the pageout path reads it
+/// for every page it considers, and only `vm_set_default_memory_manager()`
+/// changes it, about once per boot. Readers take no lock.
 ///
 /// # Safety
 ///
@@ -1232,8 +1223,7 @@ pub(crate) mod default_manager {
         ptr::from_ref(&DEFAULT_MANAGER).cast_mut().cast()
     }
 
-    /// `vm_set_default_memory_manager()` in C: replace or fetch the default
-    /// memory manager's port.
+    /// Replaces or fetches the default memory manager's port.
     ///
     /// # Safety
     ///
@@ -1282,8 +1272,8 @@ pub(crate) mod default_manager {
         Ok(())
     }
 
-    /// `memory_manager_default_reference()` in C: a naked send right for the
-    /// default memory manager, waiting until one exists.
+    /// A naked send right for the default memory manager, waiting until one
+    /// exists.
     ///
     /// # Safety
     ///
@@ -1310,8 +1300,7 @@ pub(crate) mod default_manager {
         }
     }
 
-    /// `memory_manager_default_port()` in C: whether `port` receives for the
-    /// default memory manager.
+    /// Whether `port` receives for the default memory manager.
     ///
     /// # Safety
     ///
@@ -1329,13 +1318,12 @@ pub(crate) mod default_manager {
         }
     }
 
-    /// `IP_VALID(memory_manager_default)`: whether a default memory manager
-    /// has registered.
+    /// Whether a default memory manager has registered.
     pub fn is_set() -> bool {
         manager().is_some_and(|manager| manager.read().is_valid())
     }
 
-    /// `memory_manager_default_init()` in C.  Runs once, during boot.
+    /// Publishes an empty default manager.  Runs once, during boot.
     ///
     /// # Panics
     ///
@@ -1354,8 +1342,7 @@ pub(crate) mod default_manager {
     }
 }
 
-/// `memory_object_set_attributes_common()` in C: apply a manager's attribute
-/// change.
+/// Applies a manager's attribute change.
 ///
 /// # Safety
 ///
@@ -1393,8 +1380,7 @@ pub(crate) unsafe fn set_attributes(
     Ok(())
 }
 
-/// `memory_object_change_attributes()` in C: apply the change and acknowledge
-/// it.
+/// Applies the change and acknowledges it.
 ///
 /// # Safety
 ///
@@ -1436,7 +1422,7 @@ pub(crate) unsafe fn change_attributes(
     result
 }
 
-/// `memory_object_ready()` in C: apply the manager's ready attributes.
+/// Applies the manager's ready attributes.
 ///
 /// # Safety
 ///
@@ -1459,7 +1445,7 @@ pub(crate) unsafe fn ready(
     }
 }
 
-/// `memory_object_get_attributes()` in C: read the object's pager state.
+/// The object's pager state, as `memory_object_get_attributes()` reports it.
 pub(crate) struct Attributes {
     /// `object_ready`: whether the manager has set the attributes.
     pub ready: bool,
@@ -1469,7 +1455,7 @@ pub(crate) struct Attributes {
     pub copy_strategy: c_int,
 }
 
-/// `memory_object_get_attributes()` in C: read the object's pager state.
+/// Reads the object's pager state.
 ///
 /// # Safety
 ///

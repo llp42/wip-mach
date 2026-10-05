@@ -6,7 +6,7 @@
 //   Copyright 1988, 1989 by Intel Corporation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The keyboard/VGA console driver, which `i386/i386at/kd.c` defined.
+//! The keyboard/VGA console driver.
 
 pub mod console;
 pub mod display;
@@ -24,39 +24,38 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_short};
 use core::mem::{align_of, offset_of, size_of};
 
-/// `NUMKEYS` in <i386at/kd.h>.
+/// The number of scancodes the key map covers.
 pub(crate) const NUMKEYS: usize = 89;
-/// `NUMOUTPUT` in <i386at/kd.h>.
+/// The bytes one key map cell holds.
 pub(crate) const NUMOUTPUT: usize = 3;
-/// `WIDTH_KMAP` in <i386at/kd.h>: `NUMSTATES * NUMOUTPUT`.
+/// The bytes of a key map row: five modifier states of `NUMOUTPUT` bytes.
 pub(crate) const WIDTH_KMAP: usize = 15;
 
-/// `ONE_SPACE` in <i386at/kd.h>: bytes per displayed character.
+/// The bytes per displayed character.
 pub(crate) const ONE_SPACE: c_short = 2;
-/// `ONE_LINE` in <i386at/kd.h>: bytes per screen line.
+/// The bytes per screen line.
 pub(crate) const ONE_LINE: c_short = 160;
-/// `ONE_PAGE` in <i386at/kd.h>: bytes per screen.
+/// The bytes per screen.
 pub(crate) const ONE_PAGE: c_short = 4000;
-/// `BOTTOM_LINE` in <i386at/kd.h>: first byte of the last line.
+/// The first byte of the last line.
 pub(crate) const BOTTOM_LINE: c_short = 3840;
 
-/// `BEG_OF_LINE()` in <i386at/kd.h>.
+/// The offset of the start of the line holding `pos`.
 pub(crate) const fn beg_of_line(pos: c_short) -> c_short {
     pos - pos % ONE_LINE
 }
 
-/// `CURRENT_COLUMN()` in <i386at/kd.h>.
+/// The column of the screen offset `pos`.
 pub(crate) const fn current_column(pos: c_short) -> c_short {
     (pos % ONE_LINE) / ONE_SPACE
 }
 
-/// `CHARIDX()` in <i386at/kd.h>: state index to `key_map` column.
+/// The key map column of a modifier state index.
 pub(crate) const fn charidx(state_idx: c_int) -> usize {
     state_idx as usize * NUMOUTPUT
 }
 
-/// `K_MAXESC` in <i386at/kd.c>: the escape sequence bytes, terminator
-/// excluded.
+/// The escape sequence bytes, terminator excluded.
 pub(crate) const K_MAXESC: usize = 32;
 
 pub(crate) const K_TMR2: u16 = 0x42;
@@ -121,7 +120,7 @@ pub(crate) const CTRL_STATE: c_int = 2;
 pub(crate) const ALT_STATE: c_int = 3;
 pub(crate) const SHIFT_ALT: c_int = 4;
 
-/// `kb_mode` values from <device/input.h>.
+/// The keyboard modes: events or ASCII.
 pub(crate) const KB_EVENT: c_int = 1;
 pub(crate) const KB_ASCII: c_int = 2;
 
@@ -144,14 +143,14 @@ pub(crate) const C_LOW: u8 = 0x0f;
 pub(crate) const C_HIGH: u8 = 0x0e;
 pub(crate) const C_BITMAP_START: usize = 0xa0000;
 
-/// `CN_INTERNAL` of <device/cons.h>.
+/// The priority of the internal console.
 pub(crate) const CN_INTERNAL: c_short = 2;
 
-/// `color_table[]` in <i386at/kd.c>, the proper ANSI color order.
+/// The proper ANSI color order.
 pub(crate) const COLOR_TABLE: [u8; 16] =
     [0, 4, 2, 6, 1, 5, 3, 7, 8, 12, 10, 14, 9, 13, 11, 15];
 
-/// The `why_ack` enumeration of <i386at/kd.c>.
+/// Why the keyboard controller's acknowledgement is awaited.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ack {
     NotWaiting,
@@ -159,23 +158,23 @@ pub(crate) enum Ack {
     Data,
 }
 
-/// The `struct consdev` of <device/cons.h>, field for field.
+/// A console table entry.
 #[repr(C)]
-// The field names are the C `struct consdev`'s `cn_*` members.
+// The field names keep their `cn_` prefix.
 #[allow(clippy::struct_field_names)]
 #[allow(missing_docs)]
 pub struct ConsDev {
     pub(crate) cn_name: *mut core::ffi::c_char,
     /// # Safety
     ///
-    /// `device/cons.c`'s `cninit()` calls this once per table entry,
-    /// during the single-threaded boot before any console user runs, with
-    /// the entry's own address; the callee may write the entry's
+    /// [`cons::init`](crate::device::cons::init) calls this once per table
+    /// entry, during the single-threaded boot before any console user runs,
+    /// with the entry's own address; the callee may write the entry's
     /// `cn_pri`, `cn_dev`, and other fields.
     pub(crate) cn_probe: Option<unsafe fn(*mut Self)>,
     /// # Safety
     ///
-    /// `device/cons.c`'s `cninit()` calls this once, during the
+    /// [`cons::init`](crate::device::cons::init) calls this once, during the
     /// single-threaded boot, for the table entry its matching `cn_probe`
     /// chose.
     pub(crate) cn_init: Option<unsafe fn(*mut Self)>,
@@ -207,7 +206,7 @@ const _: () = {
     assert!(offset_of!(ConsDev, cn_pri) == 42);
 };
 
-/// `struct kbentry` of <i386at/kd.h>, the key remapping ioctl payload.
+/// The key remapping ioctl payload.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -302,7 +301,7 @@ impl Kd {
         }
     }
 
-    /// The ascii/event switch, `kb_mode` of <i386at/kd.h>.
+    /// The ascii/event switch.
     pub(crate) const fn kb_mode(&self) -> c_int {
         self.kb_mode
     }
@@ -346,8 +345,8 @@ pub(crate) fn set_kb_mode(mode: c_int) {
     kd().set_kb_mode(mode);
 }
 
-/// `kdinit()` in C; interrupts are assumed disabled, and the call is
-/// idempotent.
+/// Sets up the display and the keyboard; interrupts are assumed disabled, and
+/// the call is idempotent.
 pub(crate) fn kdinit() {
     if state().kd_initialized {
         return;
@@ -380,7 +379,7 @@ pub(crate) fn kdinit() {
     tty::ttychars_init();
 }
 
-/// `kdreboot()` in C.
+/// Resets the display and the keyboard controller, then resets the machine.
 ///
 /// # Safety
 ///
@@ -394,7 +393,7 @@ pub(crate) unsafe fn kdreboot() {
     unsafe { locore::cpu_shutdown() };
 }
 
-/// `kd_belloff()` in C: the timeout callback.
+/// Turns the bell off: the timeout callback.
 ///
 /// # Safety
 ///
@@ -405,7 +404,7 @@ pub(crate) unsafe fn kd_belloff(_param: *mut core::ffi::c_void) {
     state().kd_bellstate = false;
 }
 
-/// `kd_bellon()` in C.
+/// Turns the bell on.
 pub(crate) fn kd_bellon() {
     Port::new(K_TMRCTL)
         .write_u8(K_SELTMR2 | K_RDLDTWORD | K_TSQRWAVE | K_TBINARY);

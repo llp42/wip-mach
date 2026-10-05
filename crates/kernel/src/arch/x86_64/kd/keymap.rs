@@ -6,12 +6,11 @@
 //   Copyright 1988, 1989 by Intel Corporation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! `key_map[]` of <i386at/kd.h>, generated from the C table: scancode to
-//! character sequences for the five modifier states.
+//! The key map: scancode to character sequences for the five modifier states.
 
 use super::{NUMKEYS, WIDTH_KMAP};
 
-/// `key_map[NUMKEYS][WIDTH_KMAP]` in C.
+/// The table, one row per scancode.
 pub(crate) static mut KEY_MAP: [[u8; WIDTH_KMAP]; NUMKEYS] = [
     [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,

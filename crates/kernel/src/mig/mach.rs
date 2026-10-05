@@ -40,7 +40,8 @@ use core::mem::size_of;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
 
-/// `task_create()` of kern/task.c.
+/// Creates a child of `parent_task`, whose address space inherits from the
+/// parent's when `inherit_memory` is set and starts empty otherwise.
 ///
 /// # Safety
 ///
@@ -72,7 +73,7 @@ pub unsafe extern "C" fn task_create(
     }
 }
 
-/// `task_terminate()` of kern/task.c.
+/// Terminates `task` and its threads.
 ///
 /// # Safety
 ///
@@ -86,8 +87,8 @@ pub unsafe extern "C" fn task_terminate(task: *mut c_void) -> c_int {
     }
 }
 
-/// `task_get_emulation_vector()` of `kern/syscall_emulation.c`, the MIG
-/// `mach` server entry.
+/// Reports `task`'s emulation vector: the user entry points of its emulated
+/// system calls.
 ///
 /// # Safety
 ///
@@ -112,13 +113,12 @@ pub unsafe extern "C" fn task_get_emulation_vector(
     }
 }
 
-/// `task_set_emulation_vector()` of `kern/syscall_emulation.c`, the MIG
-/// `mach` server entry.
+/// Sets the entries of `task`'s emulation vector from `vector_start` on.
 ///
 /// # Safety
 ///
-/// `task` must be null or a live task, and `emulation_vector` a live
-/// `vm_map_copy_t` of `emulation_vector_count` entries or null.
+/// `task` must be null or a live task, and `emulation_vector` a live map copy
+/// of `emulation_vector_count` entries or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn task_set_emulation_vector(
     task: *mut Task,
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn task_set_emulation_vector(
     })
 }
 
-/// `task_threads()` of kern/task.c.
+/// Reports `task`'s threads as send rights.
 ///
 /// # Safety
 ///
@@ -178,7 +178,7 @@ impl TaskFlavor {
     const THREAD_TIMES_INFO: Self = Self(3);
 }
 
-/// `task_info()` of kern/task.c.
+/// Reports `task`'s information of `flavor`.
 ///
 /// # Safety
 ///
@@ -290,7 +290,7 @@ pub unsafe extern "C" fn task_info(
     0
 }
 
-/// `thread_terminate()` of kern/thread.c.
+/// Terminates `thread`.
 ///
 /// # Safety
 ///
@@ -304,7 +304,7 @@ pub unsafe extern "C" fn thread_terminate(thread: *mut Thread) -> c_int {
     }
 }
 
-/// `thread_get_state()` of kern/thread.c.
+/// Reports `thread`'s machine state of `flavor`.
 ///
 /// # Safety
 ///
@@ -326,7 +326,7 @@ pub unsafe extern "C" fn thread_get_state(
     }
 }
 
-/// `thread_set_state()` of kern/thread.c.
+/// Sets `thread`'s machine state of `flavor`.
 ///
 /// # Safety
 ///
@@ -362,7 +362,7 @@ impl ThreadFlavor {
     const SCHED_INFO: Self = Self(2);
 }
 
-/// `thread_info()` of kern/thread.c.
+/// Reports `thread`'s information of `flavor`.
 ///
 /// # Safety
 ///
@@ -442,7 +442,8 @@ pub unsafe extern "C" fn thread_info(
     0
 }
 
-/// `vm_allocate()` in C.
+/// Allocates `size` bytes of zero-filled memory in `map`, at `*addr` or
+/// anywhere when `anywhere` is set.
 ///
 /// # Safety
 ///
@@ -463,7 +464,7 @@ pub unsafe extern "C" fn vm_allocate(
     })
 }
 
-/// `vm_deallocate()` in C.
+/// Deallocates the range of `map` at `start`.
 ///
 /// # Safety
 ///
@@ -482,7 +483,8 @@ pub unsafe extern "C" fn vm_deallocate(
     })
 }
 
-/// `vm_protect()` in C.
+/// Sets the current protection, or the maximum when `set_maximum` is set, of
+/// the range of `map` at `start`.
 ///
 /// # Safety
 ///
@@ -509,7 +511,7 @@ pub unsafe extern "C" fn vm_protect(
     })
 }
 
-/// `vm_inherit()` in C.
+/// Sets the inheritance of the range of `map` at `start`.
 ///
 /// # Safety
 ///
@@ -529,7 +531,7 @@ pub unsafe extern "C" fn vm_inherit(
     })
 }
 
-/// `vm_read()` in C.
+/// Copies `size` bytes of `map` at `address` out of line.
 ///
 /// # Safety
 ///
@@ -560,7 +562,7 @@ pub unsafe extern "C" fn vm_read(
     }
 }
 
-/// `vm_write()` in C.
+/// Writes the out-of-line `data` into `map` at `address`.
 ///
 /// # Safety
 ///
@@ -580,7 +582,7 @@ pub unsafe extern "C" fn vm_write(
     kern_return(unsafe { vm_user::write(&mut *map.as_ptr(), address, copy) })
 }
 
-/// `vm_copy()` in C.
+/// Copies `size` bytes of `map` from `source_address` to `dest_address`.
 ///
 /// # Safety
 ///
@@ -600,7 +602,8 @@ pub unsafe extern "C" fn vm_copy(
     })
 }
 
-/// `vm_region()` in C.
+/// Reports the region of `map` at or after `*address`: its bounds,
+/// protections, inheritance, sharing and memory object.
 ///
 /// # Safety
 ///
@@ -645,7 +648,7 @@ pub unsafe extern "C" fn vm_region(
     }
 }
 
-/// `vm_statistics()` of `vm/vm_user.c`.
+/// Reports the virtual-memory statistics.
 ///
 /// # Safety
 ///
@@ -663,7 +666,8 @@ pub unsafe extern "C" fn vm_statistics(
     KERN_SUCCESS
 }
 
-/// `mach_ports_register()` of `kern/ipc_tt.c`.
+/// Registers the `ports_cnt` send rights at `memory` as `task`'s registered
+/// ports.
 ///
 /// # Safety
 ///
@@ -705,7 +709,7 @@ pub unsafe extern "C" fn mach_ports_register(
     }
 }
 
-/// `mach_ports_lookup()` of `kern/ipc_tt.c`.
+/// Reports `task`'s registered ports.
 ///
 /// # Safety
 ///
@@ -729,7 +733,8 @@ pub unsafe extern "C" fn mach_ports_lookup(
     }
 }
 
-/// `memory_object_data_unavailable()` in C.
+/// Tells the kernel the pager has no data for the range of `object`, which
+/// then reads as zeros.
 ///
 /// # Safety
 ///
@@ -745,7 +750,7 @@ pub unsafe extern "C" fn memory_object_data_unavailable(
     })
 }
 
-/// `memory_object_get_attributes()` in C.
+/// Reports `object`'s readiness, caching and copy strategy.
 ///
 /// # Safety
 ///
@@ -771,7 +776,8 @@ pub unsafe extern "C" fn memory_object_get_attributes(
     }
 }
 
-/// `vm_set_default_memory_manager()` in C.
+/// Sets the default memory manager from `*default_manager` unless it is null,
+/// and reports the previous one there.
 ///
 /// # Safety
 ///
@@ -789,7 +795,8 @@ pub unsafe extern "C" fn vm_set_default_memory_manager(
     }
 }
 
-/// `memory_object_lock_request()` in C.
+/// Cleans, flushes or locks the pages of `object` in the range, replying to
+/// `reply_to` when done.
 ///
 /// # Safety
 ///
@@ -822,7 +829,7 @@ pub unsafe extern "C" fn memory_object_lock_request(
     })
 }
 
-/// `task_suspend()` of kern/task.c.
+/// Suspends `task`, counting one more suspension.
 ///
 /// # Safety
 ///
@@ -835,7 +842,7 @@ pub unsafe extern "C" fn task_suspend(task: *mut c_void) -> c_int {
     }
 }
 
-/// `task_resume()` of kern/task.c.
+/// Drops one suspension of `task`, resuming its threads at zero.
 ///
 /// # Safety
 ///
@@ -848,7 +855,7 @@ pub unsafe extern "C" fn task_resume(task: *mut c_void) -> c_int {
     }
 }
 
-/// `task_get_special_port()` of `kern/ipc_tt.c`.
+/// Reports `task`'s special port `which`.
 ///
 /// # Safety
 ///
@@ -875,7 +882,7 @@ pub unsafe extern "C" fn task_get_special_port(
     }
 }
 
-/// `task_set_special_port()` of `kern/ipc_tt.c`.
+/// Sets `task`'s special port `which` to `port`.
 ///
 /// # Safety
 ///
@@ -898,7 +905,7 @@ pub unsafe extern "C" fn task_set_special_port(
     }
 }
 
-/// `thread_create()` of kern/thread.c.
+/// Creates a suspended thread in `parent_task`.
 ///
 /// # Safety
 ///
@@ -918,7 +925,7 @@ pub unsafe extern "C" fn thread_create(
     }
 }
 
-/// `thread_suspend()` of kern/thread.c.
+/// Suspends `thread`, counting one more suspension.
 ///
 /// # Safety
 ///
@@ -932,7 +939,7 @@ pub unsafe extern "C" fn thread_suspend(thread: *mut Thread) -> c_int {
     }
 }
 
-/// `thread_resume()` of kern/thread.c.
+/// Drops one suspension of `thread`, resuming it at zero.
 ///
 /// # Safety
 ///
@@ -945,7 +952,7 @@ pub unsafe extern "C" fn thread_resume(thread: *mut Thread) -> c_int {
     }
 }
 
-/// `thread_abort()` of kern/thread.c.
+/// Aborts `thread`'s system call or wait, so its state can be read or changed.
 ///
 /// # Safety
 ///
@@ -959,7 +966,7 @@ pub unsafe extern "C" fn thread_abort(thread: *mut Thread) -> c_int {
     }
 }
 
-/// `thread_get_special_port()` of `kern/ipc_tt.c`.
+/// Reports `thread`'s special port `which`.
 ///
 /// # Safety
 ///
@@ -986,7 +993,7 @@ pub unsafe extern "C" fn thread_get_special_port(
     }
 }
 
-/// `thread_set_special_port()` of `kern/ipc_tt.c`.
+/// Sets `thread`'s special port `which` to `port`.
 ///
 /// # Safety
 ///
@@ -1009,8 +1016,8 @@ pub unsafe extern "C" fn thread_set_special_port(
     }
 }
 
-/// `task_set_emulation()` of `kern/syscall_emulation.c`, the MIG `mach`
-/// server entry.
+/// Sets one entry of `task`'s emulation vector: system call `routine_number`
+/// goes to `routine_entry_pt`.
 ///
 /// # Safety
 ///
@@ -1033,7 +1040,7 @@ pub unsafe extern "C" fn task_set_emulation(
     })
 }
 
-/// `task_ras_control()` of kern/task.c.
+/// Fails: the kernel has no restartable atomic sequences.
 ///
 /// # Safety
 ///
@@ -1049,7 +1056,8 @@ pub unsafe extern "C" fn task_ras_control(
     c_int::from(Error::Failure)
 }
 
-/// `vm_map()` of `vm/vm_user.c`.
+/// Maps `memory_object` at `offset` into `target_map`, at `*address` or
+/// anywhere when `anywhere` is set, copying it when `copy` is set.
 ///
 /// # Safety
 ///
@@ -1092,7 +1100,8 @@ pub unsafe extern "C" fn vm_map(
     })
 }
 
-/// `memory_object_data_error()` in C.
+/// Tells the kernel the pager cannot supply the range of `object`; the error
+/// value is not kept.
 ///
 /// # Safety
 ///
@@ -1107,7 +1116,7 @@ pub unsafe extern "C" fn memory_object_data_error(
     kern_return(unsafe { memory_object::data_error(object, offset, size) })
 }
 
-/// `memory_object_destroy()` in C.
+/// Destroys `object`, as its pager asked.
 ///
 /// # Safety
 ///
@@ -1122,7 +1131,8 @@ pub unsafe extern "C" fn memory_object_destroy(
     KERN_SUCCESS
 }
 
-/// `memory_object_data_supply()` in C.
+/// Supplies the pager's `data` for the range of `object` at `offset`, locked
+/// against `lock_value`, replying to `reply_to` when asked.
 ///
 /// # Safety
 ///
@@ -1156,7 +1166,7 @@ pub unsafe extern "C" fn memory_object_data_supply(
     })
 }
 
-/// `memory_object_ready()` in C.
+/// Marks `object` ready, with its caching and copy strategy.
 ///
 /// # Safety
 ///
@@ -1172,7 +1182,8 @@ pub unsafe extern "C" fn memory_object_ready(
     })
 }
 
-/// `memory_object_change_attributes()` in C.
+/// Changes `object`'s caching and copy strategy, replying to `reply_to` when
+/// asked.
 ///
 /// # Safety
 ///
@@ -1197,7 +1208,8 @@ pub unsafe extern "C" fn memory_object_change_attributes(
     })
 }
 
-/// `vm_machine_attribute()` in C.
+/// Hands a machine attribute for the range of `map` at `address` to the
+/// physical map; the attribute and its value are not used.
 ///
 /// # Safety
 ///

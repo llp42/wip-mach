@@ -8,9 +8,9 @@
 //   Copyright (C) 2008 Free Software Foundation, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The machine-dependent boot and halt path of `i386/i386at/model_dep.c`:
-//! the idle and relax instructions, the `/dev/time` mmap hook, the wall
-//! clock, the bootstrap allocator and the boot entry points.
+//! The machine-dependent boot and halt path: the idle and relax instructions,
+//! the `/dev/time` mmap hook, the wall clock, the bootstrap allocator and the
+//! boot entry points.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_MASK, PAGE_SHIFT, PAGE_SIZE};
@@ -44,25 +44,25 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use kmem::{AllocError, KVec};
 
-/// `ELF_SHT_SYMTAB` of i386/i386at/elf.h.
+/// The ELF section type of a symbol table.
 const ELF_SHT_SYMTAB: u32 = 2;
-/// `ELF_SHT_STRTAB` of i386/i386at/elf.h.
+/// The ELF section type of a string table.
 const ELF_SHT_STRTAB: u32 = 3;
 
-/// `CPU_TYPE_X86_64` of <mach/machine.h>.
+/// The CPU type of x86-64.
 const CPU_TYPE_X86_64: c_int = 21;
-/// `CPU_SUBTYPE_AT386` of <mach/machine.h>.
+/// The CPU subtype of an AT-compatible PC.
 const CPU_SUBTYPE_AT386: c_int = 1;
 
-/// `boot_info` of `i386/i386at/model_dep.c`: the multiboot information block
-/// the boot loader left, which `c_boot_entry` copies out of low memory.
+/// The multiboot information block the boot loader left, which
+/// [`c_boot_entry`] copies out of low memory.
 // SAFETY: `MultibootRawInfo` is all integers, for which zero is a valid bit
 // pattern.
 pub(crate) static mut BOOT_INFO: MultibootRawInfo =
     unsafe { core::mem::zeroed() };
 
-/// `kernel_cmdline` of `i386/i386at/model_dep.c`: the boot command line, `""`
-/// until `i386at_init` can copy the loader's line to safe memory.
+/// The boot command line, `""` until [`i386at_init`] can copy the loader's
+/// line to safe memory.
 static KERNEL_CMDLINE: AtomicPtr<c_char> =
     AtomicPtr::new(c"".as_ptr().cast_mut());
 
@@ -101,13 +101,10 @@ pub(crate) fn kernel_cmdline() -> &'static CStr {
     unsafe { CStr::from_ptr(KERNEL_CMDLINE.load(Ordering::Relaxed)) }
 }
 
-/// `rebootflag` of `i386/i386at/model_dep.c`: set when ctrl-alt-del should
-/// reboot the machine.
+/// Set when ctrl-alt-del should reboot the machine.
 pub static REBOOTFLAG: AtomicBool = AtomicBool::new(false);
 
-/// `struct elf_shdr` of `i386/i386at/elf.h`, the section header
-/// `register_boot_data` walks; `addr` and `offset` are the C's
-/// `unsigned long`.
+/// An ELF section header, which [`register_boot_data`] walks.
 #[repr(C)]
 #[allow(missing_docs)]
 struct ElfShdr {
@@ -130,9 +127,9 @@ const _: () = {
     assert!(offset_of!(ElfShdr, size) == 32);
 };
 
-/// The six bytes `cpuboot.S` reserves for `gdt_descr_tmp`: `struct
-/// pseudo_descriptor` up to the padding its C type adds, which the realmode
-/// GDT pointer actually occupies.
+/// The six bytes the AP boot code reserves for `gdt_descr_tmp`: the
+/// pseudo-descriptor up to its padding, which the realmode GDT pointer
+/// occupies.
 #[repr(C, packed)]
 #[allow(missing_docs)]
 pub struct GdtDescrTmp {
@@ -146,7 +143,7 @@ const _: () = {
     assert!(offset_of!(GdtDescrTmp, linear_base) == 2);
 };
 
-/// `phystokv()` of <`i386/vm_param.h`>.
+/// The kernel virtual address of the physical address `pa`.
 const fn phystokv(pa: VmOffset) -> VmOffset {
     pa.wrapping_add(VM_MIN_KERNEL_ADDRESS)
 }
@@ -169,11 +166,11 @@ const fn kv_ptr_mut<T>(value: VmOffset) -> *mut T {
 
 /// Halt the calling CPU until the next interrupt.
 fn idle() {
-    // SAFETY: `hlt` stops the CPU until an interrupt is delivered.
+    // SAFETY: HLT stops the CPU until an interrupt is delivered.
     unsafe { asm!("hlt", options(nostack, preserves_flags)) };
 }
 
-/// `machine_idle()` of <`i386/i386/model_dep.h`>.
+/// Idles the CPU until the next interrupt.
 pub(crate) fn machine_idle(_cpu: c_int) {
     idle();
 }
@@ -188,14 +185,14 @@ pub(crate) fn mapped_time_page(prot: VmProt) -> Option<VmOffset> {
     // `mapable_time_init()` wired the page at boot, before `/dev/time` can be
     // opened.
     let address = clock_platform::mapped_time_page() as VmOffset;
-    // SAFETY: `kernel_pmap` is the kernel's own pmap, so it maps `address`;
-    // the C called `pmap_extract` with the same two values.
+    // SAFETY: `kernel_pmap_ptr()` is the kernel's own pmap, so it maps
+    // `address`.
     let phys = unsafe { pmap_extract(kernel_pmap_ptr(), address) };
     Some(phys >> PAGE_SHIFT)
 }
 
-/// `timemmap()` of <`i386at/model_dep.h`>, the `d_mmap` hook of the `/dev/time`
-/// device in `i386/i386at/conf.c`.
+/// The mmap hook of the `/dev/time` device: the page frame of the mapped time
+/// page, or `VmOffset::MAX` for a writable mapping.
 pub(crate) fn timemmap(_dev: DevT, _off: VmOffset, prot: c_int) -> VmOffset {
     mapped_time_page(VmProt::from_bits(prot)).unwrap_or(VmOffset::MAX)
 }
@@ -208,7 +205,7 @@ fn set_wallclock(seconds: i64) {
     });
 }
 
-/// `inittodr()` of <`i386/i386at/model_dep.h`>.
+/// Sets the wall clock from the CMOS clock.
 pub(crate) fn inittodr() {
     // The C left the seconds at zero when the clock had no valid time.
     let seconds = rtc::read_todc().unwrap_or(0);
@@ -217,7 +214,7 @@ pub(crate) fn inittodr() {
     set_wallclock(seconds as i64);
 }
 
-/// `resettodr()` of <`i386/i386/model_dep.h`>.
+/// Writes the wall clock back to the CMOS clock.
 pub(crate) fn resettodr() {
     // The C ignored a clock that cannot keep the time.
     let _ = rtc::write_todc(host_time::wallclock().seconds);
@@ -227,14 +224,13 @@ pub(crate) fn resettodr() {
 /// `None` when the bootstrap allocator is out of pages.
 pub(crate) fn alloc_aligned(size: VmSize) -> Option<VmOffset> {
     let rounded = size.wrapping_add(PAGE_MASK) & !PAGE_MASK;
-    // vm_page_atop(): the page count, whose C parameter is an `unsigned int`,
-    // so only the low 32 bits reach the allocator.
+    // The page count, kept to the allocator's 32 bits.
     let pages = (rounded >> PAGE_SHIFT) as u32;
     let address = biosmem::bootalloc(pages);
     if address == 0 { None } else { Some(address) }
 }
 
-/// `pmap_grab_page()` of <vm/pmap.h>.
+/// Allocates a page from the bootstrap allocator, halting when none is left.
 ///
 /// # Panics
 ///
@@ -245,13 +241,13 @@ pub(crate) fn pmap_grab_page() -> VmOffset {
     })
 }
 
-/// `machine_init()` of <`i386/i386/model_dep.h`>.
+/// Finishes the machine setup: frees the boot memory, then sets up the FPU,
+/// the APICs, the console, the buses and the clocks.
 pub(crate) fn machine_init() {
     // SAFETY: `machine_init` runs once, from `setup_main`, before any other
     // `biosmem` entry point is used again.
     unsafe { biosmem::biosmem_free_usable() };
-    // SAFETY: `init_fpu` is the real C routine of `i386/i386/fpu.c`, and the
-    // boot CPU is the caller's.
+    // SAFETY: the FPU init runs once, on the boot CPU.
     unsafe { fpu::init_fpu() };
 
     if let Err(error) = crate::arch::x86_64::acpi_parse_apic::init() {
@@ -296,7 +292,7 @@ fn patch_realmode_gdt() {
     // The AP boot page sits below 4 GiB, so the C's narrowing to the realmode
     // `u32` fields loses nothing.
     let apboot = mp_desc::APBOOT_ADDR.load(Ordering::Relaxed) as u32;
-    // SAFETY: `gdt_descr_tmp` and `apboot_jmp_offset` are `cpuboot.S`'s
+    // SAFETY: `gdt_descr_tmp` and `apboot_jmp_offset` are the AP boot page's
     // objects, and `machine_init` is their only writer.
     unsafe {
         let base = phystokv(
@@ -310,9 +306,9 @@ fn patch_realmode_gdt() {
     }
 }
 
-/// `halt_cpu()` of <`i386/i386/model_dep.h`>.
+/// Halts this CPU for good.
 pub(crate) fn halt_cpu() -> ! {
-    // SAFETY: `cli` is legal at CPL 0, and this CPU never returns to the
+    // SAFETY: CLI is legal at CPL 0, and this CPU never returns to the
     // interrupted code.
     unsafe { asm!("cli", options(nostack, preserves_flags)) };
     loop {
@@ -320,7 +316,7 @@ pub(crate) fn halt_cpu() -> ! {
     }
 }
 
-/// `halt_all_cpus()` of <`i386/i386/model_dep.h`>.
+/// Halts the machine, rebooting it when `reboot` is set.
 pub(crate) fn halt_all_cpus(reboot: c_int) -> ! {
     // Persist the ticking wall clock before this CPU stops advancing it.
     resettodr();
@@ -334,7 +330,7 @@ pub(crate) fn halt_all_cpus(reboot: c_int) -> ! {
         kprint!(
             "You can safely power off the system or hit ctl-alt-del to reboot\n"
         );
-        // SAFETY: `spl0()` is the real asm function <i386/spl.h> declares.
+        // SAFETY: lowering to `spl0` here has no lock to hold back.
         unsafe { spl::spl0() };
     }
     loop {
@@ -578,7 +574,9 @@ fn copy_boot_modules(mods_count: u32, mods_addr: u32) {
     }
 }
 
-/// `i386at_init()` in `i386/i386at/model_dep.c`.
+/// Prepares the boot CPU: masks the 8259, builds the memory map, saves the
+/// command line and modules, turns paging on with the kernel's page tables,
+/// loads the descriptor tables, and allocates the interrupt stacks.
 fn i386at_init() {
     ioapic::picdisable();
 
@@ -677,13 +675,13 @@ fn i386at_init() {
 /// `c_boot_entry()`: the entry the boot header calls, with the physical
 /// address of the loader's Multiboot information in `bi`.
 pub(crate) extern "C" fn c_boot_entry(bi: VmOffset) {
-    // SAFETY: `bi` is the physical address `boothdr.S` passes, and the
+    // SAFETY: `bi` is the physical address the boot header passes, and the
     // loader's block there is readable.
     unsafe { BOOT_INFO = *kv_ptr::<MultibootRawInfo>(phystokv(bi)) };
 
     kprint!("{}\n", KERNEL_VERSION);
 
-    // The call also fills `cpu_features`; its return value is unused.
+    // The call also fills the CPU features; its return value is unused.
     #[expect(unused_variables)]
     let cpu_type = locore::discover_x86_cpu_type();
 
@@ -704,14 +702,13 @@ pub(crate) extern "C" fn c_boot_entry(bi: VmOffset) {
         (*slot).cpu_type = CPU_TYPE_X86_64;
     }
 
-    // SAFETY: `setup_main` is the real C routine of `kern/startup.c`.
+    // SAFETY: the boot CPU calls `setup_main` once.
     unsafe { crate::kern::startup::setup_main() };
 }
 
-/// `startrtclock()` of <`i386/i386/model_dep.h`>.
+/// Starts the clock interrupt on this CPU.
 pub(crate) fn startrtclock() {
-    // The C's non-APIC branch (`clkstart()` plus `unmask_irq(0)`) went with
-    // the 8259 driver; APIC support is unconditional now.
+    // The clock is the I/O APIC timer pin plus each CPU's local APIC timer.
     let pin = ioapic::TIMER_PIN.load(Ordering::Relaxed);
     ioapic::unmask(pin);
     ioapic::calibrate_lapic_timer();

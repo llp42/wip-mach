@@ -175,15 +175,6 @@ deletes its entry; a change that opens one adds it.
 - **Done when**: every `BSD-2-Clause` file in `crates/` has a
   provenance block.
 
-## Upstream names in docs and comments
-
-- **ADR**: ADR 0010; ADR 0025.
-- **Where**: about 162 files cite upstream source paths or upstream
-  internal names outside their provenance block.
-- **Done when**: outside `// Derived from` and `// original files:`
-  lines, no comment in `crates/` names a `.c`, `.h` or `.S` file, and
-  none cites an upstream internal name.
-
 ## A file named after `i386`
 
 - **ADR**: ADR 0008.

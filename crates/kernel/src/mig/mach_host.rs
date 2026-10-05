@@ -46,14 +46,13 @@ use core::slice;
 
 const _: () = assert!(KERNEL_VERSION.len() < KERNEL_VERSION_MAX);
 
-/// `host_processors()` of kern/host.c, the routine <`mach/mach_host.defs`>
-/// declares.
+/// Reports `host`'s processors as send rights.
 ///
 /// # Safety
 ///
-/// `host` must be `HOST_NULL` or the live host pointer the generated server
-/// converted the request port into; `processor_list` and `countp` must be
-/// valid out-parameters.
+/// `host` must be null or the live host the generated server converted the
+/// request port into; `processor_list` and `countp` must be valid
+/// out-parameters.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn host_processors(
     host: *mut Host,
@@ -72,7 +71,7 @@ pub unsafe extern "C" fn host_processors(
     }
 }
 
-/// `processor_start()` of kern/processor.c.
+/// Starts the processor `pr`.
 ///
 /// # Safety
 ///
@@ -89,7 +88,7 @@ pub unsafe extern "C" fn processor_start(pr: *mut Processor) -> c_int {
     }
 }
 
-/// `processor_exit()` of kern/processor.c.
+/// Takes the processor `pr` out of service.
 ///
 /// # Safety
 ///
@@ -106,7 +105,7 @@ pub unsafe extern "C" fn processor_exit(pr: *mut Processor) -> c_int {
     }
 }
 
-/// `processor_set_default()` of `kern/ipc_host.c`.
+/// Reports `host`'s default processor set.
 ///
 /// # Safety
 ///
@@ -126,7 +125,7 @@ pub unsafe extern "C" fn processor_set_default(
     }
 }
 
-/// `processor_set_create()` of kern/processor.c.
+/// Creates a processor set, reporting its control and name ports.
 ///
 /// # Safety
 ///
@@ -151,7 +150,8 @@ pub unsafe extern "C" fn processor_set_create(
     }
 }
 
-/// `processor_set_destroy()` of kern/processor.c.
+/// Destroys `pset`, moving its tasks, threads and processors to the default
+/// set.
 ///
 /// # Safety
 ///
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn processor_set_destroy(
     }
 }
 
-/// `processor_assign()` of kern/machine.c.
+/// Assigns `processor` to `new_pset`, waiting for the move when `wait` is set.
 ///
 /// # Safety
 ///
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn processor_assign(
     }
 }
 
-/// `processor_get_assignment()` of kern/processor.c.
+/// Reports the processor set `pr` belongs to.
 ///
 /// # Safety
 ///
@@ -213,8 +213,7 @@ pub unsafe extern "C" fn processor_get_assignment(
     }
 }
 
-/// `thread_assign()` of kern/thread.c, the `MACH_HOST` arm both configured
-/// builds take.
+/// Assigns `thread` to `new_pset`.
 ///
 /// # Safety
 ///
@@ -232,7 +231,7 @@ pub unsafe extern "C" fn thread_assign(
     }
 }
 
-/// `thread_assign_default()` of kern/thread.c.
+/// Assigns `thread` to the default processor set.
 ///
 /// # Safety
 ///
@@ -246,7 +245,7 @@ pub unsafe extern "C" fn thread_assign_default(thread: *mut Thread) -> c_int {
     }
 }
 
-/// `thread_get_assignment()` of kern/thread.c.
+/// Reports the processor set `thread` belongs to.
 ///
 /// # Safety
 ///
@@ -267,7 +266,8 @@ pub unsafe extern "C" fn thread_get_assignment(
     }
 }
 
-/// `task_assign()` of kern/task.c.
+/// Assigns `task` to `new_pset`, and its threads too when `assign_threads` is
+/// set.
 ///
 /// # Safety
 ///
@@ -285,7 +285,8 @@ pub unsafe extern "C" fn task_assign(
     }
 }
 
-/// `task_assign_default()` of kern/task.c.
+/// Assigns `task` to the default processor set, and its threads too when
+/// `assign_threads` is set.
 ///
 /// # Safety
 ///
@@ -305,7 +306,7 @@ pub unsafe extern "C" fn task_assign_default(
     }
 }
 
-/// `task_get_assignment()` of kern/task.c.
+/// Reports the processor set `task` belongs to.
 ///
 /// # Safety
 ///
@@ -324,7 +325,7 @@ pub unsafe extern "C" fn task_get_assignment(
     }
 }
 
-/// `thread_priority()` of kern/thread.c.
+/// Sets `thread`'s priority, and its maximum too when `set_max` is set.
 ///
 /// # Safety
 ///
@@ -341,7 +342,7 @@ pub unsafe extern "C" fn thread_priority(
     }
 }
 
-/// `thread_max_priority()` of kern/thread.c.
+/// Sets `thread`'s maximum priority, under the control port of its set `pset`.
 ///
 /// # Safety
 ///
@@ -358,7 +359,8 @@ pub unsafe extern "C" fn thread_max_priority(
     }
 }
 
-/// `task_priority()` of kern/task.c.
+/// Sets `task`'s priority for new threads, and its threads' too when
+/// `change_threads` is set.
 ///
 /// # Safety
 ///
@@ -376,7 +378,8 @@ pub unsafe extern "C" fn task_priority(
     }
 }
 
-/// `processor_set_max_priority()` of kern/processor.c.
+/// Sets `pset`'s maximum priority, and lowers its threads' when
+/// `change_threads` is set.
 ///
 /// # Safety
 ///
@@ -399,7 +402,8 @@ pub unsafe extern "C" fn processor_set_max_priority(
     }
 }
 
-/// `thread_policy()` of kern/thread.c.
+/// Sets `thread`'s scheduling policy, with `data` as the quantum of a
+/// fixed-priority policy.
 ///
 /// # Safety
 ///
@@ -416,7 +420,7 @@ pub unsafe extern "C" fn thread_policy(
     }
 }
 
-/// `processor_set_policy_enable()` of kern/processor.c.
+/// Enables the scheduling policy `policy` in `pset`.
 ///
 /// # Safety
 ///
@@ -436,7 +440,8 @@ pub unsafe extern "C" fn processor_set_policy_enable(
     }
 }
 
-/// `processor_set_policy_disable()` of kern/processor.c.
+/// Disables the scheduling policy `policy` in `pset`, moving its threads back
+/// to timesharing when `change_threads` is set.
 ///
 /// # Safety
 ///
@@ -457,7 +462,7 @@ pub unsafe extern "C" fn processor_set_policy_disable(
     }
 }
 
-/// `processor_set_tasks()` of kern/processor.c.
+/// Reports `pset`'s tasks as send rights.
 ///
 /// # Safety
 ///
@@ -482,7 +487,7 @@ pub unsafe extern "C" fn processor_set_tasks(
     }
 }
 
-/// `processor_set_threads()` of kern/processor.c.
+/// Reports `pset`'s threads as send rights.
 ///
 /// # Safety
 ///
@@ -507,14 +512,12 @@ pub unsafe extern "C" fn processor_set_threads(
     }
 }
 
-/// `host_processor_sets()` of kern/host.c, the routine <`mach/mach_host.defs`>
-/// declares.
+/// Reports `host`'s processor sets as name ports.
 ///
 /// # Safety
 ///
-/// `host` must be `HOST_NULL` or the live host pointer the generated server
-/// converted the request port into; `pset_list` and `count` must be valid
-/// out-parameters.
+/// `host` must be null or the live host the generated server converted the
+/// request port into; `pset_list` and `count` must be valid out-parameters.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn host_processor_sets(
     host: *mut Host,
@@ -537,7 +540,7 @@ pub unsafe extern "C" fn host_processor_sets(
     }
 }
 
-/// `host_processor_set_priv()` of kern/host.c.
+/// Reports the processor set `pset_name` names, for the privileged `host`.
 #[unsafe(no_mangle)]
 pub extern "C" fn host_processor_set_priv(
     host: Option<NonNull<Host>>,
@@ -560,7 +563,7 @@ pub extern "C" fn host_processor_set_priv(
     }
 }
 
-/// `thread_depress_abort()` of `kern/syscall_subr.c`.
+/// Ends `thread`'s priority depression.
 ///
 /// # Safety
 ///
@@ -571,7 +574,7 @@ pub unsafe extern "C" fn thread_depress_abort(thread: *mut Thread) -> c_int {
     kern_return(unsafe { syscall_subr::depress_abort(thread) })
 }
 
-/// `host_set_time()` of `kern/mach_clock.c`, the deprecated 32-bit entry.
+/// Sets the time of day; the deprecated 32-bit form of [`host_set_time64`].
 ///
 /// # Safety
 ///
@@ -588,7 +591,8 @@ pub unsafe extern "C" fn host_set_time(
     }
 }
 
-/// `host_adjust_time()` of `kern/mach_clock.c`, the deprecated 32-bit entry.
+/// Adjusts the time of day gradually; the deprecated 32-bit form of
+/// [`host_adjust_time64`].
 ///
 /// # Safety
 ///
@@ -610,7 +614,7 @@ pub unsafe extern "C" fn host_adjust_time(
     }
 }
 
-/// `host_get_time()` of `kern/mach_clock.c`.
+/// Reports the time of day.
 ///
 /// # Safety
 ///
@@ -630,13 +634,12 @@ pub unsafe extern "C" fn host_get_time(
     }
 }
 
-/// `host_reboot()` of kern/machine.c, the routine <`mach/mach_host.defs`>
-/// declares.
+/// Reboots or halts the machine, per `options`.
 ///
 /// # Safety
 ///
-/// `host_priv` must be `HOST_NULL` or the live host privilege pointer the MIG
-/// stub converted the request port into.
+/// `host_priv` must be null or the live host the MIG stub converted the
+/// privileged request port into.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn host_reboot(
     host_priv: *mut c_void,
@@ -648,7 +651,8 @@ pub unsafe extern "C" fn host_reboot(
     }
 }
 
-/// `vm_wire()` of `vm/vm_user.c`.
+/// Wires the range of `map` at `start` for `access`, or unwires it when
+/// `access` is none.
 ///
 /// # Safety
 ///
@@ -665,7 +669,7 @@ pub unsafe extern "C" fn vm_wire(
     kern_return(unsafe { vm_user::wire(port, map, start, size, access) })
 }
 
-/// `thread_wire()` of kern/thread.c.
+/// Sets whether `thread` may draw on the reserved page pool, per `wired`.
 ///
 /// # Safety
 ///
@@ -706,13 +710,13 @@ impl HostFlavor {
     const LOAD_INFO: Self = Self(4);
 }
 
-/// `host_info()` of kern/host.c.
+/// Reports `host`'s information of `flavor`.
 ///
 /// # Safety
 ///
-/// `host` must be `HOST_NULL` or the live host pointer the generated server
-/// converted the request port into; `info` must be readable and writable for
-/// `*count` integers, and `count` must be valid for a write.
+/// `host` must be null or the live host the generated server converted the
+/// request port into; `info` must be readable and writable for `*count`
+/// integers, and `count` must be valid for a write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn host_info(
     host: *mut Host,
@@ -799,7 +803,7 @@ impl ProcessorFlavor {
     const BASIC_INFO: Self = Self(1);
 }
 
-/// `processor_info()` of kern/processor.c.
+/// Reports `processor`'s information of `flavor`, and its host.
 ///
 /// # Safety
 ///
@@ -855,7 +859,7 @@ impl ProcessorSetFlavor {
     const SCHED_INFO: Self = Self(2);
 }
 
-/// `processor_set_info()` of kern/processor.c.
+/// Reports `pset`'s information of `flavor`, and its host.
 ///
 /// # Safety
 ///
@@ -925,7 +929,7 @@ pub unsafe extern "C" fn processor_set_info(
     }
 }
 
-/// `processor_control()` of kern/processor.c.
+/// Passes the machine-dependent control `info` to the processor `pr`.
 ///
 /// # Safety
 ///
@@ -953,7 +957,7 @@ pub unsafe extern "C" fn processor_control(
     }
 }
 
-/// `host_get_time64()` of `kern/mach_clock.c`.
+/// Reports the time of day.
 ///
 /// # Safety
 ///
@@ -973,7 +977,7 @@ pub unsafe extern "C" fn host_get_time64(
     }
 }
 
-/// `host_set_time64()` of `kern/mach_clock.c`.
+/// Sets the time of day.
 #[unsafe(no_mangle)]
 pub extern "C" fn host_set_time64(
     host: *mut c_void,
@@ -985,7 +989,8 @@ pub extern "C" fn host_set_time64(
     }
 }
 
-/// `host_adjust_time64()` of `kern/mach_clock.c`.
+/// Adjusts the time of day gradually by `new_adjustment`, reporting the
+/// outstanding adjustment in `old_adjustment`.
 ///
 /// # Safety
 ///
@@ -1025,7 +1030,7 @@ pub extern "C" fn host_get_kernel_version(
     0
 }
 
-/// `host_get_uptime64()` of `kern/mach_clock.c`.
+/// Reports the time since boot.
 ///
 /// # Safety
 ///
@@ -1045,7 +1050,7 @@ pub unsafe extern "C" fn host_get_uptime64(
     }
 }
 
-/// `processor_set_processors()` of kern/host.c.
+/// Reports `pset`'s processors as send rights.
 #[unsafe(no_mangle)]
 pub extern "C" fn processor_set_processors(
     pset: Option<&mut ProcessorSet>,
@@ -1068,7 +1073,8 @@ pub extern "C" fn processor_set_processors(
     }
 }
 
-/// `task_max_priority()` of kern/task.c.
+/// Sets `task`'s maximum priority, and its priority and its threads' when
+/// `set_priority` and `change_threads` ask.
 ///
 /// # Safety
 ///

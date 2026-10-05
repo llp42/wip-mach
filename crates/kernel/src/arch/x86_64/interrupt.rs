@@ -14,12 +14,10 @@
 //   ANY DAMAGES WHATSOEVER RESULTING FROM THE USE OF THIS SOFTWARE.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The generic interrupt handler, which `i386/i386at/interrupt.S` and
-//! `x86_64/interrupt.S` used to define.
+//! The generic interrupt handler.
 //!
-//! `all_intrs` of `i386/i386/locore.S` and `x86_64/locore.S` enters with
-//! the interrupt number in `%eax` and calls [`interrupt`] with the
-//! interrupted state at `S_REGS`.
+//! `all_intrs` enters with the interrupt number in `%eax` and calls
+//! [`interrupt`] with the interrupted registers above the frame it builds.
 
 use crate::arch::x86_64::apic::lapic_eoi;
 use crate::arch::x86_64::int_init::{CALL_AST_CHECK, CALL_PMAP_UPDATE};
@@ -29,7 +27,10 @@ use crate::arch::x86_64::spl::{spl7, splx_cli};
 use crate::kern::ast::check;
 use core::arch::naked_asm;
 
-/// `interrupt()` of `i386/i386at/interrupt.S` and `x86_64/interrupt.S`.
+/// Runs the handler of the interrupt in `%eax` at the highest level,
+/// acknowledging the line before or after it as its trigger mode needs, then
+/// restores the level.  The AST and pmap-update vectors go to their own
+/// handlers, and vector 255 returns at once.
 ///
 /// # Safety
 ///
@@ -37,8 +38,9 @@ use core::arch::naked_asm;
 /// and the frame those entry points build under the return address.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn interrupt() {
-    // `S_IPL` 0(%rsp), `S_IRQ` 8(%rsp), `S_RET` 16(%rsp) and `S_REGS`
-    // 24(%rsp); the arguments travel in registers.
+    // The frame: the saved level at 0(%rsp), the irq at 8(%rsp), the return
+    // address at 16(%rsp) and the interrupted registers from 24(%rsp); the
+    // arguments travel in registers.
     naked_asm!(
         "cmpl $255, %eax",
         "jne 1f",

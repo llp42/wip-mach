@@ -5,7 +5,7 @@
 //   Copyright 1988, 1989 by Olivetti Advanced Technology Center, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The keyboard event driver, which `i386/i386at/kd_event.c` used to define.
+//! The keyboard event driver.
 
 use super::io_req::{
     D_NOWAIT, DEV_GET_SIZE, DEV_GET_SIZE_COUNT, DEV_GET_SIZE_DEVICE_SIZE,
@@ -66,8 +66,7 @@ const unsafe fn read_queue(s: &mut State) -> Pin<&mut IoReqQueue> {
     unsafe { Pin::new_unchecked(&mut s.read_queue) }
 }
 
-/// `printf_once("kbd: queue full\n")` in C: prints the first time a full queue
-/// drops an event, then never again.
+/// Prints the first time a full queue drops an event, then never again.
 fn printf_once() {
     static PRINTED: AtomicBool = AtomicBool::new(false);
     if !PRINTED.swap(true, Ordering::Relaxed) {
@@ -90,9 +89,9 @@ fn enqueue_event(s: &mut State, ev: &KdEvent) {
     }
 }
 
-/// `kbdinit()` in C: reset the queue once, at `SPLKD`.
+/// Resets the queue once, at `spltty`.
 fn kbdinit() {
-    // SAFETY: the keyboard queue is only touched at `SPLKD`.
+    // SAFETY: the keyboard queue is only touched at `spltty`.
     let sp = unsafe { spl::spltty() };
     let s = state();
     if !s.initialized {
@@ -103,7 +102,7 @@ fn kbdinit() {
     unsafe { spl::splx(sp) };
 }
 
-/// `kbdopen()` in C.
+/// Opens the keyboard event device, setting up the kd driver and the queue.
 ///
 /// # Safety
 ///
@@ -117,9 +116,9 @@ pub(crate) unsafe fn kbdopen(
     _flags: c_int,
     _ior: *mut IoReq,
 ) -> IoResult {
-    // SAFETY: the keyboard device is opened with `SPLKD` raised.
+    // SAFETY: the keyboard device is opened with `spltty` raised.
     let sp = unsafe { spl::spltty() };
-    // SAFETY: kd.c's driver init, as in C, at spltty.
+    // The kd driver initializes at `spltty`.
     crate::arch::x86_64::kd::kdinit();
     // SAFETY: `sp` is this function's `spltty()` result.
     unsafe { spl::splx(sp) };
@@ -127,13 +126,13 @@ pub(crate) unsafe fn kbdopen(
     Ok(DeviceSuccess::Success)
 }
 
-/// `kbdclose()` in C.
+/// Closes the keyboard event device.
 ///
 /// # Safety
 ///
 /// The device layer calls this for an open keyboard.
 pub(crate) unsafe fn kbdclose(_dev: DevT, _flags: c_int) {
-    // SAFETY: the keyboard device is closed with `SPLKD` raised.
+    // SAFETY: the keyboard device is closed with `spltty` raised.
     let sp = unsafe { spl::spltty() };
     crate::arch::x86_64::kd::set_kb_mode(KB_ASCII);
     state().queue.clear();
@@ -141,7 +140,7 @@ pub(crate) unsafe fn kbdclose(_dev: DevT, _flags: c_int) {
     unsafe { spl::splx(sp) };
 }
 
-/// `kbdgetstat()` in C.
+/// Reports a status flavor of the keyboard event device.
 ///
 /// # Safety
 ///
@@ -172,7 +171,7 @@ pub(crate) unsafe fn kbdgetstat(
     }
 }
 
-/// `kbdsetstat()` in C.
+/// Applies a status flavor to the keyboard event device.
 ///
 /// # Safety
 ///
@@ -192,8 +191,8 @@ pub(crate) unsafe fn kbdsetstat(
         if count != 1 {
             return Err(DeviceError::InvalidOperation);
         }
-        // SAFETY: `count == 1` promises one readable value; kd truncates to
-        // the `u_char` the C passed.
+        // SAFETY: `count == 1` promises one readable value; the LED state is
+        // its low byte.
         let val = unsafe { *data };
         crate::arch::x86_64::kd::keyboard::set_leds1(val as u8);
         Ok(())
@@ -202,12 +201,12 @@ pub(crate) unsafe fn kbdsetstat(
     }
 }
 
-/// `kbdread()` in C.
+/// Reads queued keyboard events, or queues the request until one arrives.
 ///
 /// # Safety
 ///
 /// The device layer calls this with a valid, read-only request whose buffer
-/// `device_read_alloc()` may allocate; everything else runs at `SPLKD`.
+/// `device_read_alloc()` may allocate; everything else runs at `spltty`.
 pub(crate) unsafe fn kbdread(_dev: DevT, ior: *mut IoReq) -> IoResult {
     let wanted = unsafe { (*ior).count() };
     if wanted % size_of::<KdEvent>() as c_long != 0 {
@@ -238,13 +237,13 @@ pub(crate) unsafe fn kbdread(_dev: DevT, ior: *mut IoReq) -> IoResult {
     Ok(DeviceSuccess::Success)
 }
 
-/// `kbd_read_done()` in C, as a callback value.
+/// Completes a queued read once events arrive.
 ///
 /// # Safety
 ///
-/// The device layer must call this as `ior`'s completion callback, with
-/// `ior` the same valid, still-queued request [`kbdread()`] queued, and it
-/// must run at `SPLKD`.
+/// The device layer must call this as `ior`'s completion callback, with `ior`
+/// the same valid, still-queued request [`kbdread()`] queued, and it must run
+/// at `spltty`.
 unsafe fn kbd_read_done(ior: *mut IoReq) -> bool {
     let s = state();
     let sp = unsafe { spl::spltty() };
@@ -266,7 +265,8 @@ unsafe fn kbd_read_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `kd_enqsc()` in C; called at `SPLKD` from the kd interrupt path.
+/// Queues the scancode `sc` as an event; called at `spltty` from the kd
+/// interrupt path.
 pub(crate) fn kd_enqsc(sc: Scancode) {
     enqueue_event(state(), &KdEvent::scancode(sc));
 }

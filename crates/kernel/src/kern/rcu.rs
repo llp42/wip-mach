@@ -145,7 +145,7 @@ fn work_event() -> *mut c_void {
 // ---------------------------------------------------------------------------
 // Callbacks
 
-/// A callback link, embedded in the object to reclaim (`struct rcu_head`).
+/// A callback link, embedded in the object to reclaim.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct RcuHead {

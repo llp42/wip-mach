@@ -4,8 +4,8 @@
 //   Copyright (c) 1993,1992,1991,1990 Carnegie Mellon University
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The I/O permission bitmap objects, which `i386/i386/io_perm.c` used to
-//! define and `i386/i386/io_perm.h` declares.
+//! The I/O permission objects: device ports that each enable a range of I/O
+//! ports in a task's bitmap.
 
 use crate::arch::x86_64::error::Error;
 use crate::arch::x86_64::machine_task::{IOPB_BYTES, IOPB_CACHE};
@@ -21,19 +21,18 @@ use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// `PCI_CFG1_START` of `io_perm.c`: the first PCI configuration address.
+/// The first PCI configuration address.
 const PCI_CFG1_START: u16 = 0xcf8;
-/// `PCI_CFG1_END` of `io_perm.c`: the last PCI configuration address.
+/// The last PCI configuration address.
 const PCI_CFG1_END: u16 = 0xcff;
-/// `IKO_NULL` of <`kern/ipc_kobject.h>`: no kobject.
+/// No kernel object.
 const IKO_NULL: usize = 0;
-/// `IKOT_NONE` of <`kern/ipc_kobject.h>`: a port bound to no kernel object.
+/// A port bound to no kernel object.
 const IKOT_NONE: u32 = 0;
-/// `IKOT_DEVICE` of <`kern/ipc_kobject.h>`: a port bound to a `struct device`.
+/// A port bound to a device.
 const IKOT_DEVICE: u32 = 10;
 
-/// `struct io_perm` of <`i386/io_perm.h>`: the device, port and range of one
-/// I/O-permission object.
+/// The device, port and range of one I/O-permission object.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct IoPerm {
@@ -52,14 +51,14 @@ const _: () = {
     assert!(offset_of!(IoPerm, to) == 26);
 };
 
-/// `taken_pci_cfg` of `io_perm.c`: whether a live object holds the PCI
-/// configuration range.
+/// Whether a live object holds the PCI configuration range.
 ///
 /// The C read and wrote this flag without a lock; `Relaxed` keeps the
 /// accesses defined, and a lost race would lose no more than the C's.
 static TAKEN_PCI_CFG: AtomicBool = AtomicBool::new(false);
 
-/// Our device emulation ops, which `io_perm.c` kept beside its `no_senders()`.
+/// The emulation ops of an I/O-permission device, which only handle
+/// no-senders.
 static IO_PERM_DEVICE_EMULATION_OPS: DeviceEmulationOps = DeviceEmulationOps {
     reference: None,
     dealloc: None,
@@ -79,35 +78,34 @@ static IO_PERM_DEVICE_EMULATION_OPS: DeviceEmulationOps = DeviceEmulationOps {
     writev_trap: None,
 };
 
-/// The `CONTAINS_PCI_CFG()` macro of `io_perm.c`.
+/// Whether `from..=to` overlaps the PCI configuration range.
 const fn contains_pci_cfg(from: u16, to: u16) -> bool {
     from <= PCI_CFG1_END && to >= PCI_CFG1_START
 }
 
-/// The `io_bitmap_init()`/`io_bitmap_set()` bitmap shape: one bit per I/O
-/// port, as `io_perm.h` sizes it.
+/// A permission bitmap: one bit per I/O port, set when the port is disabled.
 type IoBitmap = [u8; IOPB_BYTES];
 
-/// `io_bitmap_init()` of `io_perm.c`: all bits off, so no port is enabled.
+/// Sets every bit, so no port is enabled.
 fn bitmap_init(iopb: &mut IoBitmap) {
     iopb.fill(0xff);
 }
 
-/// `io_bitmap_set()` of `io_perm.c`: enable `from..=to`.
+/// Enables `from..=to`.
 fn bitmap_set(iopb: &mut IoBitmap, from: u16, to: u16) {
     for port in from..=to {
         iopb[usize::from(port) >> 3] &= !(1u8 << (port & 0x7));
     }
 }
 
-/// `io_bitmap_clear()` of `io_perm.c`: disable `from..=to`.
+/// Disables `from..=to`.
 fn bitmap_clear(iopb: &mut IoBitmap, from: u16, to: u16) {
     for port in from..=to {
         iopb[usize::from(port) >> 3] |= 1u8 << (port & 0x7);
     }
 }
 
-/// `convert_io_perm_to_port()` in C.
+/// A send right for `io_perm`'s port, or null.
 ///
 /// # Safety
 ///
@@ -123,7 +121,7 @@ pub(crate) unsafe fn convert_io_perm_to_port(
     unsafe { ipc_port::make_send(IpcPort::from_raw((*io_perm).port)) }.as_ptr()
 }
 
-/// `convert_port_to_io_perm()` in C.
+/// The I/O-permission object `port` names, or null.
 ///
 /// # Safety
 ///
@@ -141,7 +139,7 @@ pub(crate) unsafe fn convert_port_to_io_perm(
     unsafe { (*device).emul_data.cast::<IoPerm>() }
 }
 
-/// `io_perm_deallocate()` in C.
+/// Releases the PCI configuration range when `io_perm` held it.
 ///
 /// # Safety
 ///
@@ -153,12 +151,12 @@ pub(crate) unsafe fn deallocate(io_perm: *mut IoPerm) {
     }
 }
 
-/// `no_senders()` of `io_perm.c`: the emulation's no-senders handler.
+/// Frees the object when its port loses its last sender.
 ///
 /// # Safety
 ///
-/// The caller must pass a live no-senders notification, as
-/// `device_emulation_ops.no_senders` receives.
+/// The caller must pass a live no-senders notification, as the emulation's
+/// `no_senders` hook receives.
 unsafe fn no_senders(notification: *mut c_void) {
     // The notification begins with the message header the C read; no other
     // field is touched.
@@ -181,7 +179,7 @@ unsafe fn no_senders(notification: *mut c_void) {
     }
 }
 
-/// `i386_io_perm_create()` in C.
+/// Creates an object for the ports `from..=to`, for the master device port.
 ///
 /// # Safety
 ///
@@ -265,7 +263,7 @@ pub(crate) enum Access {
     Withdraw,
 }
 
-/// `i386_io_perm_modify()` in C.
+/// Enables or disables the range of `io_perm` in `target_task`'s bitmap.
 ///
 /// # Safety
 ///

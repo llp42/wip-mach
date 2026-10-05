@@ -90,7 +90,7 @@ impl TaskThreadTimesInfo {
 impl From<&Task> for TaskBasicInfo {
     /// Takes the task's `lock` for the reads.
     fn from(task: &Task) -> Self {
-        // `kernel_task()` is live from `task_init()` on, and any other live
+        // `kernel_task()` is live from `task::init` on, and any other live
         // task's map is live.
         let map = if ptr::eq(ptr::from_ref(task), kernel_task().cast_const()) {
             // SAFETY: `kernel_map` is live from the VM bootstrap on.

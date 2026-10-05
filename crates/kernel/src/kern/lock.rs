@@ -5,7 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The locks of `kern/lock.h`, which `kern/lock.c` used to define.
+//! The kernel's simple and sleep-capable locks.
 
 use crate::arch::x86_64::per_cpu;
 use crate::kern::debug::kpanic;
@@ -17,7 +17,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr::{self, addr_of_mut};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// A simple spin lock, layout-identical to `struct slock` of <kern/lock.h>.
+/// A simple spin lock.
 #[repr(transparent)]
 pub struct SimpleLock {
     lock_data: AtomicU32,
@@ -35,7 +35,7 @@ impl SimpleLock {
         }
     }
 
-    /// `simple_lock_init()` in C.  The store is `Relaxed`: the caller's
+    /// Initializes the lock unheld.  The store is `Relaxed`: the caller's
     /// proof that no one holds the lock, not an ordering, is what makes it
     /// safe.
     pub fn init(&self) {
@@ -48,9 +48,9 @@ impl SimpleLock {
         self.lock_data.load(Ordering::Relaxed) != 0
     }
 
-    /// Acquire the lock, spinning while it is held.  The `swap` is the
-    /// `xchg` of the C macro and acquires the releasing unlock's publishes;
-    /// the inner load is its test-and-test-and-set read and may be `Relaxed`.
+    /// Acquires the lock, spinning while it is held.  The `swap` acquires the
+    /// releasing unlock's publishes; the inner load is its
+    /// test-and-test-and-set read and may be `Relaxed`.
     pub fn lock(&self) {
         while self.lock_data.swap(1, Ordering::AcqRel) != 0 {
             while self.lock_data.load(Ordering::Relaxed) != 0 {
@@ -59,15 +59,15 @@ impl SimpleLock {
         }
     }
 
-    /// `simple_lock_try()` in C.  The `swap` acquires on success, as
+    /// Takes the lock when it is free.  The `swap` acquires on success, as
     /// `lock()` does.
     #[must_use]
     pub fn try_lock(&self) -> bool {
         self.lock_data.swap(1, Ordering::AcqRel) == 0
     }
 
-    /// `simple_unlock()` in C.  The `AcqRel` store publishes everything
-    /// this critical section wrote to the next successful locker.
+    /// Releases the lock.  The `AcqRel` store publishes everything this
+    /// critical section wrote to the next successful locker.
     pub fn unlock(&self) {
         self.lock_data.swap(0, Ordering::AcqRel);
     }
@@ -79,14 +79,13 @@ impl Default for SimpleLock {
     }
 }
 
-/// The sleep-capable recursive lock of `kern/lock.h`, layout-identical to
-/// `struct lock`.
+/// The sleep-capable recursive reader-writer lock.
 ///
 /// # Invariants
 ///
 /// Every field access below happens while the caller holds the interlock,
-/// except the owner written or read at `lock_init()` time, when the storage is
-/// still unshared.
+/// except the owner written or read at [`LockData::init`] time, when the
+/// storage is still unshared.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct LockData {
@@ -103,7 +102,7 @@ const _: () = assert!(
         == core::mem::offset_of!(LockData, state) + size_of::<u32>()
 );
 
-/// The `lock_wait_time` of kern/lock.c: pauses before a sleep.
+/// How many times a waiter spins before it sleeps.
 const LOCK_WAIT_TIME: c_int = 100;
 
 /// `(struct thread *)-1`, the owner of a lock no thread owns.
@@ -123,8 +122,8 @@ const RECURSION_DEPTH_SHIFT: u32 = 20;
 const RECURSION_DEPTH_MASK: u32 = 0x0000_0fff;
 
 impl LockData {
-    /// The zero image a C `static` of `struct lock` began with; [`LockData::init`]
-    /// completes it.
+    /// The all-zero lock a static begins with; [`LockData::init`] completes
+    /// it.
     pub(crate) const fn zeroed() -> Self {
         Self {
             thread: UnsafeCell::new(ptr::null_mut()),
@@ -133,7 +132,7 @@ impl LockData {
         }
     }
 
-    /// `lock_init()` in C.
+    /// Initializes the lock, letting waiters sleep when `can_sleep` is set.
     ///
     /// # Safety
     ///
@@ -290,7 +289,7 @@ impl LockData {
         unsafe { thread_wakeup_prim(self.event(), 0, THREAD_AWAKENED) };
     }
 
-    /// `lock_write()` in C.
+    /// Takes the lock for writing.
     pub(crate) fn write(&self) {
         self.interlock.lock();
 
@@ -321,7 +320,7 @@ impl LockData {
         self.interlock.unlock();
     }
 
-    /// `lock_done()` in C.
+    /// Releases a read or write hold.
     pub(crate) fn done(&self) {
         self.interlock.lock();
 
@@ -342,7 +341,7 @@ impl LockData {
         self.interlock.unlock();
     }
 
-    /// `lock_read()` in C.
+    /// Takes the lock for reading.
     pub(crate) fn read(&self) {
         self.interlock.lock();
 
@@ -364,7 +363,8 @@ impl LockData {
         self.interlock.unlock();
     }
 
-    /// `lock_read_to_write()` in C.
+    /// Upgrades a read hold to a write hold; returns `true` when another
+    /// upgrade won and the read hold is gone.
     #[must_use]
     pub(crate) fn read_to_write(&self) -> bool {
         self.interlock.lock();
@@ -400,7 +400,7 @@ impl LockData {
         false
     }
 
-    /// `lock_write_to_read()` in C.
+    /// Downgrades a write hold to a read hold.
     pub(crate) fn write_to_read(&self) {
         self.interlock.lock();
 
@@ -420,7 +420,7 @@ impl LockData {
         self.interlock.unlock();
     }
 
-    /// `lock_set_recursive()` in C.
+    /// Lets the current writer take the lock recursively.
     pub(crate) fn set_recursive(&self) {
         self.interlock.lock();
 
@@ -434,7 +434,7 @@ impl LockData {
         self.interlock.unlock();
     }
 
-    /// `lock_clear_recursive()` in C.
+    /// Ends recursive locking by the current writer.
     pub(crate) fn clear_recursive(&self) {
         self.interlock.lock();
         if !self.owned_by_current() {

@@ -3,9 +3,7 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kernel virtual-to-physical lookup and the physical-page copy
-//! entries, which `i386/i386/phys.c` used to define and
-//! `i386/intel/pmap.h` declares.
+//! The kernel virtual-to-physical lookup and the physical-page copy entries.
 
 use crate::arch::types::VmOffset;
 use crate::arch::vm_param::{PAGE_MASK, PAGE_SIZE};
@@ -15,14 +13,13 @@ use core::ptr::{
     self, NonNull, with_exposed_provenance, with_exposed_provenance_mut,
 };
 
-/// `INTEL_OFFMASK` of `i386/intel/pmap.h`: the offset within a page.
+/// The offset within a page.
 const OFFMASK: VmOffset = 0xfff;
 
 /// `INTEL_PTE_PFN`: the physical-page-number field of a page table entry.
 const PFN_MASK: VmOffset = 0xffff_ffff_ffff_f000;
 
-/// `INTEL_PTE_W()` of `i386/i386/phys.c`: the entry a writable temporary
-/// mapping is made with.
+/// The entry a writable temporary mapping is made with.
 const fn pte_writable(pa: VmOffset) -> VmOffset {
     pmap::INTEL_PTE_VALID
         | pmap::INTEL_PTE_WRITE
@@ -31,17 +28,16 @@ const fn pte_writable(pa: VmOffset) -> VmOffset {
         | pmap::pa_to_pte(pa)
 }
 
-/// `INTEL_PTE_R()` of `i386/i386/phys.c`: the entry a read-only temporary
-/// mapping is made with.
+/// The entry a read-only temporary mapping is made with.
 const fn pte_readable(pa: VmOffset) -> VmOffset {
     pmap::INTEL_PTE_VALID | pmap::INTEL_PTE_REF | pmap::pa_to_pte(pa)
 }
 
-/// `kvtophys()` of `i386/intel/pmap.h`, which `i386/i386/phys.c` defined.
+/// The physical address the kernel address `addr` maps to, or zero.
 pub(crate) fn kvtophys(addr: VmOffset) -> VmOffset {
-    // SAFETY: `kernel_pmap` is the kernel's live pmap after
-    // `pmap_bootstrap()`, and `pmap_pte()` returns null rather than something
-    // invalid for an address without a mapping, as the C check relies on.
+    // SAFETY: `kernel_pmap_ptr()` is the kernel's live pmap after the pmap
+    // bootstrap, and `pmap_pte()` returns null rather than something invalid
+    // for an address without a mapping.
     let pte = unsafe { pmap::pmap_pte(pmap::kernel_pmap_ptr(), addr) };
     let Some(pte) = NonNull::new(pte) else {
         return 0;
@@ -55,14 +51,14 @@ pub(crate) fn kvtophys(addr: VmOffset) -> VmOffset {
 /// A physical page's kernel-visible address, holding a temporary map window
 /// open while the page lies above [`VM_PAGE_DIRECTMAP_LIMIT`].
 struct Mapping {
-    /// The `pmap_mapwindow_t` covering `pa`, or null for the direct map.
+    /// The map window covering `pa`, or null for the direct map.
     window: *mut PmapMapwindow,
     /// The physical address the C passed.
     pa: VmOffset,
 }
 
 impl Mapping {
-    /// The mapping of `pa` for a read, as `INTEL_PTE_R()` built it.
+    /// The read-only mapping of `pa`.
     ///
     /// # Safety
     ///
@@ -85,7 +81,7 @@ impl Mapping {
     /// # Safety
     ///
     /// `pa` must name a real page frame, and `entry` exactly the
-    /// `INTEL_PTE_W()`/`INTEL_PTE_R()` template of that frame.
+    /// [`pte_writable`] or [`pte_readable`] entry of that frame.
     unsafe fn new(pa: VmOffset, entry: VmOffset) -> Self {
         if pa < VM_PAGE_DIRECTMAP_LIMIT {
             return Self {
@@ -119,7 +115,7 @@ impl Drop for Mapping {
     }
 }
 
-/// `pmap_zero_page()` of `i386/i386/phys.c`: zero one physical page.
+/// Zeroes one physical page.
 ///
 /// # Safety
 ///
@@ -131,8 +127,7 @@ pub(crate) unsafe fn zero_page(pa: VmOffset) {
     unsafe { ptr::write_bytes(page, 0, PAGE_SIZE) };
 }
 
-/// `pmap_copy_page()` of `i386/i386/phys.c`: copy one physical page to
-/// another.
+/// Copies one physical page to another.
 ///
 /// # Safety
 ///

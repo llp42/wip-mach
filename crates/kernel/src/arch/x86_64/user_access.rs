@@ -4,8 +4,7 @@
 //   Copyright (c) 1991 IBM Corporation
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! `inst_fetch()`, `copyin()` and `copyout()` of `i386/i386/locore.S` and
-//! `x86_64/locore.S`, which `i386/i386/locore.h` declares.
+//! The guarded user accesses: the instruction fetch and the copies in and out.
 //!
 //! These are the user-memory reads and writes, with every fault fixup
 //! carried in the linker's `mach_recover` section and every
@@ -16,8 +15,7 @@ use core::ffi::{c_int, c_void};
 
 use crate::arch::vm_param::VM_MAX_USER_ADDRESS;
 
-/// `inst_fetch()` of `i386/i386/locore.S` and `x86_64/locore.S`: read the
-/// byte at `eip` with `cs` in `%fs`, or `-1` if the read faults.
+/// Reads the byte at `eip` with `cs` in `%fs`, or `-1` if the read faults.
 ///
 /// The C ABI's `eip` and `cs` are read in the assembly, and each call emits
 /// one `Recovery` pair into `mach_recover`, naming the read and
@@ -64,10 +62,9 @@ pub(crate) unsafe extern "C" fn inst_fetch(eip: c_int, cs: c_int) -> c_int {
     );
 }
 
-/// `_inst_fetch_fault` of `i386/i386/locore.S` and `x86_64/locore.S`: the
-/// `mach_recover` fixup.  The trap enters it with the fault's stack, whose
-/// top is `inst_fetch()`'s return address, so its `ret` returns from naked
-/// `inst_fetch()` with `-1` in `%eax` exactly as the C's label did.
+/// The recovery fixup of [`inst_fetch`].  The trap enters it with the fault's
+/// stack, whose top is `inst_fetch()`'s return address, so its `ret` returns
+/// from the naked `inst_fetch()` with `-1` in `%eax`.
 ///
 /// # Safety
 ///
@@ -83,8 +80,7 @@ unsafe extern "C" fn inst_fetch_fault() -> c_int {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct UserFault;
 
-/// `copyin()` of `i386/i386/locore.S` and `x86_64/locore.S`: copy `cn`
-/// bytes from the user address `userbuf` to the kernel address
+/// Copies `cn` bytes from the user address `userbuf` to the kernel address
 /// `kernelbuf`.
 ///
 /// # Errors
@@ -166,8 +162,8 @@ unsafe extern "C" fn copyin_fail() -> c_int {
     naked_asm!("movq $1, %rax", "ret", options(att_syntax));
 }
 
-/// `copyout()` of `i386/i386/locore.S` and `x86_64/locore.S`: copy `cn`
-/// bytes from the kernel address `kernelbuf` to the user address `userbuf`.
+/// Copies `cn` bytes from the kernel address `kernelbuf` to the user address
+/// `userbuf`.
 ///
 /// # Errors
 ///

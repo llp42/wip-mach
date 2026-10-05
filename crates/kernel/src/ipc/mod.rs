@@ -33,38 +33,31 @@ pub mod mach_debug;
 pub mod mach_msg;
 pub mod mach_port;
 
-/// `IOT_PORT` of <`ipc/ipc_object.h>`: the index of the port cache
-/// `io_alloc()` and `io_free()` select.
+/// The object type of a port, and the index of the port cache.
 pub(crate) const IOT_PORT: usize = 0;
-/// `IOT_PORT_SET` of <`ipc/ipc_object.h>`: the index of the port-set cache.
+/// The object type of a port set, and the index of the port-set cache.
 pub(crate) const IOT_PORT_SET: usize = 1;
-/// `IOT_NUMBER` of <`ipc/ipc_object.h>`: how many object caches there are.
+/// How many object caches there are.
 pub(crate) const IOT_NUMBER: usize = 2;
 
-/// `IO_BITS_KOTYPE` of <`ipc/ipc_object.h>`: the low half of `io_bits` names
-/// the kobject type.
+/// The low half of an object's bits names its kernel-object type.
 const IO_BITS_KOTYPE: u32 = 0x0000_ffff;
-/// `IO_BITS_OTYPE` of <`ipc/ipc_object.h>`: the half-word naming the object's
-/// cache.
+/// The bits naming the object's type and so its cache.
 const IO_BITS_OTYPE: u32 = 0x3fff_0000;
-/// `IO_BITS_PROTECTED_PAYLOAD` of <`ipc/ipc_object.h>`: the port has a
-/// protected payload.
+/// The object bit of a port with a protected payload.
 const IO_BITS_PROTECTED_PAYLOAD: u32 = 0x4000_0000;
-/// `IO_BITS_ACTIVE` of <`ipc/ipc_object.h>`: the sign bit marks a live object.
+/// The object bit of a live object, the sign bit.
 const IO_BITS_ACTIVE: u32 = 0x8000_0000;
-/// `IO_DEAD` of <`ipc/ipc_object.h>`: the one non-null pointer `IP_VALID()`
-/// rejects.
+/// The dead object value: the one non-null pointer [`IpcPort::valid`] rejects.
 const IO_DEAD: *mut c_void = usize::MAX as *mut c_void;
-/// `IE_BITS_TYPE_MASK` of <`ipc/ipc_entry.h>`: the capability-type field.
+/// The capability-type bits of an entry.
 const IE_BITS_TYPE_MASK: u32 = 0x001f_0000;
-/// `IE_BITS_MAREQUEST` of <`ipc/ipc_entry.h>`: the entry has a msg-accepted
-/// request pending.
+/// The entry bit of a pending msg-accepted request.
 const IE_BITS_MAREQUEST: u32 = 0x0020_0000;
 
-/// `MACH_PORT_TYPE_RECEIVE` of <mach/port.h>: the entry holds receive
-/// rights.
+/// The type bit of an entry holding a receive right.
 const MACH_PORT_TYPE_RECEIVE: u32 = 1 << 17;
-/// `MACH_PORT_TYPE_PORT_SET` of <mach/port.h>: the entry names a port set.
+/// The type bit of an entry naming a port set.
 const MACH_PORT_TYPE_PORT_SET: u32 = 1 << 19;
 
 /// The `struct ipc_object` header every IPC object begins with.
@@ -73,8 +66,8 @@ const MACH_PORT_TYPE_PORT_SET: u32 = 1 << 19;
 struct IpcObject {
     lock: SimpleLock,
     references: u32,
-    /// `io_bits`: the packed kobject type, cache index, protected-payload
-    /// and active flags the `IO_BITS_*` constants above name.
+    /// The packed kernel-object type, object type, protected-payload and
+    /// active flags the `IO_BITS_*` constants above name.
     bits: u32,
 }
 
@@ -87,8 +80,8 @@ const _: () = {
 };
 
 impl IpcObject {
-    /// `io_check_unlock()` of <`ipc/ipc_object.h>`: unlock, freeing the object
-    /// through its type's cache once the last reference is gone.
+    /// Unlocks the object, freeing it through its type's cache once the last
+    /// reference is gone.
     ///
     /// # Safety
     ///
@@ -121,8 +114,7 @@ impl IpcObject {
     }
 }
 
-/// `struct ipc_mqueue` of <`ipc/ipc_mqueue.h>`: a target's message and blocked
-/// thread stacks, each one pointer.
+/// A target's message queue and blocked-thread queue, each one pointer.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct IpcMqueue {
@@ -136,7 +128,7 @@ impl IpcMqueue {
         self.lock.lock();
     }
 
-    /// `simple_lock_try()` against the queue.
+    /// Tries to take the queue's lock.
     pub(crate) fn try_lock(&self) -> bool {
         self.lock.try_lock()
     }
@@ -145,19 +137,18 @@ impl IpcMqueue {
         self.lock.unlock();
     }
 
-    /// The address of the embedded `struct ipc_kmsg_queue`, one pointer.
+    /// The address of the embedded message queue, one pointer.
     pub(crate) const fn messages(&self) -> *mut c_void {
         ptr::addr_of!(self.messages).cast_mut().cast()
     }
 
-    /// The address of the embedded `struct ipc_thread_queue`, one pointer.
+    /// The address of the embedded thread queue, one pointer.
     pub(crate) const fn threads(&self) -> *mut c_void {
         ptr::addr_of!(self.threads).cast_mut().cast()
     }
 }
 
-/// `struct ipc_target` of <`ipc/ipc_target.h>`: the common part of ports and
-/// port sets, and the whole of a port set.
+/// The common part of ports and port sets, and the whole of a port set.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct IpcTarget {
@@ -167,38 +158,37 @@ pub(crate) struct IpcTarget {
 }
 
 impl IpcTarget {
-    /// `ips_lock()` of <`ipc/ipc_pset.h`>, which port sets share.
+    /// Takes the target's object lock.
     pub(crate) fn lock(&self) {
         self.object.lock.lock();
     }
 
-    /// `ips_unlock()` of <`ipc/ipc_pset.h`>.
+    /// Releases the target's lock.
     pub(crate) fn unlock(&self) {
         self.object.lock.unlock();
     }
 
-    /// `ips_active()` of <`ipc/ipc_pset.h`>.
+    /// Whether the target is live.
     pub(crate) const fn is_active(&self) -> bool {
         self.object.bits & IO_BITS_ACTIVE != 0
     }
 
-    /// `ips_local_name` of <`ipc/ipc_pset.h>`: `ip_target.ipt_name`.
+    /// The name of a port set in its space.
     pub(crate) const fn local_name(&self) -> c_uint {
         self.name
     }
 
-    /// The `pset->ips_local_name = nname` assignment of
-    /// `ipc_right_rename()`.
+    /// Sets the name of a port set in its space.
     pub(crate) const fn set_local_name(&mut self, name: c_uint) {
         self.name = name;
     }
 
-    /// `&pset->ips_messages`: the address of the target's message queue.
+    /// The address of the target's message queue.
     pub(crate) const fn messages(&self) -> *mut IpcMqueue {
         ptr::addr_of!(self.messages).cast_mut()
     }
 
-    /// `ips_check_unlock()` of <`ipc/ipc_pset.h`>.
+    /// Unlocks the target, freeing it once the last reference is gone.
     ///
     /// # Safety
     ///
@@ -210,8 +200,8 @@ impl IpcTarget {
         }
     }
 
-    /// The `io_reference()` macro of <`ipc/ipc_object.h`> against a target's
-    /// object, which the caller already has locked.
+    /// Takes a reference on the target's object, which the caller already has
+    /// locked.
     ///
     /// # Safety
     ///
@@ -223,8 +213,8 @@ impl IpcTarget {
         }
     }
 
-    /// The `io_release()` macro of <`ipc/ipc_object.h`> against a target's
-    /// object, which the caller already has locked.
+    /// Drops a reference on the target's object, which the caller already has
+    /// locked.
     ///
     /// # Safety
     ///
@@ -236,8 +226,7 @@ impl IpcTarget {
         }
     }
 
-    /// The `ipt->ipt_object.io_bits &= ~IO_BITS_ACTIVE` of
-    /// `ipc_pset_destroy()`.
+    /// Marks the target's object dead.
     ///
     /// # Safety
     ///
@@ -249,8 +238,8 @@ impl IpcTarget {
     }
 }
 
-/// The `data` union of `struct ipc_port`: whichever of the receiver, the
-/// destination and the death timestamp the port's state holds.
+/// Whichever of the receiver, the destination and the death timestamp the
+/// port's state holds.
 #[repr(C)]
 #[allow(missing_docs)]
 union IpcPortData {
@@ -259,10 +248,9 @@ union IpcPortData {
     timestamp: u32,
 }
 
-/// `struct ipc_port` of <`ipc/ipc_port.h>`: the whole record `ipc_port_t`
-/// points at, its embedded `struct ipc_target` included.  The C's
-/// `ip_object`, `ip_receiver`, `ip_messages`, `ip_references` and
-/// `ip_receiver_name` names are members of that target.
+/// The whole port record [`IpcPort`] points at, its embedded [`IpcTarget`]
+/// included; the object, receiver, message queue, reference count and receiver
+/// name are members of that target.
 #[repr(C)]
 #[allow(missing_docs)]
 struct IpcPortRecord {
@@ -320,8 +308,8 @@ const _: () = {
     assert!(offset_of!(IpcPortRecord, protected_payload) == 136);
 };
 
-/// The `notify` union of `struct ipc_port_request`: a port pointer or an index
-/// into the table.
+/// A dead-name request's notification: a port pointer or an index into the
+/// table.
 #[repr(C)]
 #[allow(missing_docs)]
 union RequestNotify {
@@ -329,8 +317,8 @@ union RequestNotify {
     index: c_uint,
 }
 
-/// The `name` union of `struct ipc_port_request`: a port name or the size
-/// record the table is growing to.
+/// A dead-name request's name: a port name, or the size record the table is
+/// growing to.
 #[repr(C)]
 #[allow(missing_docs)]
 union RequestName {
@@ -338,8 +326,8 @@ union RequestName {
     size: *mut IpcTableSize,
 }
 
-/// `struct ipc_port_request` of <`ipc/ipc_port.h>`: one dead-name request slot,
-/// or, in element zero, the table's free-list head and size record.
+/// One dead-name request slot, or, in element zero, the table's free-list head
+/// and size record.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct IpcPortRequest {
@@ -355,7 +343,7 @@ const _: () = {
 };
 
 impl IpcPortRequest {
-    /// `ipr_next` of <`ipc/ipc_port.h`>.
+    /// The next free slot, for a free slot or element zero.
     const fn next(&self) -> c_uint {
         // SAFETY: the union's members share one readable word.
         unsafe { self.notify.index }
@@ -365,7 +353,7 @@ impl IpcPortRequest {
         self.notify.index = index;
     }
 
-    /// `ipr_size` of <`ipc/ipc_port.h`>.
+    /// The table's size record, for element zero.
     const fn size(&self) -> *mut IpcTableSize {
         // SAFETY: the union's members share one readable word.
         unsafe { self.name.size }
@@ -375,7 +363,7 @@ impl IpcPortRequest {
         self.name.size = size;
     }
 
-    /// `ipr_name` of <`ipc/ipc_port.h`>.
+    /// The name the request is for.
     const fn name(&self) -> c_uint {
         // SAFETY: the union's members share one readable word.
         unsafe { self.name.name }
@@ -385,7 +373,7 @@ impl IpcPortRequest {
         self.name.name = name;
     }
 
-    /// `ipr_soright` of <`ipc/ipc_port.h`>.
+    /// The send-once right the request notifies.
     const fn soright(&self) -> *mut c_void {
         // SAFETY: the union's members share one readable word.
         unsafe { self.notify.port }
@@ -396,17 +384,17 @@ impl IpcPortRequest {
     }
 }
 
-/// `struct ipc_entry` of <`ipc/ipc_entry.h>`: one capability.
+/// One capability.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct IpcEntry {
     name: c_uint,
-    /// `ie_bits`: the packed capability type, msg-accepted-request flag
-    /// and generation bits the `IE_BITS_*` constants above name.
+    /// The packed capability type, msg-accepted-request flag and generation
+    /// bits the `IE_BITS_*` constants above name.
     bits: u32,
     object: *mut c_void,
-    /// `ie_next_free`/`ie_request`, aliased in one word: the next
-    /// free-list entry, or an index into the dead-name request table.
+    /// The next free entry or an index into the dead-name request table,
+    /// aliased in one word.
     index: *mut c_void,
 }
 
@@ -419,8 +407,7 @@ const _: () = {
     assert!(offset_of!(IpcEntry, index) == 16);
 };
 
-/// `struct ipc_marequest` of <`ipc/ipc_marequest.h>`: one pending
-/// message-accepted request.
+/// One pending message-accepted request.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct IpcMarequest {
@@ -439,8 +426,7 @@ const _: () = {
     assert!(offset_of!(IpcMarequest, next) == 24);
 };
 
-/// `struct ipc_marequest_bucket` of `ipc/ipc_marequest.c`: one bucket of the
-/// msg-accepted request hash table.
+/// One bucket of the msg-accepted request hash table.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct IpcMarequestBucket {
@@ -455,8 +441,7 @@ const _: () = {
     assert!(offset_of!(IpcMarequestBucket, head) == 8);
 };
 
-/// `hash_info_bucket_t` of <`mach_debug/hash_info.h>`: one bucket count, as
-/// `ipc_marequest_info()` reports them.
+/// `hash_info_bucket_t`: one bucket count, as a hash-table report gives it.
 #[repr(transparent)]
 pub struct HashInfoBucket {
     pub(crate) hib_count: c_uint,
@@ -471,7 +456,7 @@ const _: () = {
 /// The name table: a radix tree of entry pointers, keyed by name.
 pub(crate) type NameMap = RadixTree<IpcEntry, Kalloc>;
 
-/// `struct ipc_space` of <`ipc/ipc_space.h>`: the capability namespace.
+/// The capability namespace.
 #[allow(missing_docs)]
 pub(crate) struct IpcSpaceRecord {
     ref_lock: SimpleLock,
@@ -485,8 +470,8 @@ pub(crate) struct IpcSpaceRecord {
     free_list_size: usize,
 }
 
-/// `mach_msg_header_t` of <mach/message.h>: its two pointer-wide unions carry
-/// the remote and local ports.
+/// `mach_msg_header_t`: its two pointer-wide unions carry the remote and local
+/// ports.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct MachMsgHeader {
@@ -509,15 +494,14 @@ const _: () = {
     assert!(offset_of!(MachMsgHeader, id) == 28);
 };
 
-/// `mach_msg_type_t` of <mach/message.h>: the inline descriptor of one body
-/// element.
+/// `mach_msg_type_t`: the inline descriptor of one body element.
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub(crate) struct MachMsgType {
     /// The packed `msgt_name`, `msgt_size` and inline-flag bits;
-    /// [`MachMsgType::new()`] builds it from the C initializer and
-    /// [`MachMsgType::word()`] reads it back for `BAD_TYPECHECK`.
+    /// [`MachMsgType::new()`] builds it from its fields and
+    /// [`MachMsgType::word()`] reads it back for the reply type check.
     word: u32,
     number: u32,
 }
@@ -535,7 +519,7 @@ impl MachMsgType {
         Self { word, number }
     }
 
-    /// The first word, the one the C's `BAD_TYPECHECK` compares.
+    /// The first word, the one the reply type check compares.
     pub(crate) const fn word(self) -> u32 {
         self.word
     }
@@ -551,8 +535,8 @@ impl MachMsgType {
     }
 }
 
-/// `mig_reply_header_t` of <`mach/mig_errors.h>`: the MIG reply preamble a
-/// server sends back through the reply port.
+/// `mig_reply_header_t`: the reply preamble a server sends back through the
+/// reply port.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct MigReplyHeader {
@@ -569,8 +553,8 @@ const _: () = {
     assert!(offset_of!(MigReplyHeader, ret_code) == 40);
 };
 
-/// `struct ipc_kmsg` of <`ipc/ipc_kmsg.h>`: the header of a kernel message
-/// buffer, whose body follows the header in the same allocation.
+/// The header of a kernel message buffer, whose body follows the header in the
+/// same allocation.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct IpcKmsg {
@@ -602,18 +586,16 @@ impl IpcPort {
         NonNull::new(port).map(Self)
     }
 
-    /// `IP_VALID(port)` of <`ipc/ipc_port.h>`: a port that is neither `IP_NULL`
-    /// nor `IP_DEAD`.
+    /// The port `port` is, when it is neither null nor dead.
     pub(crate) fn valid(port: *mut c_void) -> Option<Self> {
         if port.is_null() || ptr::eq(port, IO_DEAD) {
             return None;
         }
-        // SAFETY: neither null nor dead, as `IP_VALID()` requires.
+        // SAFETY: neither null nor dead, as a valid port must be.
         Some(unsafe { Self::from_raw(port) })
     }
 
-    /// A port from the C side where `IP_VALID()` already established that the
-    /// pointer is live.
+    /// A port from the C side whose validity the caller already established.
     ///
     /// # Safety
     ///
@@ -640,23 +622,22 @@ impl IpcPort {
         self.0
     }
 
-    /// The full `struct ipc_port` behind the handle.
+    /// The full port record behind the handle.
     const fn record(self) -> *mut IpcPortRecord {
         self.0.as_ptr().cast()
     }
 
-    /// `ip_lock()` of <`ipc/ipc_port.h>`: the port's `io_lock_data`, the first
-    /// member of `struct ipc_port`.
+    /// Takes the port's lock, the first member of its record.
     ///
     /// # Safety
     ///
-    /// The port must be live, as `IP_VALID()` asserts, and this call must not
-    /// already hold the port lock.
+    /// The port must be live and valid, and this call must not already hold
+    /// the port lock.
     pub(crate) unsafe fn lock(self) {
         unsafe { (*self.record()).target.object.lock.lock() };
     }
 
-    /// `ip_unlock()` of <`ipc/ipc_port.h`>.
+    /// Releases the port's lock.
     ///
     /// # Safety
     ///
@@ -665,7 +646,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.object.lock.unlock() };
     }
 
-    /// `ip_active()` of <`ipc/ipc_port.h`>.
+    /// Whether the port is live.
     ///
     /// # Safety
     ///
@@ -675,7 +656,7 @@ impl IpcPort {
         bits & IO_BITS_ACTIVE != 0
     }
 
-    /// `ip_kotype()` of <`ipc/ipc_port.h`>.
+    /// The port's kernel-object type.
     ///
     /// # Safety
     ///
@@ -684,7 +665,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.object.bits & IO_BITS_KOTYPE }
     }
 
-    /// `port->ip_kobject` of <`ipc/ipc_port.h`>.
+    /// The port's kernel object.
     ///
     /// # Safety
     ///
@@ -693,8 +674,7 @@ impl IpcPort {
         unsafe { (*self.record()).kobject }
     }
 
-    /// The `port->ip_kobject = kobject` assignment of `vm_object_enter()`,
-    /// which the C makes without `ipc_kobject_set()`.
+    /// Sets the port's kernel object without touching its type.
     ///
     /// # Safety
     ///
@@ -704,8 +684,8 @@ impl IpcPort {
         unsafe { (*self.record()).kobject = kobject };
     }
 
-    /// The `ipc_kobject_set_locked()` body of `kern/ipc_kobject.c`: name the
-    /// kernel object and its type in the port's bits.
+    /// Names the kernel object and its type in the port's bits, with the port
+    /// locked.
     ///
     /// # Safety
     ///
@@ -724,9 +704,8 @@ impl IpcPort {
         }
     }
 
-    /// The `ip_reference()` macro of <`ipc/ipc_port.h>`: the bare
-    /// `io_references++` the C makes with the port lock already held, as
-    /// opposed to [`IpcPort::reference()`]'s locking function.
+    /// Takes a reference with the port lock already held, as opposed to
+    /// [`IpcPort::reference()`], which locks.
     ///
     /// # Safety
     ///
@@ -739,8 +718,7 @@ impl IpcPort {
         }
     }
 
-    /// The `port->ip_srights++` of the retrieval fast paths and the C's port
-    /// routines.
+    /// Counts one more send right.
     ///
     /// # Safety
     ///
@@ -753,7 +731,7 @@ impl IpcPort {
         }
     }
 
-    /// The `port->ip_srights--` of the C's port routines.
+    /// Counts one send right fewer.
     ///
     /// # Safety
     ///
@@ -765,7 +743,7 @@ impl IpcPort {
         }
     }
 
-    /// The `port->ip_srights = count` assignment of `ipc_port_init()`.
+    /// Sets the port's send-right count.
     ///
     /// # Safety
     ///
@@ -774,7 +752,7 @@ impl IpcPort {
         unsafe { (*self.record()).srights = count };
     }
 
-    /// `ip_srights` of <`ipc/ipc_port.h`>.
+    /// The port's send-right count.
     ///
     /// # Safety
     ///
@@ -783,7 +761,7 @@ impl IpcPort {
         unsafe { (*self.record()).srights }
     }
 
-    /// The `port->ip_mscount++` of `ipc_port_make_send()`.
+    /// Counts one more send right made from the receive right.
     ///
     /// # Safety
     ///
@@ -795,7 +773,7 @@ impl IpcPort {
         }
     }
 
-    /// `ip_mscount` of <`ipc/ipc_port.h`>.
+    /// The port's make-send count.
     ///
     /// # Safety
     ///
@@ -804,7 +782,7 @@ impl IpcPort {
         unsafe { (*self.record()).mscount }
     }
 
-    /// `ipc_port_set_mscount()` of <`ipc/ipc_port.h`>.
+    /// Sets the port's make-send count.
     ///
     /// # Safety
     ///
@@ -813,7 +791,7 @@ impl IpcPort {
         unsafe { (*self.record()).mscount = mscount };
     }
 
-    /// The `port->ip_sorights++` of `ipc_port_make_sonce()`.
+    /// Counts one more send-once right.
     ///
     /// # Safety
     ///
@@ -825,7 +803,7 @@ impl IpcPort {
         }
     }
 
-    /// The `port->ip_sorights--` of `ipc_port_release_sonce()`.
+    /// Counts one send-once right fewer.
     ///
     /// # Safety
     ///
@@ -838,7 +816,7 @@ impl IpcPort {
         }
     }
 
-    /// The `port->ip_sorights = count` assignment of `ipc_port_init()`.
+    /// Sets the port's send-once-right count.
     ///
     /// # Safety
     ///
@@ -847,7 +825,7 @@ impl IpcPort {
         unsafe { (*self.record()).sorights = count };
     }
 
-    /// `ip_sorights` of <`ipc/ipc_port.h`>.
+    /// The port's send-once-right count.
     ///
     /// # Safety
     ///
@@ -856,7 +834,7 @@ impl IpcPort {
         unsafe { (*self.record()).sorights }
     }
 
-    /// `ip_receiver_name` of <`ipc/ipc_port.h>`: `ip_target.ipt_name`.
+    /// The name of the port's receive right in its receiver's space.
     ///
     /// # Safety
     ///
@@ -865,7 +843,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.name }
     }
 
-    /// The `port->ip_receiver_name = name` assignment.
+    /// Sets the name of the port's receive right.
     ///
     /// # Safety
     ///
@@ -874,7 +852,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.name = name };
     }
 
-    /// `ip_receiver` of <`ipc/ipc_port.h>`: the `data.receiver` union member.
+    /// The space holding the port's receive right.
     ///
     /// # Safety
     ///
@@ -883,7 +861,7 @@ impl IpcPort {
         unsafe { (*self.record()).data.receiver }
     }
 
-    /// The `port->ip_receiver = space` assignment.
+    /// Sets the space holding the port's receive right.
     ///
     /// # Safety
     ///
@@ -892,8 +870,7 @@ impl IpcPort {
         unsafe { (*self.record()).data.receiver = space };
     }
 
-    /// `ip_destination` of <`ipc/ipc_port.h>`: the `data.destination` union
-    /// member.
+    /// The port the receive right is in transit to.
     ///
     /// # Safety
     ///
@@ -902,7 +879,7 @@ impl IpcPort {
         unsafe { (*self.record()).data.destination }
     }
 
-    /// The `port->ip_destination = dest` assignment.
+    /// Sets the port the receive right is in transit to.
     ///
     /// # Safety
     ///
@@ -911,7 +888,7 @@ impl IpcPort {
         unsafe { (*self.record()).data.destination = destination };
     }
 
-    /// `ip_timestamp` of <`ipc/ipc_port.h>`: the `data.timestamp` union member.
+    /// The timestamp of the port's death.
     ///
     /// # Safety
     ///
@@ -920,8 +897,7 @@ impl IpcPort {
         unsafe { (*self.record()).data.timestamp }
     }
 
-    /// The `port->ip_timestamp = timestamp` assignment of
-    /// `ipc_port_destroy()`.
+    /// Records the timestamp of the port's death.
     ///
     /// # Safety
     ///
@@ -930,7 +906,7 @@ impl IpcPort {
         unsafe { (*self.record()).data.timestamp = timestamp };
     }
 
-    /// `ip_nsrequest` of <`ipc/ipc_port.h`>.
+    /// The port's no-senders request.
     ///
     /// # Safety
     ///
@@ -939,7 +915,7 @@ impl IpcPort {
         unsafe { NonNull::new((*self.record()).nsrequest) }
     }
 
-    /// The `port->ip_nsrequest = notify` assignment.
+    /// Sets the port's no-senders request.
     ///
     /// # Safety
     ///
@@ -951,7 +927,7 @@ impl IpcPort {
         }
     }
 
-    /// `ip_pdrequest` of <`ipc/ipc_port.h`>.
+    /// The port's port-destroyed request.
     ///
     /// # Safety
     ///
@@ -960,7 +936,7 @@ impl IpcPort {
         unsafe { NonNull::new((*self.record()).pdrequest) }
     }
 
-    /// The `port->ip_pdrequest = notify` assignment.
+    /// Sets the port's port-destroyed request.
     ///
     /// # Safety
     ///
@@ -972,7 +948,7 @@ impl IpcPort {
         }
     }
 
-    /// `ip_dnrequests` of <`ipc/ipc_port.h>`: element zero of the table.
+    /// The port's dead-name request table: element zero of it.
     ///
     /// # Safety
     ///
@@ -981,7 +957,7 @@ impl IpcPort {
         unsafe { (*self.record()).dnrequests }
     }
 
-    /// The `port->ip_dnrequests = table` assignment.
+    /// Sets the port's dead-name request table.
     ///
     /// # Safety
     ///
@@ -990,7 +966,7 @@ impl IpcPort {
         unsafe { (*self.record()).dnrequests = table };
     }
 
-    /// `ip_pset` of <`ipc/ipc_port.h`>.
+    /// The port set the port belongs to, or null.
     ///
     /// # Safety
     ///
@@ -1008,7 +984,8 @@ impl IpcPort {
         unsafe { (*self.record()).pset = pset };
     }
 
-    /// The `port->ip_cur_target = target` assignment.
+    /// Sets the target whose queue the port's messages go to: its own or its
+    /// set's.
     ///
     /// # Safety
     ///
@@ -1017,7 +994,7 @@ impl IpcPort {
         unsafe { (*self.record()).cur_target = target };
     }
 
-    /// `ip_seqno` of <`ipc/ipc_port.h`>, which the message queue lock protects.
+    /// The port's sequence number, which the message queue lock protects.
     ///
     /// # Safety
     ///
@@ -1026,7 +1003,7 @@ impl IpcPort {
         unsafe { (*self.record()).seqno }
     }
 
-    /// `ip_seqno` of <`ipc/ipc_port.h`>, locked by the message queue.
+    /// Sets the port's sequence number, under the message queue lock.
     ///
     /// # Safety
     ///
@@ -1035,7 +1012,7 @@ impl IpcPort {
         unsafe { (*self.record()).seqno = seqno };
     }
 
-    /// `ip_msgcount` of <`ipc/ipc_port.h`>.
+    /// The number of messages queued on the port.
     ///
     /// # Safety
     ///
@@ -1044,7 +1021,7 @@ impl IpcPort {
         unsafe { (*self.record()).msgcount }
     }
 
-    /// `ip_msgcount` of <`ipc/ipc_port.h`>.
+    /// Sets the number of messages queued on the port.
     ///
     /// # Safety
     ///
@@ -1053,7 +1030,7 @@ impl IpcPort {
         unsafe { (*self.record()).msgcount = msgcount };
     }
 
-    /// `ip_qlimit` of <`ipc/ipc_port.h`>.
+    /// The port's queue limit.
     ///
     /// # Safety
     ///
@@ -1062,7 +1039,7 @@ impl IpcPort {
         unsafe { (*self.record()).qlimit }
     }
 
-    /// The `port->ip_qlimit = qlimit` assignment.
+    /// Sets the port's queue limit.
     ///
     /// # Safety
     ///
@@ -1071,7 +1048,7 @@ impl IpcPort {
         unsafe { (*self.record()).qlimit = qlimit };
     }
 
-    /// `ip_protected_payload` of <`ipc/ipc_port.h`>.
+    /// Sets the port's protected payload.
     ///
     /// # Safety
     ///
@@ -1080,7 +1057,7 @@ impl IpcPort {
         unsafe { (*self.record()).protected_payload = payload };
     }
 
-    /// `ip_protected_payload` of <`ipc/ipc_port.h`>.
+    /// The port's protected payload.
     ///
     /// # Safety
     ///
@@ -1089,7 +1066,7 @@ impl IpcPort {
         unsafe { (*self.record()).protected_payload }
     }
 
-    /// `ipc_port_flag_protected_payload()` of <`ipc/ipc_port.h`>.
+    /// Whether the port has a protected payload.
     ///
     /// # Safety
     ///
@@ -1099,7 +1076,7 @@ impl IpcPort {
         bits & IO_BITS_PROTECTED_PAYLOAD != 0
     }
 
-    /// `ipc_port_flag_protected_payload_set()` of <`ipc/ipc_port.h`>.
+    /// Marks the port as having a protected payload.
     ///
     /// # Safety
     ///
@@ -1111,7 +1088,7 @@ impl IpcPort {
         }
     }
 
-    /// `ipc_port_flag_protected_payload_clear()` of <`ipc/ipc_port.h`>.
+    /// Marks the port as having no protected payload.
     ///
     /// # Safety
     ///
@@ -1123,8 +1100,7 @@ impl IpcPort {
         }
     }
 
-    /// The `port->ip_object.io_bits &= ~IO_BITS_ACTIVE` of
-    /// `ipc_port_destroy()`.
+    /// Marks the port dead.
     ///
     /// # Safety
     ///
@@ -1136,8 +1112,7 @@ impl IpcPort {
         }
     }
 
-    /// The `port->ip_object.io_bits = bits` assignment of
-    /// `ipc_port_alloc_special()`.
+    /// Sets the port's object bits.
     ///
     /// # Safety
     ///
@@ -1146,8 +1121,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.object.bits = bits };
     }
 
-    /// The `port->ip_references = 1` assignment of
-    /// `ipc_port_alloc_special()`.
+    /// Sets the port's reference count.
     ///
     /// # Safety
     ///
@@ -1156,7 +1130,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.object.references = references };
     }
 
-    /// `ip_references` of <`ipc/ipc_port.h>`: the port's reference count.
+    /// The port's reference count.
     ///
     /// # Safety
     ///
@@ -1165,7 +1139,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.object.references }
     }
 
-    /// `ip_lock_init()` of <`ipc/ipc_port.h`>.
+    /// Initializes the port's lock.
     ///
     /// # Safety
     ///
@@ -1174,8 +1148,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.object.lock.init() };
     }
 
-    /// The `ip_release()` macro of <`ipc/ipc_port.h>`: the bare
-    /// `io_references--` the C makes with the port lock already held.
+    /// Drops a reference with the port lock already held.
     ///
     /// # Safety
     ///
@@ -1189,7 +1162,7 @@ impl IpcPort {
         }
     }
 
-    /// `ip_lock_try()` of <`ipc/ipc_port.h`>.
+    /// Tries to take the port's lock.
     ///
     /// # Safety
     ///
@@ -1198,7 +1171,7 @@ impl IpcPort {
         unsafe { (*self.record()).target.object.lock.try_lock() }
     }
 
-    /// `ip_check_unlock()` of <`ipc/ipc_port.h`>.
+    /// Unlocks the port, freeing it once the last reference is gone.
     ///
     /// # Safety
     ///
@@ -1212,7 +1185,7 @@ impl IpcPort {
         }
     }
 
-    /// `&port->ip_messages`, the queue the port's target carries.
+    /// The queue the port's target carries.
     ///
     /// # Safety
     ///
@@ -1221,7 +1194,7 @@ impl IpcPort {
         unsafe { ptr::addr_of_mut!((*self.record()).target.messages) }
     }
 
-    /// `&port->ip_blocked`, the port's queue of blocked senders.
+    /// The port's queue of blocked senders.
     ///
     /// # Safety
     ///
@@ -1230,8 +1203,7 @@ impl IpcPort {
         unsafe { ptr::addr_of_mut!((*self.record()).blocked).cast() }
     }
 
-    /// `ip_reference()` of <`ipc/ipc_port.h`>, the real `ipc_object_reference()`
-    /// function.
+    /// Takes a reference on the port, under its lock.
     ///
     /// # Safety
     ///
@@ -1240,8 +1212,8 @@ impl IpcPort {
         unsafe { ipc_object::reference(self.as_ptr()) };
     }
 
-    /// `ip_release()` of <`ipc/ipc_port.h`>, the real `ipc_object_release()`
-    /// function.
+    /// Drops a reference on the port, under its lock, freeing it on the last
+    /// one.
     ///
     /// # Safety
     ///
@@ -1257,7 +1229,7 @@ impl IpcPort {
 pub struct IpcSpace(NonNull<c_void>);
 
 impl IpcSpace {
-    /// A space from the C side, or `None` for `IS_NULL`.
+    /// A space from the C side, or `None` for a null one.
     pub(crate) fn new(space: *mut c_void) -> Option<Self> {
         NonNull::new(space).map(Self)
     }
@@ -1280,8 +1252,7 @@ impl IpcSpace {
         self.0.as_ptr().cast()
     }
 
-    /// `ipc_entry_lookup()` of <`ipc/ipc_space.h>`: the named capability, or
-    /// `None` when the name denotes nothing.
+    /// The named capability, or `None` when the name denotes nothing.
     ///
     /// # Safety
     ///

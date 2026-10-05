@@ -3,12 +3,10 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The notification-sending routines, which `ipc/ipc_notify.c` used to
-//! define and `ipc/ipc_notify.h` declares.
+//! The notification-sending routines.
 //!
-//! The C built six static templates once and copied one into each message.
-//! The layouts are fixed, so the senders here build the message where they
-//! send it and `ipc_notify_init()` has nothing left to initialize.
+//! The notification layouts are fixed, so each sender builds its message where
+//! it sends it, and [`init`] has nothing to initialize.
 
 use crate::ipc::ipc_kmsg::{self, Kmsg};
 use crate::ipc::ipc_mqueue;
@@ -19,40 +17,40 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr::{self, NonNull};
 
-/// `MACH_NOTIFY_PORT_DELETED` of <mach/notify.h>.
+/// The message id of a port-deleted notification.
 const PORT_DELETED: c_int = 0o101;
-/// `MACH_NOTIFY_MSG_ACCEPTED` of <mach/notify.h>.
+/// The message id of a msg-accepted notification.
 const MSG_ACCEPTED: c_int = 0o102;
-/// `MACH_NOTIFY_PORT_DESTROYED` of <mach/notify.h>.
+/// The message id of a port-destroyed notification.
 const PORT_DESTROYED: c_int = 0o105;
-/// `MACH_NOTIFY_NO_SENDERS` of <mach/notify.h>.
+/// The message id of a no-senders notification.
 const NO_SENDERS: c_int = 0o106;
-/// `MACH_NOTIFY_SEND_ONCE` of <mach/notify.h>.
+/// The message id of a send-once notification.
 const SEND_ONCE: c_int = 0o107;
-/// `MACH_NOTIFY_DEAD_NAME` of <mach/notify.h>.
+/// The message id of a dead-name notification.
 const DEAD_NAME: c_int = 0o110;
 
-/// `NOTIFY_MSGH_SEQNO` of `ipc/ipc_notify.c`.
+/// The sequence number a notification's header carries.
 const NOTIFY_MSGH_SEQNO: c_uint = 0;
 
-/// `MACH_MSG_TYPE_PORT_NAME` of <mach/message.h>.
+/// The type of a port name in a message body.
 const MACH_MSG_TYPE_PORT_NAME: c_uint = 15;
-/// `MACH_MSG_TYPE_PORT_RECEIVE` of <mach/message.h>.
+/// The type of a receive right in a message body.
 const MACH_MSG_TYPE_PORT_RECEIVE: c_uint = 16;
-/// `MACH_MSG_TYPE_INTEGER_32` of <mach/message.h>.
+/// The type of a 32-bit integer in a message body.
 const MACH_MSG_TYPE_INTEGER_32: c_uint = 2;
-/// `MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE, 0)` of <mach/message.h>.
+/// The header bits of a message to a send-once right.
 const MACH_SEND_ONCE_BITS: u32 = 18;
-/// `MACH_MSGH_BITS_COMPLEX` of <mach/message.h>.
+/// The header bit of a message that carries rights or out-of-line memory.
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 
-/// `PORT_NAME_T_SIZE_IN_BITS` of <`ipc/ipc_machdep.h`>.
+/// The size of a port name in a message body, in bits.
 const PORT_NAME_T_SIZE_IN_BITS: c_uint = 32;
-/// `PORT_T_SIZE_IN_BITS` of <`ipc/ipc_machdep.h`>.
+/// The size of a port in a message body, in bits.
 const PORT_T_SIZE_IN_BITS: c_uint = 8 * size_of::<*mut c_void>() as c_uint;
 
-/// `mach_msg_type_t` of <mach/message.h>: the bitfield word and the
-/// `msgt_number` member that follows it.
+/// `mach_msg_type_t`: the bitfield word and the `msgt_number` member that
+/// follows it.
 #[repr(C)]
 #[allow(missing_docs)]
 struct MsgType {
@@ -71,8 +69,8 @@ impl MsgType {
     }
 }
 
-/// The notification record of <mach/notify.h>: the message header and the
-/// type descriptor and payload that follow it.
+/// A notification message: the header and the type descriptor and payload that
+/// follow it.
 #[repr(C)]
 #[allow(missing_docs)]
 struct Notification {
@@ -202,10 +200,10 @@ unsafe fn build(id: c_int, port: *mut c_void, body: Body) -> Option<Kmsg> {
     Some(kmsg)
 }
 
-/// `ipc_notify_init()` in C.
+/// Initializes the notifications; there is nothing to do.
 pub(crate) const fn init() {}
 
-/// `ipc_notify_port_deleted()` in C.
+/// Tells `port` that `name` was deleted.
 ///
 /// # Safety
 ///
@@ -227,7 +225,7 @@ pub(crate) unsafe fn port_deleted(port: *mut c_void, name: c_uint) {
     let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
-/// `ipc_notify_msg_accepted()` in C.
+/// Tells `port` that the queue of `name` accepted a message.
 ///
 /// # Safety
 ///
@@ -249,7 +247,7 @@ pub(crate) unsafe fn msg_accepted(port: *mut c_void, name: c_uint) {
     let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
-/// `ipc_notify_port_destroyed()` in C.
+/// Hands `port` the receive right `right` of a destroyed port.
 ///
 /// # Safety
 ///
@@ -276,7 +274,8 @@ pub(crate) unsafe fn port_destroyed(port: *mut c_void, right: *mut c_void) {
     let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
-/// `ipc_notify_no_senders()` in C.
+/// Tells `port` that it has no more senders, with its make-send count
+/// `mscount`.
 ///
 /// # Safety
 ///
@@ -299,7 +298,7 @@ pub(crate) unsafe fn no_senders(port: NonNull<c_void>, mscount: c_uint) {
     let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
-/// `ipc_notify_send_once()` in C.
+/// Sends the send-once notification to `port`, whose right died unused.
 ///
 /// # Safety
 ///
@@ -320,7 +319,7 @@ pub(crate) unsafe fn send_once(port: NonNull<c_void>) {
     let _ = unsafe { ipc_mqueue::send_always(kmsg.as_ptr()) };
 }
 
-/// `ipc_notify_dead_name()` in C.
+/// Tells `port` that `name` became a dead name.
 ///
 /// # Safety
 ///

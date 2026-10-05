@@ -17,8 +17,8 @@ use crate::mig::code::KERN_SUCCESS;
 use crate::vm::types::VmProt;
 use core::ffi::{c_int, c_uint};
 
-/// `device_pager_data_request()` of `device/dev_pager.c`, the MIG
-/// `memory_object_data_request` server entry.
+/// Maps the device pages of the requested range into the object, serving
+/// `memory_object_data_request`.
 ///
 /// # Safety
 ///
@@ -36,8 +36,8 @@ pub unsafe extern "C" fn device_pager_data_request(
     KERN_SUCCESS
 }
 
-/// `device_pager_init_pager()` of `device/dev_pager.c`, the MIG
-/// `memory_object_init` server entry.
+/// Binds the device pager to the kernel's `pager_request`, serving
+/// `memory_object_init`.
 ///
 /// # Safety
 ///
@@ -53,8 +53,7 @@ pub unsafe extern "C" fn device_pager_init_pager(
     KERN_SUCCESS
 }
 
-/// `device_pager_terminate()` of `device/dev_pager.c`, the MIG
-/// `memory_object_terminate` server entry.
+/// Releases the device pager's ports, serving `memory_object_terminate`.
 ///
 /// # Safety
 ///
@@ -70,7 +69,7 @@ pub unsafe extern "C" fn device_pager_terminate(
     KERN_SUCCESS
 }
 
-/// `device_pager_copy()` of `device/dev_pager.c`.
+/// Halts: the kernel never copies a device pager's object.
 ///
 /// # Safety
 ///
@@ -90,7 +89,7 @@ pub unsafe extern "C" fn device_pager_copy(
     kpanic!("device_pager_copy", "(device_pager)copy: called")
 }
 
-/// `device_pager_supply_completed()` of `device/dev_pager.c`.
+/// Halts: a device pager never supplies data, so no supply completes.
 ///
 /// # Safety
 ///
@@ -114,7 +113,7 @@ pub unsafe extern "C" fn device_pager_supply_completed(
     )
 }
 
-/// `device_pager_data_return()` of `device/dev_pager.c`.
+/// Halts: the kernel never returns data to a device pager.
 ///
 /// # Safety
 ///
@@ -139,7 +138,7 @@ pub unsafe extern "C" fn device_pager_data_return(
     )
 }
 
-/// `device_pager_change_completed()` of `device/dev_pager.c`.
+/// Halts: a device pager never changes its object's attributes.
 ///
 /// # Safety
 ///
@@ -160,7 +159,7 @@ pub unsafe extern "C" fn device_pager_change_completed(
     )
 }
 
-/// `device_pager_data_unlock()` of `device/dev_pager.c`.
+/// Halts: a device pager never locks data, so none is unlocked.
 ///
 /// # Safety
 ///
@@ -183,7 +182,7 @@ pub unsafe extern "C" fn device_pager_data_unlock(
     )
 }
 
-/// `device_pager_lock_completed()` of `device/dev_pager.c`.
+/// Halts: a device pager never asks for a lock.
 ///
 /// # Safety
 ///

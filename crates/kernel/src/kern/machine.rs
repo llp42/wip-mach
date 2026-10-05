@@ -9,8 +9,8 @@
 //   Copyright (c) 1991,1990,1989,1988,1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! `struct machine_slot` of `include/mach/machine.h`, and the machine
-//! abstraction of `kern/machine.c`.
+//! The machine slots and the machine abstraction: CPUs coming up and going
+//! down, processor assignment and shutdown, and reboot.
 
 use crate::arch::x86_64::cswitch;
 use crate::arch::x86_64::model_dep::halt_cpu;
@@ -42,26 +42,24 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering;
 
-/// `CPU_STATE_MAX` in <mach/machine.h>: the per-state tick counters every
-/// machine slot carries.
+/// The per-state tick counters every machine slot carries.
 pub const CPU_STATE_MAX: usize = 3;
 
-/// `HZ` in <`machine/mach_param.h`>: the ticks per second on `x86_64`.
+/// The ticks per second.
 pub const CLOCK_HZ: c_int = 100;
 const _: () = assert!(CLOCK_HZ as u64 == clock::HZ);
 
-/// The microseconds per tick: `tick` of `kern/mach_clock.c`.
+/// The microseconds per tick.
 pub const TICK: c_int = 1_000_000 / CLOCK_HZ;
 
-/// `CPU_STATE_USER` of <`kern/processor.h`>: the `cpu_ticks` user index.
+/// The `cpu_ticks` user index.
 pub(crate) const CPU_STATE_USER: c_int = 0;
-/// `CPU_STATE_SYSTEM` of <`kern/processor.h`>: the `cpu_ticks` system index.
+/// The `cpu_ticks` system index.
 pub(crate) const CPU_STATE_SYSTEM: c_int = 1;
-/// `CPU_STATE_IDLE` of <`kern/processor.h`>: the `cpu_ticks` idle index.
+/// The `cpu_ticks` idle index.
 pub(crate) const CPU_STATE_IDLE: c_int = 2;
 
-/// `struct machine_slot` of <mach/machine.h>: what the arch probe records
-/// about each possible CPU.
+/// `struct machine_slot`: what the arch probe records about each possible CPU.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -99,8 +97,8 @@ const _: () = assert!(offset_of!(MachineSlot, running) == 12);
 const _: () = assert!(offset_of!(MachineSlot, cpu_ticks) == 16);
 const _: () = assert!(offset_of!(MachineSlot, clock_freq) == 28);
 
-/// `struct machine_info` of <mach/machine.h>: what `kern/startup.c` records
-/// about the machine as a whole.
+/// `struct machine_info`: what the boot path records about the machine as a
+/// whole.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct MachineInfo {
@@ -122,7 +120,7 @@ const _: () = {
     assert!(offset_of!(MachineInfo, memory_size) == 16);
 };
 
-/// `machine_info` of kern/machine.c.
+/// What the boot path records about the machine as a whole.
 static mut MACHINE_INFO: MachineInfo = MachineInfo {
     major_version: 0,
     minor_version: 0,
@@ -131,20 +129,20 @@ static mut MACHINE_INFO: MachineInfo = MachineInfo {
     memory_size: 0,
 };
 
-/// `machine_slot[NCPUS]` of <mach/machine.h>.
+/// The slot of each possible CPU.
 ///
 /// The `x86_64` `pmap` reads the symbol's `cpu_type` field.
 pub(crate) static mut MACHINE_SLOT: [MachineSlot; MAX_NCPUS] =
     [const { MachineSlot::zeroed() }; MAX_NCPUS];
 
-/// `action_queue` of kern/machine.c: the assign/shutdown queue.
+/// The assign/shutdown queue.
 static ACTION_QUEUE: SyncCell<ProcessorQueue> =
     SyncCell(UnsafeCell::new(ProcessorQueue::new()));
 
-/// `action_lock` of kern/machine.c.
+/// Serializes the action queue.
 static ACTION_LOCK: SimpleLock = SimpleLock::new();
 
-/// The C `machine_slot[cpu]` of <mach/machine.h>.
+/// The slot of CPU `cpu`.
 pub(crate) fn slot(cpu: CpuId) -> *mut MachineSlot {
     // SAFETY: `cpu` is below `MAX_NCPUS`, the array's length, so the element
     // the offset reaches is inside the array.
@@ -155,7 +153,7 @@ pub(crate) fn slot(cpu: CpuId) -> *mut MachineSlot {
     }
 }
 
-/// `cpu_idle()` of <kern/processor.h>: whether CPU `cpu` is idle.
+/// Whether CPU `cpu` is idle.
 fn cpu_idle(cpu: CpuId) -> bool {
     processor_at(cpu).state() == ProcessorState::Idle
 }
@@ -240,16 +238,15 @@ pub(crate) fn action_lock() -> &'static SimpleLock {
     &ACTION_LOCK
 }
 
-/// The `RB_*` flag word of <sys/reboot.h>, the `host_reboot()` options.
+/// The option word of `host_reboot()`.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RebootOptions(c_int);
 
 impl RebootOptions {
-    /// `RB_DEBUGGER`: enter the kernel debugger from user level instead of
-    /// rebooting.
+    /// Enter the kernel debugger from user level instead of rebooting.
     const DEBUGGER: Self = Self(0x1000);
-    /// `RB_HALT`: do not reboot, just halt.
+    /// Halt instead of rebooting.
     const HALT: Self = Self(0x08);
 
     /// Whether every bit of `other` is set in `self`.
@@ -280,8 +277,7 @@ fn reboot(
     Ok(())
 }
 
-/// `cpu_up()` of kern/machine.c: flag `cpu` as up and running.  Called when a
-/// processor comes online.
+/// Flags `cpu` as up and running.  Called when a processor comes online.
 ///
 /// # Safety
 ///
@@ -320,8 +316,7 @@ pub(crate) unsafe fn cpu_up(cpu: c_int) {
     }
 }
 
-/// `cpu_down()` of kern/machine.c: flag `cpu` as down.  Called when a
-/// processor is about to go offline.
+/// Flags `cpu` as down.  Called when a processor is about to go offline.
 ///
 /// # Safety
 ///
@@ -346,13 +341,13 @@ unsafe fn cpu_down(cpu: CpuId) {
     }
 }
 
-/// `processor_request_action()` of kern/machine.c: queue `processor` for
-/// assignment to `new_pset`, or for shutdown when it is null.
+/// Queues `processor` for assignment to `new_pset`, or for shutdown when it is
+/// null.
 ///
 /// # Safety
 ///
 /// `processor` must be a live processor in a live set with its lock held by
-/// the caller, as `processor_assign()` and `processor_shutdown()` arrange.
+/// the caller, as [`assign`] and [`shutdown`] arrange.
 unsafe fn request_action(
     processor: *mut Processor,
     new_pset: Option<NonNull<ProcessorSet>>,
@@ -436,8 +431,7 @@ unsafe fn set_action_state(
     }
 }
 
-/// `processor_assign()` of kern/machine.c: change the set `processor` is
-/// assigned to.
+/// Changes the set `processor` is assigned to.
 ///
 /// # Safety
 ///
@@ -514,7 +508,7 @@ pub(crate) unsafe fn assign(
     }
 }
 
-/// `processor_shutdown()` of kern/machine.c: queue `processor` for shutdown.
+/// Queues `processor` for shutdown.
 ///
 /// # Safety
 ///
@@ -546,8 +540,7 @@ pub(crate) unsafe fn shutdown(processor: *mut Processor) -> Result<(), Error> {
     }
 }
 
-/// `processor_doaction()` of kern/machine.c: perform the shutdown or the
-/// reassignment the action queue recorded.
+/// Performs the shutdown or the reassignment the action queue recorded.
 ///
 /// # Safety
 ///
@@ -831,13 +824,12 @@ unsafe fn shutdown_tail(
     }
 }
 
-/// `action_thread()` of kern/machine.c, declared in <kern/machine.h>: drain
-/// the action queue, shutting processors down or reassigning them.
+/// Drains the action queue, shutting processors down or reassigning them.
 ///
 /// # Safety
 ///
-/// `kern/startup.c` is the only caller; it starts this during boot with
-/// `kernel_thread()` and nothing locked.
+/// The boot path is the only caller; it starts this as a kernel thread with
+/// nothing locked.
 pub(crate) unsafe extern "C" fn action_thread() {
     // SAFETY: this is the action thread, the only drainer of the queue, and
     // `engine()` never returns.
@@ -886,8 +878,7 @@ unsafe fn engine() -> ! {
     }
 }
 
-/// `processor_doshutdown()` of kern/machine.c: take `processor` out of the
-/// system, running on its shutdown stack.
+/// Takes `processor` out of the system, running on its shutdown stack.
 ///
 /// # Safety
 ///
@@ -901,9 +892,6 @@ pub(crate) unsafe extern "C" fn processor_doshutdown(
     unsafe {
         let cpu = (*processor).cpu_id;
 
-        // `timer_switch()` is the empty macro of <kern/timer.h>, so the C
-        // statement compiled to nothing.
-
         pmap::deactivate_kernel(cpu.bits() as c_int);
         per_cpu_at(cpu).set_thread(ptr::null_mut());
         cpu_down(cpu);
@@ -913,13 +901,12 @@ pub(crate) unsafe extern "C" fn processor_doshutdown(
     }
 }
 
-/// `host_reboot()` of kern/machine.c, the routine <`mach/mach_host.defs`>
-/// declares.
+/// Reboots or halts the machine, as `options` asks.
 ///
 /// # Safety
 ///
-/// `host_priv` must be `HOST_NULL` or the live host privilege pointer the
-/// MIG stub converted the request port into.
+/// `host_priv` must be null or the live host privilege pointer the MIG stub
+/// converted the request port into.
 pub(crate) unsafe fn host_reboot(
     host_priv: *mut c_void,
     options: c_int,

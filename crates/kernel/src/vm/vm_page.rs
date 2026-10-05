@@ -4,8 +4,8 @@
 //   Copyright (c) 1993-1988 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The physical-page module, which `vm/vm_page.c` used to define, and the
-//! `struct vm_page` mirror of `vm/vm_page.h`.
+//! The physical-page module: the page descriptor, the physical segments and
+//! their buddy allocator, and the page queues.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
@@ -44,14 +44,13 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull, addr_of_mut, null_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// `struct vm_page` of <`vm/vm_page.h`>.
+/// A physical page descriptor.
 ///
 /// C packs the three bitfield runs into two 32-bit words, and the accessors
 /// below mask and shift within them in declaration order:
 ///
-/// * `flags` carries `wire_count` in bits 0 to 14 and the seventeen
-///   single-bit flags from bit 15 to bit 31, `inactive` through
-///   `overwriting`.
+/// * `flags` carries the wire count in bits 0 to 14 and the seventeen
+///   single-bit flags in bits 15 to 31.
 /// * `lock_bits` carries `page_lock` in bits 0 to 2, `unlock_request` in
 ///   bits 3 to 5, and the `unsigned short` run in bits 8 to 15: `type` in
 ///   bits 8 and 9, `seg_index` in bits 10 and 11, `order` in bits 12 to 15.
@@ -61,7 +60,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub struct VmPage {
     pub node: tail_queue::Link,
     pub node_lru: tail_queue::Link,
-    /// The C `priv`.
+    /// The owner's private data.
     pub priv_: *mut c_void,
     pub phys_addr: VmOffset,
     pub listq: tail_queue::Link,
@@ -391,10 +390,8 @@ impl VmPage {
             (self.lock_bits & !(mask << shift)) | ((value & mask) << shift);
     }
 
-    /// `memcpy(&dest->vm_page_header, &src->vm_page_header,
-    /// VM_PAGE_BODY_SIZE)` of `vm_page_seg_balance_page()`: copy `object`,
-    /// `offset` and the flags, keeping the destination's own `type`,
-    /// `seg_index` and `order`.
+    /// Copies `src`'s object, offset and flags into this page, keeping its own
+    /// `type`, `seg_index` and `order`.
     pub(crate) const fn copy_body_from(&mut self, src: &Self) {
         self.object = src.object;
         self.offset = src.offset;
@@ -404,12 +401,12 @@ impl VmPage {
     }
 }
 
-/// The `VM_PAGE_BODY_SIZE` bytes of the C struct: `lock_bits` bits 0 to 7,
-/// below the `type`/`seg_index`/`order` run the body copy leaves alone.
+/// The lock bits the body copy carries: bits 0 to 7, below the
+/// `type`/`seg_index`/`order` run it leaves alone.
 const BODY_LOCK_BITS: u32 =
     PAGE_LOCK_MASK | (UNLOCK_REQUEST_MASK << UNLOCK_REQUEST_SHIFT);
 
-/// `vm_page_set_type()` in C: stamp `type` on a run of `1 << order` pages.
+/// Stamps `type` on a run of `1 << order` pages.
 ///
 /// # Safety
 ///
@@ -432,8 +429,8 @@ pub(crate) unsafe fn set_type(
     }
 }
 
-/// `vm_page_wire()` in C: mark the page wired down by yet another map,
-/// removing it from the paging queues when it was unwired.
+/// Marks the page wired down by yet another map, removing it from the paging
+/// queues when it was unwired.
 ///
 /// # Safety
 ///
@@ -461,16 +458,16 @@ pub(crate) unsafe fn wire(page: NonNull<VmPage>) {
     unsafe { (*ptr).set_wire_count((*ptr).wire_count() + 1) };
 }
 
-/// `VM_PAGE_SEG_DMA` of <`machine/vm_param.h`>.
+/// The segment ISA DMA reaches.
 pub(crate) const SEG_DMA: c_uint = 0;
-/// `VM_PAGE_SEG_DIRECTMAP` of <`machine/vm_param.h`>.
+/// The segment the kernel maps directly.
 pub(crate) const SEG_DIRECTMAP: c_uint = 1;
-/// `VM_PAGE_SEG_DMA32` of <`machine/vm_param.h`>.
+/// The segment 32-bit DMA reaches.
 pub(crate) const SEG_DMA32: c_uint = 2;
-/// `VM_PAGE_SEG_HIGHMEM` of <`machine/vm_param.h`>.
+/// The segment above the direct map.
 pub(crate) const SEG_HIGHMEM: c_uint = 3;
 
-/// `vm_page_seg_name()` in C: the name of a physical segment index.
+/// The name of a physical segment index.
 pub(crate) const fn seg_name(seg_index: c_uint) -> Option<&'static CStr> {
     if seg_index == SEG_HIGHMEM {
         Some(c"HIGHMEM")
@@ -485,24 +482,23 @@ pub(crate) const fn seg_name(seg_index: c_uint) -> Option<&'static CStr> {
     }
 }
 
-/// `VM_PAGE_MAX_SEGS` of <`machine/vm_param.h>`: the number of physical
-/// segments.
+/// The number of physical segments.
 pub(crate) const VM_PAGE_MAX_SEGS: usize = 4;
 
-/// `VM_PAGE_SEL_*` of <`vm/vm_page.h>`: the selectors `vm_page_grab()` and
-/// `vm_page_alloc_pa()` take, ordered by physical reach.
+/// The selectors `vm_resident::grab` and [`alloc_pa`] take, ordered by
+/// physical reach.
 pub(crate) const SEL_DMA: c_uint = 0;
 pub(crate) const SEL_DIRECTMAP: c_uint = 1;
 pub(crate) const SEL_DMA32: c_uint = 2;
 pub(crate) const SEL_HIGHMEM: c_uint = 3;
 
-/// `VM_PT_FREE`, `VM_PT_RESERVED` and `VM_PT_TABLE` of <`vm/vm_page.h`>;
-/// `VM_PT_KERNEL` lives in `vm_resident.rs`.
+/// The page types of free pages, reserved pages and page-table pages; the
+/// kernel type lives in `vm_resident`.
 const VM_PT_FREE: u16 = 0;
 const VM_PT_RESERVED: u16 = 1;
 const VM_PT_TABLE: u16 = 2;
 
-/// `VM_PAGE_NR_FREE_LISTS` of `vm_page.c`.
+/// The number of buddy free lists, one per block order.
 const VM_PAGE_NR_FREE_LISTS: usize = 11;
 
 /// `VM_PAGE_ORDER_UNLISTED`: a page that is not the head of a free block.
@@ -534,27 +530,27 @@ const _: () = assert!(VM_PAGE_SEG_THRESHOLD_LOW > VM_PAGE_SEG_THRESHOLD_MIN);
 const _: () = assert!(VM_PAGE_SEG_THRESHOLD_HIGH > VM_PAGE_SEG_THRESHOLD_LOW);
 const _: () = assert!(VM_PAGE_SEG_MIN_PAGES > VM_PAGE_SEG_THRESHOLD_HIGH);
 
-/// `vm_page_atop()` of <`vm/vm_page.h>`: a byte address to a page number.
+/// The page number of the byte address `addr`.
 pub(crate) const fn atop(addr: VmOffset) -> usize {
     addr >> PAGE_SHIFT
 }
 
-/// `vm_page_ptoa()` of <`vm/vm_page.h>`: a page number to a byte address.
+/// The byte address of page number `page`.
 pub(crate) const fn ptoa(page: usize) -> VmOffset {
     page << PAGE_SHIFT
 }
 
-/// `vm_page_round()` of <`vm/vm_page.h`>.
+/// Rounds `addr` up to a page boundary.
 pub(crate) const fn round_page(addr: VmOffset) -> VmOffset {
     addr.wrapping_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
-/// `panic()` of `vm_page.c`.
+/// Halts the kernel with `message`, under the `func` tag.
 fn die(func: &'static str, message: &'static str) -> ! {
     kpanic!(func, "{}", message)
 }
 
-/// `struct vm_page_cpu_pool` of `vm_page.c`.
+/// A per-CPU cache of single free pages in front of a segment's buddy lists.
 struct CpuPool {
     lock: SimpleLock,
     size: c_int,
@@ -575,7 +571,7 @@ impl CpuPool {
     }
 }
 
-/// `struct vm_page_free_list` of `vm_page.c`.
+/// The free blocks of one order.
 struct FreeList {
     size: usize,
     blocks: NodeList,
@@ -590,7 +586,7 @@ impl FreeList {
     }
 }
 
-/// `struct vm_page_list` of `vm_page.c`.
+/// A list of pages and its length.
 struct PageList {
     pages: NodeList,
     nr_pages: usize,
@@ -605,7 +601,7 @@ impl PageList {
     }
 }
 
-/// `struct vm_page_queue` of `vm_page.c`.
+/// The internal and external page lists of one queue.
 struct PageQueue {
     internal: PageList,
     external: PageList,
@@ -620,7 +616,7 @@ impl PageQueue {
     }
 }
 
-/// `struct vm_page_lru_queue` of `vm_page.c`.
+/// The internal and external least-recently-used page lists.
 struct LruQueue {
     internal: LruList,
     external: LruList,
@@ -635,8 +631,8 @@ impl LruQueue {
     }
 }
 
-/// `struct vm_page_seg` of `vm_page.c`.  File-private after this port, so
-/// it keeps Rust layout.
+/// A physical memory segment: its range and page descriptors, its buddy free
+/// lists and per-CPU pools, its free-page thresholds and its page queues.
 struct VmPageSeg {
     cpu_pools: [CpuPool; MAX_NCPUS],
     start: VmOffset,
@@ -675,7 +671,8 @@ impl VmPageSeg {
     }
 }
 
-/// `struct vm_page_boot_seg` of `vm_page.c`.
+/// A segment as the boot loader reported it, with the part of it the boot heap
+/// may use.
 struct BootSeg {
     start: VmOffset,
     end: VmOffset,
@@ -725,7 +722,7 @@ impl PageState {
 static STATE: SyncCell<PageState> =
     SyncCell(UnsafeCell::new(PageState::new()));
 
-/// The C `static boolean_t warned` of `vm_page_evict()`.
+/// Whether [`evict`] already warned that it could not recycle any page.
 static WARNED: AtomicBool = AtomicBool::new(false);
 
 fn state() -> *mut PageState {
@@ -763,7 +760,8 @@ unsafe fn boot_seg(index: usize) -> *mut BootSeg {
     }
 }
 
-/// `vm_page_init_pa()` in C.
+/// Initializes the descriptor of the reserved page at `pa` in segment
+/// `seg_index`.
 ///
 /// # Safety
 ///
@@ -781,7 +779,8 @@ unsafe fn init_pa(page: *mut VmPage, seg_index: u16, pa: VmOffset) {
     }
 }
 
-/// `vm_page_pageable()` in C.
+/// Whether the page belongs to an object, is not wired, and sits on a page
+/// queue.
 ///
 /// # Safety
 ///
@@ -794,7 +793,8 @@ const unsafe fn pageable(page: *const VmPage) -> bool {
     }
 }
 
-/// `vm_page_can_move()` in C.
+/// Whether the page may move to another segment: it is idle and its object
+/// alive.
 ///
 /// # Safety
 ///
@@ -809,7 +809,8 @@ unsafe fn can_move(page: *const VmPage) -> bool {
     }
 }
 
-/// `vm_page_remove_mappings()` in C.
+/// Marks the page busy, removes every mapping of it, and records whether a
+/// mapping dirtied it.
 ///
 /// # Safety
 ///
@@ -824,13 +825,13 @@ unsafe fn remove_mappings(page: *mut VmPage) {
     }
 }
 
-/// `vm_page_free_list_init()` in C.
+/// Empties `free_list`.
 const fn free_list_init(free_list: &mut FreeList) {
     free_list.size = 0;
     free_list.blocks = NodeList::new();
 }
 
-/// `vm_page_free_list_insert()` in C.
+/// Adds the block at `page` to `free_list`.
 fn free_list_insert(free_list: &mut FreeList, page: *mut VmPage) {
     free_list.size += 1;
     // SAFETY: the free list is in `STATE`; the caller holds the segment lock,
@@ -841,7 +842,7 @@ fn free_list_insert(free_list: &mut FreeList, page: *mut VmPage) {
     }
 }
 
-/// `vm_page_free_list_remove()` in C.
+/// Removes the block at `page` from `free_list`.
 fn free_list_remove(free_list: &mut FreeList, page: *mut VmPage) {
     free_list.size -= 1;
     // SAFETY: the free list is in `STATE`; the caller holds the segment lock,
@@ -852,7 +853,7 @@ fn free_list_remove(free_list: &mut FreeList, page: *mut VmPage) {
     }
 }
 
-/// `vm_page_cpu_pool_init()` in C.
+/// Initializes `cpu_pool` to hold up to `size` pages.
 fn cpu_pool_init(cpu_pool: &mut CpuPool, size: c_int) {
     cpu_pool.lock.init();
     cpu_pool.size = size;
@@ -863,7 +864,7 @@ fn cpu_pool_init(cpu_pool: &mut CpuPool, size: c_int) {
     cpu_pool.pages = NodeList::new();
 }
 
-/// `vm_page_cpu_pool_get()` in C.
+/// This CPU's pool in `seg`.
 ///
 /// # Safety
 ///
@@ -878,7 +879,7 @@ unsafe fn cpu_pool_get(seg: *mut VmPageSeg) -> *mut CpuPool {
     }
 }
 
-/// `vm_page_cpu_pool_pop()` in C.
+/// Takes a page out of `cpu_pool`.
 ///
 /// # Safety
 ///
@@ -895,7 +896,7 @@ fn cpu_pool_pop(cpu_pool: &mut CpuPool) -> *mut VmPage {
     ptr::from_mut(page)
 }
 
-/// `vm_page_cpu_pool_push()` in C.
+/// Puts `page` into `cpu_pool`.
 ///
 /// # Safety
 ///
@@ -911,12 +912,13 @@ fn cpu_pool_push(cpu_pool: &mut CpuPool, page: *mut VmPage) {
     }
 }
 
-/// `vm_page_cpu_pool_fill()` in C.
+/// Moves a batch of free pages from the buddy lists of `seg` into `cpu_pool`,
+/// returning how many.
 ///
 /// # Safety
 ///
-/// `seg` must be a live segment, the caller must hold `vm_page_queue_free_lock`,
-/// and the pool lock must not be held.
+/// `seg` must be a live segment, the caller must hold
+/// `VM_PAGE_QUEUE_FREE_LOCK`, and the pool lock must not be held.
 unsafe fn cpu_pool_fill(cpu_pool: *mut CpuPool, seg: *mut VmPageSeg) -> c_int {
     unsafe { (*seg).lock.lock() };
 
@@ -939,12 +941,12 @@ unsafe fn cpu_pool_fill(cpu_pool: *mut CpuPool, seg: *mut VmPageSeg) -> c_int {
     i
 }
 
-/// `vm_page_cpu_pool_drain()` in C.
+/// Moves a batch of pages from `cpu_pool` back to the buddy lists of `seg`.
 ///
 /// # Safety
 ///
-/// `seg` must be a live segment, the caller must hold `vm_page_queue_free_lock`,
-/// and the pool lock must not be held.
+/// `seg` must be a live segment, the caller must hold
+/// `VM_PAGE_QUEUE_FREE_LOCK`, and the pool lock must not be held.
 unsafe fn cpu_pool_drain(cpu_pool: *mut CpuPool, seg: *mut VmPageSeg) {
     unsafe { (*seg).lock.lock() };
 
@@ -963,19 +965,19 @@ unsafe fn cpu_pool_drain(cpu_pool: *mut CpuPool, seg: *mut VmPageSeg) {
     unsafe { (*seg).lock.unlock() };
 }
 
-/// `vm_page_list_init()` in C.
+/// Empties `list`.
 const fn page_list_init(list: &mut PageList) {
     list.nr_pages = 0;
     list.pages = NodeList::new();
 }
 
-/// `vm_page_queue_init()` in C.
+/// Empties `queue`.
 const fn page_queue_init(queue: &mut PageQueue) {
     page_list_init(&mut queue.internal);
     page_list_init(&mut queue.external);
 }
 
-/// `vm_page_queue_push()` in C.
+/// Adds `page` to `queue`, on its internal or external list.
 ///
 /// # Safety
 ///
@@ -994,7 +996,7 @@ unsafe fn page_queue_push(queue: *mut PageQueue, page: *mut VmPage) {
     list.nr_pages += 1;
 }
 
-/// `vm_page_queue_remove()` in C.
+/// Removes `page` from `queue`.
 ///
 /// # Safety
 ///
@@ -1012,7 +1014,7 @@ unsafe fn page_queue_remove(queue: *mut PageQueue, page: *mut VmPage) {
     list.nr_pages -= 1;
 }
 
-/// `vm_page_lru_queue_push()` in C.
+/// Adds `page` to the LRU `queue`, on its internal or external list.
 ///
 /// # Safety
 ///
@@ -1028,7 +1030,7 @@ unsafe fn lru_queue_push(queue: *mut LruQueue, page: *mut VmPage) {
     unsafe { pin_head(list).push_back_ptr(NonNull::new_unchecked(page)) };
 }
 
-/// `vm_page_lru_queue_remove()` in C.
+/// Removes `page` from the LRU `queue`.
 ///
 /// # Safety
 ///
@@ -1043,7 +1045,7 @@ unsafe fn lru_queue_remove(queue: *mut LruQueue, page: *mut VmPage) {
     unsafe { pin_head(list).remove_ptr(NonNull::new_unchecked(page)) };
 }
 
-/// `vm_page_seg_index()` in C.
+/// The index of `seg` in the segment table.
 ///
 /// # Safety
 ///
@@ -1054,7 +1056,7 @@ unsafe fn seg_index(seg: *const VmPageSeg) -> usize {
     (seg as usize - base as usize) / size_of::<VmPageSeg>()
 }
 
-/// `vm_page_seg_size()` in C.
+/// The size of `seg` in bytes.
 ///
 /// # Safety
 ///
@@ -1063,7 +1065,8 @@ const unsafe fn seg_size(seg: *const VmPageSeg) -> VmOffset {
     unsafe { (*seg).end - (*seg).start }
 }
 
-/// `vm_page_seg_compute_pool_size()` in C.
+/// The per-CPU pool size of `seg`: a fraction of its pages, at least one and
+/// at most the pool maximum.
 ///
 /// # Safety
 ///
@@ -1080,7 +1083,7 @@ const unsafe fn seg_compute_pool_size(seg: *const VmPageSeg) -> c_int {
     size as c_int
 }
 
-/// `vm_page_seg_compute_pageout_thresholds()` in C.
+/// Sets the minimum, low and high free-page thresholds of `seg` from its size.
 ///
 /// # Safety
 ///
@@ -1111,7 +1114,7 @@ unsafe fn seg_compute_pageout_thresholds(seg: *mut VmPageSeg) {
     }
 }
 
-/// `vm_page_seg_init()` in C.
+/// Initializes `seg` over `start..end`, with its page descriptors at `pages`.
 ///
 /// # Safety
 ///
@@ -1173,12 +1176,13 @@ unsafe fn seg_init(
     }
 }
 
-/// `vm_page_seg_alloc_from_buddy()` in C.
+/// Takes a block of `1 << order` pages from the buddy lists of `seg`,
+/// splitting a larger block when needed, or null.
 ///
 /// # Safety
 ///
 /// `seg` must be a live segment and the caller must hold
-/// `vm_page_queue_free_lock` and the segment lock, as the C's callers did.
+/// `VM_PAGE_QUEUE_FREE_LOCK` and the segment lock.
 unsafe fn seg_alloc_from_buddy(
     seg: *mut VmPageSeg,
     order: c_uint,
@@ -1245,7 +1249,8 @@ unsafe fn seg_alloc_from_buddy(
     page
 }
 
-/// `vm_page_seg_free_to_buddy()` in C.
+/// Returns the block at `page` to the buddy lists of `seg`, merging it with
+/// its free buddies.
 ///
 /// # Safety
 ///
@@ -1297,12 +1302,13 @@ unsafe fn seg_free_to_buddy(
     }
 }
 
-/// `vm_page_seg_alloc()` in C.
+/// Allocates a block of `1 << order` pages of type `type_` from `seg`, through
+/// the CPU pool for a single page, or null.
 ///
 /// # Safety
 ///
 /// `seg` must be a live segment and the caller must hold
-/// `vm_page_queue_free_lock`, as the C's callers did.
+/// `VM_PAGE_QUEUE_FREE_LOCK`.
 unsafe fn seg_alloc(
     seg: *mut VmPageSeg,
     order: c_uint,
@@ -1359,12 +1365,13 @@ unsafe fn seg_alloc(
     page
 }
 
-/// `vm_page_seg_free()` in C.
+/// Frees a block of `1 << order` pages to `seg`, through the CPU pool for a
+/// single page.
 ///
 /// # Safety
 ///
 /// `seg` must be a live segment and the caller must hold
-/// `vm_page_queue_free_lock`, as the C's callers did.
+/// `VM_PAGE_QUEUE_FREE_LOCK`.
 unsafe fn seg_free(seg: *mut VmPageSeg, page: *mut VmPage, order: c_uint) {
     unsafe { set_type(NonNull::new_unchecked(page), order, VM_PT_FREE) };
 
@@ -1393,7 +1400,7 @@ unsafe fn seg_free(seg: *mut VmPageSeg, page: *mut VmPage, order: c_uint) {
     }
 }
 
-/// `vm_page_seg_add_active_page()` in C.
+/// Puts `page` on the active queue of `seg`.
 ///
 /// # Safety
 ///
@@ -1409,7 +1416,7 @@ unsafe fn seg_add_active_page(seg: *mut VmPageSeg, page: *mut VmPage) {
     vm_resident::VM_PAGE_ACTIVE_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// `vm_page_seg_remove_active_page()` in C.
+/// Takes `page` off the active queue of `seg`.
 ///
 /// # Safety
 ///
@@ -1424,7 +1431,7 @@ unsafe fn seg_remove_active_page(seg: *mut VmPageSeg, page: *mut VmPage) {
     vm_resident::VM_PAGE_ACTIVE_COUNT.fetch_sub(1, Ordering::Relaxed);
 }
 
-/// `vm_page_seg_add_inactive_page()` in C.
+/// Puts `page` on the inactive queue of `seg`.
 ///
 /// # Safety
 ///
@@ -1439,7 +1446,7 @@ unsafe fn seg_add_inactive_page(seg: *mut VmPageSeg, page: *mut VmPage) {
     vm_resident::VM_PAGE_INACTIVE_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// `vm_page_seg_remove_inactive_page()` in C.
+/// Takes `page` off the inactive queue of `seg`.
 ///
 /// # Safety
 ///
@@ -1454,7 +1461,8 @@ unsafe fn seg_remove_inactive_page(seg: *mut VmPageSeg, page: *mut VmPage) {
     vm_resident::VM_PAGE_INACTIVE_COUNT.fetch_sub(1, Ordering::Relaxed);
 }
 
-/// `vm_page_seg_pull_active_page()` in C.
+/// Takes a movable page off the internal or external active queue of `seg`, or
+/// null.
 ///
 /// # Safety
 ///
@@ -1512,7 +1520,8 @@ unsafe fn seg_pull_active_page(
     null_mut()
 }
 
-/// `vm_page_seg_pull_inactive_page()` in C.
+/// Takes a movable page off the internal or external inactive queue of `seg`,
+/// or null.
 ///
 /// # Safety
 ///
@@ -1569,7 +1578,8 @@ unsafe fn seg_pull_inactive_page(
     null_mut()
 }
 
-/// `vm_page_pull_active_page()` in C.
+/// Takes a pageable page off the internal or external active LRU list, or
+/// null.
 ///
 /// # Safety
 ///
@@ -1634,7 +1644,8 @@ unsafe fn pull_active_page(external: bool) -> *mut VmPage {
     null_mut()
 }
 
-/// `vm_page_pull_inactive_page()` in C.
+/// Takes a pageable page off the internal or external inactive LRU list, or
+/// null.
 ///
 /// # Safety
 ///
@@ -1698,7 +1709,7 @@ unsafe fn pull_inactive_page(external: bool) -> *mut VmPage {
     null_mut()
 }
 
-/// `vm_page_seg_page_available()` in C.
+/// Whether `seg` has more free pages than its high threshold.
 ///
 /// # Safety
 ///
@@ -1707,7 +1718,8 @@ const unsafe fn seg_page_available(seg: *const VmPageSeg) -> bool {
     unsafe { (*seg).nr_free_pages > (*seg).high_free_pages }
 }
 
-/// `vm_page_seg_usable()` in C.
+/// Whether `seg` may serve allocations: it has no queued pages, or enough free
+/// ones.
 ///
 /// # Safety
 ///
@@ -1723,7 +1735,7 @@ const unsafe fn seg_usable(seg: *const VmPageSeg) -> bool {
     queued == 0 || unsafe { (*seg).nr_free_pages >= (*seg).high_free_pages }
 }
 
-/// `vm_page_seg_double_lock()` in C.
+/// Locks two segments in address order, so two balancers cannot deadlock.
 ///
 /// # Safety
 ///
@@ -1740,7 +1752,7 @@ unsafe fn seg_double_lock(seg1: *mut VmPageSeg, seg2: *mut VmPageSeg) {
     }
 }
 
-/// `vm_page_seg_double_unlock()` in C.
+/// Unlocks two segments [`seg_double_lock`] locked.
 ///
 /// # Safety
 ///
@@ -1752,7 +1764,8 @@ unsafe fn seg_double_unlock(seg1: *mut VmPageSeg, seg2: *mut VmPageSeg) {
     }
 }
 
-/// `vm_page_seg_balance_page()` in C.
+/// Moves one page out of `seg`, when it is short of free pages, into
+/// `remote_seg`, when that one has pages to spare.
 ///
 /// # Safety
 ///
@@ -1845,8 +1858,8 @@ unsafe fn seg_balance_page(
     // SAFETY: the page is live.
     unsafe { remove_mappings(src) };
 
-    // SAFETY: both pages are live and the body copy is the C's memcpy of
-    // `VM_PAGE_BODY_SIZE` bytes.
+    // SAFETY: both pages are live; the body copy carries the object, offset
+    // and flags.
     unsafe {
         set_type(NonNull::new_unchecked(dest), 0, (*src).page_type());
         (*dest).copy_body_from(&*src);
@@ -1902,7 +1915,8 @@ unsafe fn seg_balance_page(
     true
 }
 
-/// `vm_page_seg_balance()` in C.
+/// Moves one page out of `seg` into another segment, trying the segments from
+/// the last.
 ///
 /// # Safety
 ///
@@ -1928,7 +1942,7 @@ unsafe fn seg_balance(seg: *mut VmPageSeg, priv_alloc: bool) -> bool {
     false
 }
 
-/// `vm_page_seg_compute_high_active_page()` in C.
+/// Sets the active-page limit of `seg` from its queued page count.
 ///
 /// # Safety
 ///
@@ -1948,7 +1962,8 @@ unsafe fn seg_compute_high_active_page(seg: *mut VmPageSeg) {
     }
 }
 
-/// `vm_page_seg_refill_inactive()` in C.
+/// Moves pages of `seg` from its active to its inactive queues until the
+/// active ones are under the limit.
 ///
 /// # Safety
 ///
@@ -1995,7 +2010,8 @@ unsafe fn seg_refill_inactive(seg: *mut VmPageSeg) {
     unsafe { (*seg).lock.unlock() };
 }
 
-/// `vm_page_load()` in C.
+/// Records the physical range `start..end` of segment `seg_index`, from the
+/// boot loader.
 pub(crate) fn load(seg_index: c_uint, start: VmOffset, end: VmOffset) {
     let index = seg_index as usize;
     // SAFETY: the architecture loader passes the segment index the C
@@ -2011,7 +2027,7 @@ pub(crate) fn load(seg_index: c_uint, start: VmOffset, end: VmOffset) {
     }
 }
 
-/// `vm_page_load_heap()` in C.
+/// Records the part `start..end` of segment `seg_index` the boot heap may use.
 pub(crate) fn load_heap(seg_index: c_uint, start: VmOffset, end: VmOffset) {
     let index = seg_index as usize;
     // SAFETY: the architecture loader passes the segment index the C
@@ -2026,13 +2042,14 @@ pub(crate) fn load_heap(seg_index: c_uint, start: VmOffset, end: VmOffset) {
     }
 }
 
-/// `vm_page_ready()` in C.
+/// Whether the page table is set up.
 pub(crate) fn is_ready() -> bool {
     // SAFETY: the state is live for the kernel's lifetime.
     unsafe { (*state()).is_ready }
 }
 
-/// `vm_page_select_alloc_seg()` in C.
+/// The segment an allocation with `selector` comes from: the selector's
+/// segment, or the last one loaded.
 fn select_alloc_seg(selector: c_uint) -> usize {
     let seg_index = match selector {
         SEL_DMA => SEG_DMA,
@@ -2042,13 +2059,12 @@ fn select_alloc_seg(selector: c_uint) -> usize {
         _ => die("vm_page_select_alloc_seg", "vm_page: invalid selector"),
     };
 
-    // The C `MIN(vm_page_segs_size - 1, seg_index)` wraps to all ones on an
-    // empty table, so the selector wins.
+    // An empty table wraps `segs_size - 1` to all ones, so the selector wins.
     // SAFETY: the state is live for the kernel's lifetime.
     min(unsafe { (*state()).segs_size }.wrapping_sub(1), seg_index) as usize
 }
 
-/// `vm_page_boot_seg_loaded()` in C.
+/// Whether the boot loader reported `seg`.
 ///
 /// # Safety
 ///
@@ -2057,7 +2073,8 @@ const unsafe fn boot_seg_loaded(seg: *const BootSeg) -> bool {
     unsafe { (*seg).end != 0 }
 }
 
-/// `vm_page_check_boot_segs()` in C.
+/// Checks that the loaded segments are exactly the first `segs_size` ones,
+/// halting the kernel when they are not.
 fn check_boot_segs() {
     // SAFETY: the state is live for the kernel's lifetime.
     if unsafe { (*state()).segs_size } == 0 {
@@ -2086,7 +2103,7 @@ fn check_boot_segs() {
     }
 }
 
-/// `vm_page_boot_seg_size()` in C.
+/// The size of the boot segment `seg`.
 ///
 /// # Safety
 ///
@@ -2095,7 +2112,7 @@ const unsafe fn boot_seg_size(seg: *const BootSeg) -> VmOffset {
     unsafe { (*seg).end - (*seg).start }
 }
 
-/// `vm_page_boot_seg_avail_size()` in C.
+/// The size of the part of `seg` the boot heap may still use.
 ///
 /// # Safety
 ///
@@ -2104,8 +2121,8 @@ const unsafe fn boot_seg_avail_size(seg: *const BootSeg) -> VmOffset {
     unsafe { (*seg).avail_end - (*seg).avail_start }
 }
 
-/// `vm_page_bootalloc()` in C: an early allocation from the boot table.  The
-/// C's exhaustion `panic()` is final.
+/// Allocates `size` bytes of physical memory from the boot heap, before the
+/// page table exists.  Running out halts the kernel.
 pub(crate) fn bootalloc(size: VmSize) -> VmOffset {
     let mut i = select_alloc_seg(SEL_DIRECTMAP);
 
@@ -2129,7 +2146,7 @@ pub(crate) fn bootalloc(size: VmSize) -> VmOffset {
     die("vm_page_bootalloc", "vm_page: no physical memory available")
 }
 
-/// `vm_page_setup()` in C: build the page table and release the segments.
+/// Builds the page table and releases the segments.
 pub(crate) fn setup() {
     check_boot_segs();
 
@@ -2222,7 +2239,7 @@ pub(crate) fn setup() {
     unsafe { (*state()).is_ready = true };
 }
 
-/// `vm_page_manage()` in C.
+/// Hands the reserved page `page` to its segment's buddy lists as a free page.
 ///
 /// # Safety
 ///
@@ -2236,7 +2253,7 @@ pub(crate) unsafe fn manage(page: *mut VmPage) {
     }
 }
 
-/// `vm_page_lookup_pa()` in C.
+/// The descriptor of the physical page at `pa`, when a segment holds it.
 pub(crate) fn lookup_pa(pa: VmOffset) -> Option<NonNull<VmPage>> {
     let mut i = 0;
     while i < segs_size() {
@@ -2256,7 +2273,7 @@ pub(crate) fn lookup_pa(pa: VmOffset) -> Option<NonNull<VmPage>> {
     None
 }
 
-/// `vm_page_lookup_seg()` in C.
+/// The segment holding `page`, or null.
 ///
 /// # Safety
 ///
@@ -2278,12 +2295,13 @@ unsafe fn lookup_seg(page: *const VmPage) -> *mut VmPageSeg {
     null_mut()
 }
 
-/// `vm_page_check()` in C, whose `panic()` calls are final.
+/// Checks the descriptor `page` for inconsistent flags, halting the kernel
+/// when it finds one.
 ///
 /// # Safety
 ///
-/// `page` must be a live descriptor, and the caller must hold whatever lock
-/// the C's `VM_PAGE_CHECK` call sites held.
+/// `page` must be a live descriptor whose fields no one changes during the
+/// check.
 pub(crate) unsafe fn check(page: *const VmPage) {
     if unsafe { (*page).is_fictitious() } {
         if unsafe { (*page).is_private() } {
@@ -2351,12 +2369,13 @@ pub(crate) unsafe fn check(page: *const VmPage) {
     }
 }
 
-/// `vm_page_alloc_pa()` in C.  Returns with `vm_page_queue_free_lock` held.
+/// Allocates a block of `1 << order` pages with `selector` and `type`, or
+/// null.  Returns with `VM_PAGE_QUEUE_FREE_LOCK` held.
 ///
 /// # Safety
 ///
-/// The caller must not hold `vm_page_queue_free_lock` and must be ready to
-/// release it, as the C's callers were.
+/// The caller must not hold `VM_PAGE_QUEUE_FREE_LOCK` and must be ready to
+/// release it.
 pub(crate) unsafe fn alloc_pa(
     order: c_uint,
     selector: c_uint,
@@ -2408,20 +2427,20 @@ pub(crate) unsafe fn alloc_pa(
     }
 }
 
-/// `vm_page_free_pa()` in C.
+/// Frees the block of `1 << order` pages at `page`.
 ///
 /// # Safety
 ///
-/// `page` must be the first of `1 << order` descriptors the module handed
-/// out, and the caller must hold `vm_page_queue_free_lock`.
+/// `page` must be the first of `1 << order` descriptors the module handed out,
+/// and the caller must hold `VM_PAGE_QUEUE_FREE_LOCK`.
 pub(crate) unsafe fn free_pa(page: *mut VmPage, order: c_uint) {
     let seg = seg_ptr(unsafe { (*page).seg_index() } as usize);
     // SAFETY: the free lock is held, as the backend requires.
     unsafe { seg_free(seg, page, order) };
 }
 
-/// `vm_page_seg_name()` in C at the caller's index, whose unknown index is
-/// final.
+/// The name of segment `seg_index` as a C string; an unknown index halts the
+/// kernel.
 fn name_ptr(seg_index: c_uint) -> *const c_char {
     seg_name(seg_index).map_or_else(
         || die("vm_page_seg_name", "vm_page: invalid segment index"),
@@ -2429,7 +2448,7 @@ fn name_ptr(seg_index: c_uint) -> *const c_char {
     )
 }
 
-/// `vm_page_info_all()` in C.
+/// Prints each segment's page and free-page counts.
 pub(crate) fn info_all() {
     let mut i = 0;
     while i < segs_size() {
@@ -2470,7 +2489,7 @@ pub(crate) fn info_all() {
     }
 }
 
-/// `vm_page_boot_table_size()` in C.
+/// The number of pages the boot segments cover.
 fn boot_table_size() -> usize {
     let mut nr_pages = 0;
     let mut i = 0;
@@ -2486,7 +2505,7 @@ fn boot_table_size() -> usize {
     nr_pages
 }
 
-/// `vm_page_table_size()` in C.
+/// The number of page descriptors the page table needs.
 pub(crate) fn table_size() -> usize {
     if !is_ready() {
         return boot_table_size();
@@ -2503,7 +2522,8 @@ pub(crate) fn table_size() -> usize {
     nr_pages
 }
 
-/// `vm_page_table_index()` in C, whose missing address is final.
+/// The index of the physical page at `pa` in the page table; an address
+/// outside every segment halts the kernel.
 pub(crate) fn table_index(pa: VmOffset) -> usize {
     let mut index = 0;
     let mut i = 0;
@@ -2525,7 +2545,7 @@ pub(crate) fn table_index(pa: VmOffset) -> usize {
     die("vm_page_table_index", "vm_page: invalid physical address")
 }
 
-/// `vm_page_mem_size()` in C.
+/// The size of the physical memory the segments cover.
 pub(crate) fn mem_size() -> VmOffset {
     let mut total = 0;
     let mut i = 0;
@@ -2539,7 +2559,7 @@ pub(crate) fn mem_size() -> VmOffset {
     total
 }
 
-/// `vm_page_mem_free()` in C.
+/// The number of free pages in every segment.
 pub(crate) fn mem_free() -> usize {
     let mut total = 0;
     let mut i = 0;
@@ -2554,7 +2574,8 @@ pub(crate) fn mem_free() -> usize {
     total
 }
 
-/// `vm_page_unwire()` in C.
+/// Drops a wiring of `page`, putting it back on the active queue when it was
+/// the last.
 ///
 /// # Safety
 ///
@@ -2583,7 +2604,7 @@ pub(crate) unsafe fn unwire(page: *mut VmPage) {
     vm_resident::VM_PAGE_WIRE_COUNT.fetch_sub(1, Ordering::Relaxed);
 }
 
-/// `vm_page_deactivate()` in C.
+/// Moves `page` to the inactive queue.
 ///
 /// # Safety
 ///
@@ -2624,7 +2645,8 @@ pub(crate) unsafe fn deactivate(page: *mut VmPage) {
     }
 }
 
-/// `vm_page_activate()` in C, whose double activation is final.
+/// Moves `page` to the active queue; activating an active page halts the
+/// kernel.
 ///
 /// # Safety
 ///
@@ -2653,7 +2675,7 @@ pub(crate) unsafe fn activate(page: *mut VmPage) {
     }
 }
 
-/// `vm_page_queues_remove()` in C.
+/// Takes `page` off the active or inactive queue.
 ///
 /// # Safety
 ///
@@ -2679,8 +2701,8 @@ pub(crate) unsafe fn queues_remove(page: *mut VmPage) {
     }
 }
 
-/// `vm_page_check_usable()` in C.  Returns with `vm_page_queue_free_lock`
-/// held, as the C did.
+/// Whether every segment may serve allocations.  Returns with
+/// `VM_PAGE_QUEUE_FREE_LOCK` held.
 ///
 /// # Safety
 ///
@@ -2725,7 +2747,7 @@ unsafe fn check_usable() -> bool {
     true
 }
 
-/// `vm_page_may_balance()` in C.
+/// Whether some segment has pages to spare for balancing.
 ///
 /// # Safety
 ///
@@ -2756,7 +2778,7 @@ unsafe fn may_balance() -> bool {
     false
 }
 
-/// `vm_page_balance_once()` in C.
+/// Moves one page between segments, when one has pages to spare.
 ///
 /// # Safety
 ///
@@ -2775,7 +2797,8 @@ unsafe fn balance_once() -> bool {
     false
 }
 
-/// `vm_page_balance()` in C.  Returns with `vm_page_queue_free_lock` held.
+/// Balances the segments until none can spare a page.  Returns with
+/// `VM_PAGE_QUEUE_FREE_LOCK` held.
 ///
 /// # Safety
 ///
@@ -2791,7 +2814,8 @@ pub(crate) unsafe fn balance() -> bool {
     unsafe { check_usable() }
 }
 
-/// `vm_page_evict_one()` in C.
+/// Evicts one page from the internal or external, active or inactive queues,
+/// returning whether it did.
 ///
 /// # Safety
 ///
@@ -2882,8 +2906,8 @@ unsafe fn evict_one(external: bool, active: bool, alloc_paused: bool) -> bool {
         }
 
         if reclaim {
-            // SAFETY: `vm_page_free()` is the real C symbol and the
-            // page-queues lock is held, as its C caller had it.
+            // SAFETY: the page-queues lock is held, as `vm_resident::free`
+            // requires.
             unsafe {
                 vm_resident::free(NonNull::new_unchecked(page));
                 VM_PAGE_QUEUE_LOCK.unlock();
@@ -2962,7 +2986,8 @@ unsafe fn evict_reactivate(
     }
 }
 
-/// `vm_page_evict_once()` in C.
+/// Evicts one page, trying the external inactive, internal inactive, external
+/// active and internal active queues in turn.
 ///
 /// # Safety
 ///
@@ -2977,7 +3002,8 @@ unsafe fn evict_once(alloc_paused: bool) -> bool {
     }
 }
 
-/// `vm_page_evict()` in C.  Returns with `vm_page_queue_free_lock` held.
+/// Evicts a batch of pages, unless too many are already being cleaned.
+/// Returns with `VM_PAGE_QUEUE_FREE_LOCK` held.
 ///
 /// # Safety
 ///
@@ -3040,7 +3066,7 @@ pub(crate) unsafe fn evict(should_wait: *mut c_int) -> bool {
     unsafe { check_usable() }
 }
 
-/// `vm_page_refill_inactive()` in C.
+/// Refills the inactive queues of every segment from their active ones.
 pub(crate) fn refill_inactive() {
     VM_PAGE_QUEUE_LOCK.lock();
 
@@ -3054,11 +3080,12 @@ pub(crate) fn refill_inactive() {
     VM_PAGE_QUEUE_LOCK.unlock();
 }
 
-/// `vm_page_wait()` in C.
+/// Waits for page allocation to resume, when it is paused, continuing with
+/// `continuation`.
 ///
 /// # Safety
 ///
-/// The caller must not hold `vm_page_queue_free_lock` and must be ready to
+/// The caller must not hold `VM_PAGE_QUEUE_FREE_LOCK` and must be ready to
 /// block.
 pub(crate) unsafe fn wait(continuation: Continuation) {
     VM_PAGE_QUEUE_FREE_LOCK.lock();

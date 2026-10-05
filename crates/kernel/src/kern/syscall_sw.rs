@@ -5,12 +5,10 @@
 //   Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The system-call trap table, which `kern/syscall_sw.c` used to define for
-//! <`kern/syscall_sw.h`>.
+//! The system-call trap table.
 //!
-//! The assembly syscall entry points index `mach_trap_table` at the stride
-//! the header's `mach_trap_t` fixes, so the table and its entries keep the C
-//! layout exactly.
+//! The assembly syscall entry points index [`MACH_TRAP_TABLE`] at the stride
+//! of [`MachTrap`], so the table and its entries keep a fixed layout.
 
 use crate::ipc::mach_msg::mach_msg_trap;
 use crate::kern::debug::soft_debugger;
@@ -36,11 +34,10 @@ use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of, transmute};
 use core::sync::atomic::{AtomicI32, Ordering};
 
-/// `MACH_PORT_NULL` in <mach/port.h>: the null name `null_port()` returns.
+/// The null name `null_port()` returns.
 const MACH_PORT_NULL: c_uint = 0;
 
-/// `mach_trap_t` of <`kern/syscall_sw.h>`: one entry of the syscall table the
-/// assembly indexes and `syscall_trace_print()` names.
+/// One entry of the syscall table the assembly indexes.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct MachTrap {
@@ -64,38 +61,34 @@ const _: () = {
 // reads it.
 unsafe impl Sync for MachTrap {}
 
-/// `kern_invalid_debug` of `kern/syscall_sw.c`: trap into the debugger when an
-/// invalid system call runs.
+/// When set, an invalid system call traps into the debugger.
 ///
 /// The C read and wrote the flag without synchronization; `Relaxed` is that
 /// plain access, and the flag gates a debugger message and nothing else.
 static KERN_INVALID_DEBUG: AtomicI32 = AtomicI32::new(0);
 
-/// `null_port` of `kern/syscall_sw.c`: the entry for the reserved port traps
-/// 10 through 13 and 55 through 56.
+/// The entry for the reserved port traps 10 through 13 and 55 through 56.
 unsafe extern "C" fn null_port() -> c_uint {
     if KERN_INVALID_DEBUG.load(Ordering::Relaxed) != 0 {
-        // SAFETY: `SoftDebugger` accepts a NUL-terminated message and only
+        // SAFETY: `soft_debugger` accepts a NUL-terminated message and only
         // prints it.
         unsafe { soft_debugger(c"null_port mach trap".as_ptr()) };
     }
     MACH_PORT_NULL
 }
 
-/// `kern_invalid` of `kern/syscall_sw.c`: the entry for every unimplemented
-/// system call.
+/// The entry for every unimplemented system call.
 unsafe extern "C" fn kern_invalid() -> c_int {
     if KERN_INVALID_DEBUG.load(Ordering::Relaxed) != 0 {
-        // SAFETY: `SoftDebugger` accepts a NUL-terminated message and only
+        // SAFETY: `soft_debugger` accepts a NUL-terminated message and only
         // prints it.
         unsafe { soft_debugger(c"kern_invalid mach trap".as_ptr()) };
     }
     c_int::from(Error::InvalidArgument)
 }
 
-/// The `MACH_TRAP`/`MACH_TRAP_STACK` macros of <`kern/syscall_sw.h>`: one table
-/// entry, with the routine cast to the type-erased `generic_trap_function`
-/// the macros cast it to.
+/// One table entry, with the routine cast to the type-erased function pointer
+/// the assembly calls.
 const fn trap(
     function: *const c_void,
     arg_count: c_int,
@@ -123,8 +116,7 @@ const MACH_TRAP_TABLE_LEN: usize = 130;
 
 const _: () = assert!(MACH_TRAP_TABLE_LEN <= c_int::MAX as usize);
 
-/// `mach_trap_table` of `kern/syscall_sw.c`: one entry per syscall number, read
-/// by the `x86_64` system-call entries and by `syscall_trace_print()`.
+/// One entry per syscall number, read by the system-call entries.
 pub static MACH_TRAP_TABLE: [MachTrap; MACH_TRAP_TABLE_LEN] = [
     trap(
         kern_invalid as *const c_void,
@@ -865,5 +857,5 @@ pub static MACH_TRAP_TABLE: [MachTrap; MACH_TRAP_TABLE_LEN] = [
 
 const _: () = assert!(MACH_TRAP_TABLE.len() == MACH_TRAP_TABLE_LEN);
 
-/// `mach_trap_count` of `kern/syscall_sw.c`: the number of syscall entries.
+/// The number of syscall entries.
 pub static MACH_TRAP_COUNT: c_int = MACH_TRAP_TABLE_LEN as c_int;

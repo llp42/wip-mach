@@ -5,8 +5,7 @@
 //   Copyright (c) 1994-1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The thread module's cores, which `kern/thread.c` used to define and
-//! `kern/thread.h` declares.
+//! The thread module's cores.
 
 use crate::arch::types::{AtomicVmSize, VmOffset, VmSize};
 use crate::arch::vm_param::KERNEL_STACK_SIZE;
@@ -58,20 +57,20 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 #[cfg(debug_assertions)]
 use lock::HeldLocks;
 
-/// `TASK_NAME_SIZE` in <kern/task.h>, the length of `thread.name`.
+/// The length of a thread's name, with its NUL.
 pub const TASK_NAME_SIZE: usize = 32;
 
-/// `i386_DEBUG_STATE` in <`mach/i386/thread_status.h>`: the debug state, which
-/// the current thread can read and write without suspending itself.
+/// `i386_DEBUG_STATE`: the debug state, which the current thread can read and
+/// write without suspending itself.
 const I386_DEBUG_STATE: c_int = 6;
 /// `i386_FSGS_BASE_STATE`: the segment bases, writable directly only for the
 /// current thread.
 const I386_FSGS_BASE_STATE: c_int = 7;
-/// `STACK_MARKER` in kern/thread.c: what `stack_init()` fills a fresh kernel
-/// stack with when the usage check is on.
+/// The pattern [`stack_init`] fills a fresh kernel stack with when the usage
+/// check is on.
 const STACK_MARKER: u32 = 0xdead_beef;
 
-/// `TH_WAIT` in <kern/thread.h>: the thread is queued for waiting.
+/// The thread is queued for waiting.
 pub const TH_WAIT: u32 = 0x01;
 /// `TH_SUSP`: the thread has been asked to stop.
 pub const TH_SUSP: u32 = 0x02;
@@ -92,12 +91,12 @@ pub const TH_SW_COMING_IN: u32 = 0x0200;
 /// `TH_SWAP_STATE`: the bits `thread_dispatch()` masks off.
 pub const TH_SWAP_STATE: u32 = TH_SWAPPED | TH_SW_COMING_IN;
 
-/// A `continuation_t` of <`kern/sched_prim.h`>, whose null value is
-/// `thread_no_continuation`.
+/// A continuation: where a thread resumes on a fresh stack, or `None` for
+/// none.
 pub type Continuation = Option<unsafe extern "C" fn()>;
 
-/// A `void (*)(thread_t)` stack continuation, the third argument of
-/// `stack_attach()` of <i386/i386/pcb.h>.
+/// A stack continuation: what a thread given a stack resumes through, with the
+/// thread it switched from.
 pub type StackResume = Option<unsafe extern "C" fn(*mut Thread)>;
 
 /// The bitfield word of `struct thread`, which C declares as `unsigned
@@ -165,16 +164,17 @@ pub union StateEvent {
     event_key: *mut c_void,
 }
 
-/// `struct ipc_kmsg_queue` of <`ipc/ipc_kmsg_queue.h`>.
+/// A queue of kernel messages.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
 pub struct IpcKmsgQueue {
-    /// `ikmq_base`: the first message, opaque while IPC stays in C.
+    /// The first message, opaque here.
     pub base: *mut c_void,
 }
 
-/// `mach_msg_size_t`/`struct ipc_kmsg *` union of `struct thread`.
+/// The receive size or the received message, as the thread's receive state
+/// needs.
 #[repr(C)]
 #[allow(missing_docs)]
 pub union ThreadData {
@@ -220,8 +220,7 @@ pub union Saved {
     pub other: *mut c_void,
 }
 
-/// A kernel thread: the scheduling, IPC and accounting state GNU Mach
-/// kept in `struct thread` of <kern/thread.h>.
+/// A kernel thread: its scheduling, IPC and accounting state.
 ///
 /// The representation is free (ADR 0002): nothing MIG-visible reads it,
 /// and the machine code takes field offsets with `offset_of!`.
@@ -316,9 +315,9 @@ pub struct Thread {
     pub ast: AstReason,
     pub processor_set: *mut ProcessorSet,
     pub bound_processor: *mut Processor,
-    /// `may_assign`: whether assignment may change (`MACH_HOST`).
+    /// Whether the thread's assignment may change.
     pub may_assign: c_int,
-    /// `assign_active`: someone waits for `may_assign` (`MACH_HOST`).
+    /// Whether someone waits for `may_assign`.
     pub assign_active: c_int,
     /// `last_processor`: the processor the thread last ran on.
     pub last_processor: *mut Processor,
@@ -415,15 +414,14 @@ impl Thread {
         thread
     }
 
-    /// `thread_init()` in C.
+    /// Sets up the thread and stack caches, the template, and the reaper and
+    /// stack locks.
     ///
     /// # Safety
     ///
     /// Runs once, from the boot sequence, before any thread exists.
     pub(crate) unsafe fn init() {
-        // SAFETY: The boot caller runs this once, before any thread exists,
-        // and the globals below are exactly the ones the C `thread_init()`
-        // initialized, in the same order.
+        // SAFETY: the boot caller runs this once, before any thread exists.
         unsafe {
             (*ptr::addr_of_mut!(THREAD_CACHE)).init(
                 b"thread",
@@ -457,7 +455,7 @@ impl Thread {
         unsafe { Pin::new_unchecked(&(*thread).timer) }.start(ticks);
     }
 
-    /// Cancel the wait timeout if one is armed (the old `reset_timeout_check`).
+    /// Cancels the wait timeout, if one is armed.
     ///
     /// # Safety
     ///
@@ -542,7 +540,8 @@ pub(crate) fn depress_timeout_action(callout: Pin<&MachCallout>) {
 
 #[allow(missing_docs)]
 impl Thread {
-    /// `thread_timer_delta()` of <kern/sched.h>.
+    /// Charges the user and system time since the last update to the thread's
+    /// scheduler usage.
     ///
     /// # Safety
     ///
@@ -604,16 +603,16 @@ impl Thread {
         unsafe { self.state_event.state.set_active(active) };
     }
 
-    /// The address of `event_key`, which is `TH_EV_WAKE_ACTIVE(t)` in C: the
-    /// key a suspended thread's waker waits on.
+    /// The address of `event_key`: the key a suspended thread's waker waits
+    /// on.
     pub const fn wake_active_event(&self) -> *mut c_void {
         (&raw const self.state_event.event_key)
             .cast::<c_void>()
             .cast_mut()
     }
 
-    /// The address one `event_key` on, which is `TH_EV_STATE(t)` in C: the
-    /// key a thread waiting for its state to become interruptible uses.
+    /// The address one `event_key` on: the key a thread waiting for its state
+    /// to become interruptible uses.
     pub const fn state_event(&self) -> *mut c_void {
         let event = (&raw const self.state_event.event_key).cast_mut();
         // SAFETY: the union holds one pointer, so one element past
@@ -623,7 +622,7 @@ impl Thread {
 }
 
 impl Thread {
-    /// `thread_reference()` of kern/thread.c.
+    /// Takes a reference on `thread`, when it is not null.
     ///
     /// # Safety
     ///
@@ -640,7 +639,7 @@ impl Thread {
         }
     }
 
-    /// `thread_hold()` of kern/thread.c.
+    /// Counts one more suspension of `thread`.
     ///
     /// # Safety
     ///
@@ -659,7 +658,8 @@ impl Thread {
         }
     }
 
-    /// `thread_release()` of kern/thread.c.
+    /// Counts one suspension of `thread` fewer, letting it run again with the
+    /// last.
     ///
     /// # Safety
     ///
@@ -684,7 +684,7 @@ impl Thread {
         }
     }
 
-    /// `thread_resume()` of kern/thread.c.
+    /// Resumes `thread`, undoing one suspension.
     ///
     /// # Safety
     ///
@@ -732,7 +732,8 @@ impl Thread {
         }
     }
 
-    /// `thread_force_terminate()` of kern/thread.c.
+    /// Terminates `thread` at once, as the task's termination does for each of
+    /// its threads.
     ///
     /// # Safety
     ///
@@ -767,7 +768,7 @@ impl Thread {
         }
     }
 
-    /// `thread_abort()` of kern/thread.c.
+    /// Aborts the wait or the kernel call `thread` is in.
     ///
     /// # Safety
     ///
@@ -800,12 +801,12 @@ impl Thread {
         Ok(())
     }
 
-    /// `thread_start()` of kern/thread.c.
+    /// Sets the continuation the thread starts at.
     pub fn start(&mut self, start: Continuation) {
         self.swap_func = start;
     }
 
-    /// `thread_unfreeze()` of kern/thread.c.
+    /// Lets a frozen thread be assigned again.
     ///
     /// # Safety
     ///
@@ -831,7 +832,7 @@ impl Thread {
         }
     }
 
-    /// `thread_get_assignment()` of kern/thread.c.
+    /// The processor set `thread` is assigned to, with a reference.
     ///
     /// # Safety
     ///
@@ -872,7 +873,7 @@ const fn fixedpri_quantum(data: c_int) -> c_int {
 }
 
 impl Thread {
-    /// `thread_get_state()` of kern/thread.c.
+    /// Reads `thread`'s machine state of `flavor` into `old_state`.
     ///
     /// # Safety
     ///
@@ -928,7 +929,7 @@ impl Thread {
         result
     }
 
-    /// `thread_set_state()` of kern/thread.c.
+    /// Sets `thread`'s machine state of `flavor`.
     ///
     /// # Safety
     ///
@@ -985,7 +986,7 @@ impl Thread {
         result
     }
 
-    /// `thread_priority()` of kern/thread.c.
+    /// Sets `thread`'s base priority, and its maximum when `set_max` is set.
     ///
     /// # Safety
     ///
@@ -1004,8 +1005,7 @@ impl Thread {
             return Err(Error::InvalidArgument);
         }
 
-        // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
-        // thread lock is taken under it.
+        // SAFETY: the thread lock is taken under `splsched()`.
         let s = unsafe { spl::splsched() };
         // SAFETY: the checks above; the thread lock
         // protects every field below.
@@ -1034,7 +1034,7 @@ impl Thread {
         result
     }
 
-    /// `thread_set_own_priority()` of kern/thread.c.
+    /// Sets the current thread's priority.
     ///
     /// # Safety
     ///
@@ -1042,8 +1042,7 @@ impl Thread {
     /// `splsched()` raises the level and this takes the current thread's lock.
     pub unsafe fn set_own_priority(priority: c_int) {
         let thread = per_cpu::thread();
-        // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
-        // thread lock is taken under it.
+        // SAFETY: the thread lock is taken under `splsched()`.
         let s = unsafe { spl::splsched() };
         // SAFETY: `thread` is the live current thread, and the lock protects
         // the priority fields.
@@ -1060,7 +1059,8 @@ impl Thread {
         }
     }
 
-    /// `thread_max_priority()` of kern/thread.c.
+    /// Sets `thread`'s maximum priority, with the authority of `pset`'s
+    /// control port.
     ///
     /// # Safety
     ///
@@ -1079,8 +1079,7 @@ impl Thread {
             return Err(Error::InvalidArgument);
         }
 
-        // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
-        // thread lock is taken under it.
+        // SAFETY: the thread lock is taken under `splsched()`.
         let s = unsafe { spl::splsched() };
         // SAFETY: the checks above; the thread lock
         // protects every field below.
@@ -1109,7 +1108,8 @@ impl Thread {
         result
     }
 
-    /// `thread_policy()` of kern/thread.c.
+    /// Sets `thread`'s scheduling policy to `policy`, with `data` its
+    /// parameter.
     ///
     /// # Safety
     ///
@@ -1134,8 +1134,7 @@ impl Thread {
             return Err(Error::InvalidArgument);
         }
 
-        // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
-        // thread lock is taken under it.
+        // SAFETY: the thread lock is taken under `splsched()`.
         let s = unsafe { spl::splsched() };
         // SAFETY: the checks above; the thread lock
         // protects every field below.
@@ -1168,7 +1167,7 @@ impl Thread {
         result
     }
 
-    /// `thread_wire()` of kern/thread.c.
+    /// Gives `thread` the VM privilege, or takes it away.
     ///
     /// # Safety
     ///
@@ -1182,8 +1181,7 @@ impl Thread {
             return Err(Error::InvalidArgument);
         }
 
-        // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
-        // thread lock is taken under it.
+        // SAFETY: the thread lock is taken under `splsched()`.
         let s = unsafe { spl::splsched() };
         // SAFETY: the checks above; the thread lock
         // protects the privilege fields, and the Rust `stack_privilege()`
@@ -1205,7 +1203,7 @@ impl Thread {
         Ok(())
     }
 
-    /// `thread_set_name()` of kern/thread.c.
+    /// Sets `thread`'s name from `name`.
     ///
     /// # Safety
     ///
@@ -1236,7 +1234,7 @@ impl Thread {
         Ok(())
     }
 
-    /// `thread_get_name()` of kern/thread.c.
+    /// Copies `thread`'s name into `name`.
     ///
     /// # Safety
     ///
@@ -1269,7 +1267,8 @@ impl Thread {
 }
 
 impl Thread {
-    /// `stack_alloc_try()` of kern/thread.c.
+    /// Gives the thread a cached kernel stack without blocking, returning
+    /// whether one was free, with `resume` as its resume point.
     ///
     /// # Safety
     ///
@@ -1309,15 +1308,16 @@ impl Thread {
         true
     }
 
-    /// `stack_alloc()` of kern/thread.c.
+    /// Gives the thread a kernel stack, blocking until one is free, with
+    /// `resume` as its resume point.
     ///
     /// # Safety
     ///
     /// The caller must hold no spin lock, because the cache allocation may
     /// block, and `resume` must be a stack continuation.
     pub(crate) unsafe fn stack_alloc(&mut self, resume: StackResume) {
-        // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
-        // free list is touched only between it and the matching `splx()`.
+        // SAFETY: the free list is touched only between `splsched()` and the
+        // matching `splx()`.
         let s = unsafe { spl::splsched() };
         STACK_LOCK_DATA.lock();
         // SAFETY: the level is splsched and the list lock is held.
@@ -1347,7 +1347,8 @@ impl Thread {
         };
     }
 
-    /// `stack_free()` of kern/thread.c.
+    /// Returns the thread's kernel stack to the cached-stack list or the
+    /// cache.
     ///
     /// # Safety
     ///
@@ -1368,7 +1369,7 @@ impl Thread {
         }
     }
 
-    /// `stack_collect()` of kern/thread.c.
+    /// Frees the cached stacks beyond the limit.
     ///
     /// # Safety
     ///
@@ -1390,7 +1391,7 @@ impl Thread {
                 spl::splx(s);
 
                 stack_finalize(stack);
-                // SAFETY: `thread_stack_cache` is the cache the stack came
+                // SAFETY: `THREAD_STACK_CACHE` is the cache the stack came
                 // from, and nothing references it after the finalize.
                 if let Some(stack) =
                     NonNull::new(with_exposed_provenance_mut::<u8>(stack))
@@ -1406,7 +1407,7 @@ impl Thread {
         }
     }
 
-    /// `stack_privilege()` of kern/thread.c.
+    /// Gives the thread a stack of its own, kept across switches.
     ///
     /// # Safety
     ///
@@ -1448,12 +1449,12 @@ const _: () = {
 };
 const _: () = assert!(size_of::<ThreadData>() == 8);
 
-/// The free-list link word of a stack object: `stack_next()` of kern/thread.c,
-/// a `vm_offset_t` in the last word of the `KERNEL_STACK_SIZE` region.
+/// The free-list link word of a stack object, in the last word of its
+/// `KERNEL_STACK_SIZE` region.
 ///
 /// # Safety
 ///
-/// `stack` must be the base address of a live `thread_stack_cache` object.
+/// `stack` must be the base address of a live stack-cache object.
 const unsafe fn stack_next(stack: VmOffset) -> VmOffset {
     unsafe {
         ptr::with_exposed_provenance::<VmOffset>(stack)
@@ -1467,7 +1468,7 @@ const unsafe fn stack_next(stack: VmOffset) -> VmOffset {
 ///
 /// # Safety
 ///
-/// `stack` must be the base address of a live `thread_stack_cache` object.
+/// `stack` must be the base address of a live stack-cache object.
 const unsafe fn set_stack_next(stack: VmOffset, next: VmOffset) {
     unsafe {
         with_exposed_provenance_mut::<VmOffset>(stack)
@@ -1476,8 +1477,7 @@ const unsafe fn set_stack_next(stack: VmOffset, next: VmOffset) {
     }
 }
 
-/// `stack_free_list` and `stack_free_count` of kern/thread.c: the cached
-/// stacks, linked through each stack's last word.
+/// The cached stacks, linked through each stack's last word, and their count.
 struct StackFreeList {
     /// The first stack, or zero when the list is empty.
     head: VmOffset,
@@ -1511,17 +1511,17 @@ impl StackFreeList {
     }
 }
 
-/// `thread_cache` of kern/thread.c: the `struct thread` slab cache.
+/// The slab cache of [`Thread`] records.
 static mut THREAD_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `thread_stack_cache` of kern/thread.c: the kernel-stack slab cache.
+/// The kernel-stack slab cache.
 static mut THREAD_STACK_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `thread_template` of kern/thread.c: the image `thread_create()` copies.
-/// Built by [`Thread::new`] in [`Thread::init`], never zeroed.
+/// The image [`Thread::create`] copies.  Built by [`Thread::new`] in
+/// [`Thread::init`], never zeroed.
 static mut THREAD_TEMPLATE: MaybeUninit<Thread> = MaybeUninit::uninit();
 
-/// `reaper_queue` of kern/thread.c: the threads waiting for the reaper.
+/// The threads waiting for the reaper.
 static REAPER_QUEUE: SyncCell<ThreadQueue> =
     SyncCell(UnsafeCell::new(ThreadQueue::new()));
 
@@ -1541,11 +1541,10 @@ unsafe fn reaper_queue() -> Pin<&'static mut ThreadQueue> {
     unsafe { Pin::new_unchecked(&mut *REAPER_QUEUE.0.get()) }
 }
 
-/// `reaper_lock` of kern/thread.c: protects `reaper_queue`.
+/// Protects `REAPER_QUEUE`.
 static REAPER_LOCK: SimpleLock = SimpleLock::new();
 
-/// `stack_lock_data` of kern/thread.c: protects the cached-stack free list,
-/// at splsched.
+/// Protects the cached-stack free list, at splsched.
 static STACK_LOCK_DATA: SimpleLock = SimpleLock::new();
 
 /// The cached stacks, under [`STACK_LOCK_DATA`] at splsched.
@@ -1564,24 +1563,22 @@ unsafe fn stack_free_list() -> &'static mut StackFreeList {
     unsafe { &mut *STACK_FREE.0.get() }
 }
 
-/// `stack_free_limit` of kern/thread.c: the cached-stack high-water mark a
-/// debugger may lower or raise.
+/// The cached-stack high-water mark a debugger may lower or raise.
 static STACK_FREE_LIMIT: AtomicU32 = AtomicU32::new(1);
 
-/// `thread_deallocate_stack` of kern/thread.c: how many stacks the
-/// deallocator freed, a counter for a debugger to read.
+/// How many stacks the deallocator freed, a counter for a debugger to read.
 static THREAD_DEALLOCATE_STACK: AtomicU32 = AtomicU32::new(0);
 
-/// `stack_check_usage` of kern/thread.c: whether stack usage is tracked.
+/// Whether stack usage is tracked.
 static STACK_CHECK_USAGE: AtomicI32 = AtomicI32::new(0);
 
-/// `stack_max_usage` of kern/thread.c: the largest kernel-stack usage seen.
+/// The largest kernel-stack usage seen.
 static STACK_MAX_USAGE: AtomicVmSize = AtomicVmSize::new(0);
 
-/// `MACH_PORT_NULL` of <mach/port.h>: no port name.
+/// No port name.
 const MACH_PORT_NULL: c_uint = 0;
 
-/// `default_pset` of <kern/processor.h> as a typed pointer.
+/// The default processor set.
 pub(crate) fn default_pset() -> *mut ProcessorSet {
     processor::default_pset()
 }
@@ -1593,7 +1590,7 @@ pub(crate) struct StackUsage {
     pub total: c_uint,
     /// The VM space they reserve, equal to the resident space.
     pub space: VmSize,
-    /// The largest usage seen, when `stack_check_usage` is on.
+    /// The largest usage seen, when `STACK_CHECK_USAGE` is on.
     pub maxusage: VmSize,
     /// The address of the thread with the largest stack.
     pub maxstack: VmOffset,
@@ -1658,7 +1655,7 @@ impl Thread {
         pset
     }
 
-    /// `thread_create()` of kern/thread.c.
+    /// Creates a suspended thread in `parent_task`.
     ///
     /// # Safety
     ///
@@ -1671,7 +1668,7 @@ impl Thread {
             return Err(Error::InvalidArgument);
         }
 
-        // SAFETY: `thread_init()` built the cache before any thread existed,
+        // SAFETY: `Thread::init` built the cache before any thread existed,
         // and the allocation may block, as the caller permits.
         let Some(buf) =
             (unsafe { (*ptr::addr_of_mut!(THREAD_CACHE)).alloc() })
@@ -1779,7 +1776,7 @@ impl Thread {
         Ok(new_thread)
     }
 
-    /// `thread_deallocate()` of kern/thread.c.
+    /// Drops a reference on `thread`, freeing it on the last one.
     ///
     /// # Safety
     ///
@@ -1900,7 +1897,7 @@ impl Thread {
         }
     }
 
-    /// `thread_terminate()` of kern/thread.c.
+    /// Terminates `thread`.
     ///
     /// # Safety
     ///
@@ -1983,7 +1980,9 @@ impl Thread {
         Ok(())
     }
 
-    /// `thread_terminate_release()` of kern/thread.c.
+    /// Terminates `thread` and releases, in `task`, its port name
+    /// `thread_name`, the reply port `reply_port` and the memory at
+    /// `address..address + size`.
     ///
     /// # Safety
     ///
@@ -2024,7 +2023,8 @@ impl Thread {
         unsafe { Self::terminate(thread) }
     }
 
-    /// `thread_halt()` of kern/thread.c.
+    /// Halts `thread` at a clean point; with `must_halt`, even when it is in
+    /// an uninterruptible wait.
     ///
     /// # Safety
     ///
@@ -2215,7 +2215,8 @@ impl Thread {
         }
     }
 
-    /// `thread_halt_self()` of kern/thread.c.
+    /// Halts the current thread at a clean point, resuming at `continuation`
+    /// when it is released.
     ///
     /// # Safety
     ///
@@ -2256,7 +2257,7 @@ impl Thread {
         }
     }
 
-    /// `thread_dowait()` of kern/thread.c.
+    /// Waits for `thread` to stop; with `must_halt`, until it is halted.
     ///
     /// # Safety
     ///
@@ -2334,7 +2335,7 @@ impl Thread {
         }
     }
 
-    /// `thread_suspend()` of kern/thread.c.
+    /// Suspends `thread` and waits for it to stop.
     ///
     /// # Safety
     ///
@@ -2390,7 +2391,8 @@ impl Thread {
         Ok(())
     }
 
-    /// `thread_freeze()` of kern/thread.c.
+    /// Freezes `thread`'s assignment, waiting for a change in progress to
+    /// finish.
     ///
     /// # Safety
     ///
@@ -2416,7 +2418,8 @@ impl Thread {
         }
     }
 
-    /// `thread_doassign()` of kern/thread.c.
+    /// Moves `thread` to `new_pset`, unfreezing its assignment when
+    /// `release_freeze` is set.
     ///
     /// # Safety
     ///
@@ -2533,8 +2536,7 @@ impl Thread {
         }
     }
 
-    /// `thread_assign()` of kern/thread.c, the `MACH_HOST` arm both
-    /// configured builds take.
+    /// Moves `thread` to `new_pset`.
     ///
     /// # Safety
     ///
@@ -2557,14 +2559,12 @@ impl Thread {
     }
 }
 
-/// `walking_zombie()` of kern/thread.c, the private continuation of a
-/// terminating thread.
+/// The continuation of a terminating thread: hands it to the reaper.
 unsafe extern "C" fn walking_zombie() {
     kpanic!("walking_zombie", "the zombie walks!")
 }
 
-/// `reaper_thread_continue()` of kern/thread.c: the reaper's loop, which the
-/// `reaper_thread()` continuation runs forever.
+/// The reaper's loop, which frees the threads on the reaper queue forever.
 ///
 /// # Safety
 ///
@@ -2598,7 +2598,7 @@ pub(crate) unsafe extern "C" fn reaper_thread_continue() {
     }
 }
 
-/// `kernel_thread()` of kern/thread.c.
+/// Creates a kernel thread in `task` that starts at `start` with `arg`.
 ///
 /// # Safety
 ///
@@ -2630,8 +2630,7 @@ pub(crate) unsafe fn kernel_thread(
     thread
 }
 
-/// `stack_usage()` of kern/thread.c: how much of `stack` the marker fill no
-/// longer covers.
+/// How much of `stack` the marker fill no longer covers.
 ///
 /// # Safety
 ///
@@ -2651,8 +2650,7 @@ unsafe fn stack_usage(stack: VmOffset) -> VmSize {
     KERNEL_STACK_SIZE - used * size_of::<u32>()
 }
 
-/// `stack_finalize()` of kern/thread.c: account for a stack about to be
-/// released.
+/// Accounts for a stack about to be released.
 ///
 /// # Safety
 ///
@@ -2667,15 +2665,14 @@ pub(crate) unsafe fn stack_finalize(stack: VmOffset) {
     STACK_MAX_USAGE.fetch_max(used, Ordering::Relaxed);
 }
 
-/// `stack_statistics()` of kern/thread.c: walk the cached stacks, raising
-/// `maxusage`.
+/// Walks the cached stacks, raising `maxusage`.
 ///
 /// # Safety
 ///
-/// The caller must hold no lock: the routine takes `stack_lock_data` at
+/// The caller must hold no lock: the routine takes `STACK_LOCK_DATA` at
 /// splsched.
 unsafe fn stack_statistics(mut maxusage: VmSize) -> (c_uint, VmSize) {
-    // SAFETY: `stack_lock_data` is the lock `thread_init()` built; the free
+    // SAFETY: `STACK_LOCK_DATA` is the lock `Thread::init` built; the free
     // list holds only whole cache objects.
     unsafe {
         let s = spl::splsched();
@@ -2700,8 +2697,7 @@ unsafe fn stack_statistics(mut maxusage: VmSize) -> (c_uint, VmSize) {
     }
 }
 
-/// `stack_init()` of kern/thread.c: fill a fresh stack with the usage marker
-/// when the check is on.
+/// Fills a fresh stack with the usage marker when the check is on.
 ///
 /// # Safety
 ///
@@ -2723,7 +2719,7 @@ pub(crate) unsafe fn stack_init(stack: VmOffset) {
     }
 }
 
-/// `host_stack_usage()` of kern/thread.c.
+/// The kernel-stack counts and usage `host_stack_usage()` reports.
 ///
 /// # Safety
 ///
@@ -2749,7 +2745,7 @@ pub(crate) unsafe fn host_stack_usage(
     })
 }
 
-/// `processor_set_stack_usage()` of kern/thread.c.
+/// The kernel-stack counts and usage `processor_set_stack_usage()` reports.
 ///
 /// # Safety
 ///

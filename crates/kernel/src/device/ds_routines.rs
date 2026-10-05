@@ -5,8 +5,7 @@
 //   Laboratory at the University of Utah (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The native Mach device service, which `device/ds_routines.c` used to
-//! define and <`device/ds_routines.h`> declares.
+//! The native Mach device service.
 //!
 //! The `ds_device_*` entry points, the emulation dispatch, the device
 //! open/close/read/write paths, the request completion callbacks and the
@@ -59,7 +58,7 @@ use core::ptr::{self, NonNull};
 use kmem::KBox;
 use lock::IrqSpinLock;
 
-/// `DEV_STATE_INIT` of <`device/dev_hdr.h`>.
+/// The state of a device that is not open yet.
 const DEV_STATE_INIT: c_short = 0;
 /// `DEV_STATE_OPENING`.
 const DEV_STATE_OPENING: c_short = 1;
@@ -68,10 +67,10 @@ const DEV_STATE_OPEN: c_short = 2;
 /// `DEV_STATE_CLOSING`.
 const DEV_STATE_CLOSING: c_short = 3;
 
-/// `D_EXCL_OPEN` of <`device/dev_hdr.h`>.
+/// The device flag of an exclusive open.
 const D_EXCL_OPEN: c_short = 0x0001;
 
-/// `IO_WRITE` of <`device/io_req.h`>.
+/// The request operation of a write.
 const IO_WRITE: c_int = 0x0000_0000;
 /// `IO_READ`.
 const IO_READ: c_int = 0x0000_0001;
@@ -83,20 +82,20 @@ const IO_DONE: c_int = 0x0000_0100;
 const IO_WANTED: c_int = 0x0000_0800;
 /// `IO_CALL`.
 const IO_CALL: c_int = 0x0000_2000;
-/// `IO_INBAND` of <`device/io_req.h`>.
+/// The request flag of an in-band transfer.
 const IO_INBAND: c_int = 0x0000_4000;
 /// `IO_LOANED`.
 const IO_LOANED: c_int = 0x0001_0000;
 
-/// `D_INFO_BLOCK_SIZE` of <device/conf.h>.
+/// The `d_dev_info` flavor that reports the block size.
 const D_INFO_BLOCK_SIZE: c_int = 1;
-/// `IO_INBAND_MAX` of <`device/device_types.h`>.
+/// The most bytes an in-band transfer carries.
 const IO_INBAND_MAX: usize = 128;
-/// `MACH_NOTIFY_NO_SENDERS` of <mach/notify.h>.
+/// The message id of a no-senders notification.
 const MACH_NOTIFY_NO_SENDERS: c_int = 0o106;
-/// `DEVICE_IO_MAP_SIZE` of `device/ds_routines.c`.
+/// The size of [`DEVICE_IO_MAP`].
 const DEVICE_IO_MAP_SIZE: VmSize = 16 * 1024 * 1024;
-/// `IOTRAP_REQSIZE` of `device/ds_routines.c`.
+/// The size of an I/O request block on the trap path.
 const IOTRAP_REQSIZE: usize = 2048;
 /// The most loaned data a trap request carries after itself in its
 /// [`IOTRAP_REQSIZE`] cache slot; the C never checked it.
@@ -104,8 +103,7 @@ const IOTRAP_DATA_MAX: usize = IOTRAP_REQSIZE - size_of::<IoReq>();
 /// The `stack_iovec[16]` bound of `device_writev_trap()`.
 const MAX_IOVECS: usize = 16;
 
-/// `struct device` of <`device/dev_hdr.h>`: the emulation handle embedded at
-/// the end of a [`MachDevice`].
+/// The emulation handle embedded at the end of a [`MachDevice`].
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct Device {
@@ -120,7 +118,7 @@ const _: () = {
     assert!(offset_of!(Device, emul_data) == size_of::<*mut c_void>());
 };
 
-/// `struct mach_device` of <`device/dev_hdr.h>`: one open device record.
+/// One open device record.
 ///
 /// The mirror keeps every field of the C record; the device-lookup paths in
 /// C still read `ref_count` and `number_chain`, and this module reads only the
@@ -213,7 +211,7 @@ type DevSetstat =
 type DevDevInfo =
     unsafe fn(DevT, c_int, *mut c_int) -> Result<(), DeviceError>;
 
-/// `struct dev_ops` of <device/conf.h>: one driver's entry points.
+/// One driver's entry points.
 ///
 /// The mirror keeps every field; this module dispatches through `d_open`,
 /// `d_close`, `d_read`, `d_write`, `d_getstat`, `d_setstat`, `d_async_in` and
@@ -309,7 +307,7 @@ const _: () = {
     assert!(offset_of!(DevOps, d_dev_info) == 96);
 };
 
-/// The signature of a `device_emulation_ops::open` hook.
+/// The signature of an emulation's `open` hook.
 ///
 /// [`ds_device_open()`] invokes it with a validated `reply_port`, the
 /// port's type, the requested mode, a NUL-terminated device `name`, and
@@ -321,7 +319,7 @@ type EmulOpen = unsafe fn(
     *const c_char,
     *mut *mut c_void,
 ) -> ReplyResult;
-/// The signature of a `device_emulation_ops::write` hook.
+/// The signature of an emulation's `write` hook.
 ///
 /// [`ds_device_write()`] invokes it with the emulation data, the reply
 /// port to answer through, the mode and record number, `data` readable
@@ -337,7 +335,7 @@ type EmulWrite = unsafe fn(
     c_uint,
     *mut c_int,
 ) -> ReplyResult;
-/// The signature of a `device_emulation_ops::write_inband` hook.
+/// The signature of an emulation's `write_inband` hook.
 ///
 /// [`ds_device_write_inband()`] invokes it the same way as
 /// [`EmulWrite`], except `data` is the bytes carried inline in the
@@ -352,7 +350,7 @@ type EmulWriteInband = unsafe fn(
     c_uint,
     *mut c_int,
 ) -> ReplyResult;
-/// The signature of a `device_emulation_ops::read` hook.
+/// The signature of an emulation's `read` hook.
 ///
 /// [`ds_device_read()`] invokes it with the emulation data, the reply
 /// port to answer through, the mode, record number and byte count
@@ -368,7 +366,7 @@ type EmulRead = unsafe fn(
     *mut *mut c_char,
     *mut c_uint,
 ) -> ReplyResult;
-/// The signature of a `device_emulation_ops::read_inband` hook.
+/// The signature of an emulation's `read_inband` hook.
 ///
 /// [`ds_device_read_inband()`] invokes it the same way as [`EmulRead`],
 /// except `data` is a buffer the callee fills in place for the inline
@@ -383,7 +381,7 @@ type EmulReadInband = unsafe fn(
     *mut c_char,
     *mut c_uint,
 ) -> ReplyResult;
-/// The signature of a `device_emulation_ops::set_status` hook.
+/// The signature of an emulation's `set_status` hook.
 ///
 /// [`ds_device_set_status()`] invokes it with the emulation data, the
 /// status flavor, and `status` readable for `status_count` words.
@@ -393,7 +391,7 @@ type EmulSetStatus = unsafe fn(
     *mut c_int,
     c_uint,
 ) -> Result<(), DeviceError>;
-/// The signature of a `device_emulation_ops::get_status` hook.
+/// The signature of an emulation's `get_status` hook.
 ///
 /// [`ds_device_get_status()`] invokes it with the emulation data, the
 /// status flavor, `status` writable for the words the caller reserved,
@@ -405,7 +403,7 @@ type EmulGetStatus = unsafe fn(
     *mut c_int,
     *mut c_uint,
 ) -> Result<(), DeviceError>;
-/// The signature of a `device_emulation_ops::set_filter` hook.
+/// The signature of an emulation's `set_filter` hook.
 ///
 /// [`ds_device_set_filter()`] invokes it with the emulation data, a
 /// valid `receive_port`, the filter priority, and `filter` readable for
@@ -417,7 +415,7 @@ type EmulSetFilter = unsafe fn(
     *mut c_ushort,
     c_uint,
 ) -> Result<(), DeviceError>;
-/// The signature of a `device_emulation_ops::map` hook.
+/// The signature of an emulation's `map` hook.
 ///
 /// [`ds_device_map()`] invokes it with the emulation data, the requested
 /// protection, offset and size, a writable out-param for the memory
@@ -430,7 +428,7 @@ type EmulMap = unsafe fn(
     *mut *mut c_void,
     c_int,
 ) -> Result<(), DeviceError>;
-/// The signature of a `device_emulation_ops::write_trap` hook.
+/// The signature of an emulation's `write_trap` hook.
 ///
 /// [`ds_device_write_trap()`] invokes it with the emulation data, the
 /// mode, record number, and the `data`/`count` words exactly as the
@@ -439,7 +437,7 @@ type EmulMap = unsafe fn(
 /// memory.
 type EmulWriteTrap =
     unsafe fn(*mut c_void, c_uint, c_ulong, c_ulong, c_ulong) -> ReplyResult;
-/// The signature of a `device_emulation_ops::writev_trap` hook.
+/// The signature of an emulation's `writev_trap` hook.
 ///
 /// [`ds_device_writev_trap()`] invokes it with the emulation data, the
 /// mode and record number, and `iovec` readable for `count`
@@ -454,12 +452,11 @@ type EmulWritevTrap = unsafe fn(
     c_ulong,
 ) -> ReplyResult;
 
-/// The signature of a `device_emulation_ops::close` hook; see
+/// The signature of an emulation's `close` hook; see
 /// [`DeviceEmulationOps::close`].
 type EmulClose = unsafe fn(*mut c_void) -> Result<(), DeviceError>;
 
-/// `struct device_emulation_ops` of <`device/device_emul.h>`: the operations
-/// one emulation layer provides.
+/// The operations one emulation layer provides.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct DeviceEmulationOps {
@@ -530,8 +527,7 @@ const _: () = {
     assert!(offset_of!(DeviceEmulationOps, writev_trap) == 120);
 };
 
-/// `mach_no_senders_notification_t` of <mach/notify.h>: the notification
-/// `ds_notify()` handles.
+/// `mach_no_senders_notification_t`: the notification [`ds_notify`] handles.
 #[repr(C)]
 #[allow(missing_docs)]
 struct NoSendersNotification {
@@ -549,8 +545,7 @@ const _: () = {
     assert!(offset_of!(NoSendersNotification, not_count) == 40);
 };
 
-/// `io_buf_vec_t` of <`device/device_types.h>`: one scatter/gather segment of
-/// kernel addresses.
+/// `io_buf_vec_t`: one scatter/gather segment of kernel addresses.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -566,8 +561,8 @@ const _: () = {
     assert!(offset_of!(IoBufVec, count) == 8);
 };
 
-/// `rpc_io_buf_vec_t` of <`device/device_types.h>`: one scatter/gather segment
-/// of user addresses, as MIG passes them.
+/// `rpc_io_buf_vec_t`: one scatter/gather segment of user addresses, as MIG
+/// passes them.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -583,28 +578,23 @@ const _: () = {
     assert!(offset_of!(RpcIoBufVec, count) == size_of::<c_ulong>());
 };
 
-/// `emulation_list[]` of `device/ds_routines.c`: the emulations
-/// [`ds_device_open()`] tries in order.
+/// The emulations [`ds_device_open()`] tries in order.
 static mut EMULATION_LIST: [*mut DeviceEmulationOps; 1] =
     [&raw mut MACH_DEVICE_EMULATION_OPS];
 
-/// `device_io_map_store` of `device/ds_routines.c`: the storage of the map
-/// every device IO buffer is mapped through.
+/// The storage of the map every device IO buffer is mapped through.
 static mut DEVICE_IO_MAP_STORE: VmMap = VmMap::zeroed();
 
-/// `device_io_map` of <`device/ds_routines.h`>.
+/// The map every device I/O buffer is mapped through.
 pub static mut DEVICE_IO_MAP: *mut VmMap = &raw mut DEVICE_IO_MAP_STORE;
 
-/// `io_inband_cache` of <`device/io_req.h>`: the cache for inband read
-/// buffers.
+/// The cache for inband read buffers.
 static mut IO_INBAND_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `io_trap_cache` of `device/ds_routines.c`: the cache for the trap path's
-/// `io_req` blocks.
+/// The cache of the trap path's request blocks.
 static mut IO_TRAP_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `io_done_list` of <`device/ds_routines.h>`: the requests the io-done thread
-/// still has to complete.
+/// The requests the io-done thread still has to complete.
 static IO_DONE_LIST: SyncCell<IoReqQueue> =
     SyncCell(UnsafeCell::new(IoReqQueue::new()));
 
@@ -625,12 +615,11 @@ unsafe fn io_done_list() -> Pin<&'static mut IoReqQueue> {
     unsafe { Pin::new_unchecked(&mut *IO_DONE_LIST.0.get()) }
 }
 
-/// `io_done_list_lock` of `device/ds_routines.c`.  An irq spin lock, since
-/// requests complete from interrupt handlers.
+/// Guards [`IO_DONE_LIST`].  An irq spin lock, since requests complete from
+/// interrupt handlers.
 static IO_DONE_LIST_LOCK: IrqSpinLock<(), MachPlatform> = IrqSpinLock::new(());
 
-/// `mach_device_emulation_ops` of `device/ds_routines.c`: the native Mach
-/// device emulation every device lookup installs.
+/// The native Mach device emulation every device lookup installs.
 pub(crate) static mut MACH_DEVICE_EMULATION_OPS: DeviceEmulationOps =
     DeviceEmulationOps {
         reference: Some(dev_lookup::mach_device_reference),
@@ -651,8 +640,8 @@ pub(crate) static mut MACH_DEVICE_EMULATION_OPS: DeviceEmulationOps =
         writev_trap: Some(device_writev_trap),
     };
 
-/// The C's implicit `int` to `dev_t` truncation at every driver call; a
-/// device number comes from the device table and fits in sixteen bits.
+/// The device number of a driver call: a device number comes from the device
+/// table and fits in sixteen bits.
 pub(crate) const fn driver_unit(dev_number: c_int) -> DevT {
     dev_number as DevT
 }
@@ -662,14 +651,13 @@ const fn io_count(count: c_uint) -> c_long {
     count as c_long
 }
 
-/// `io_req_alloc` of <`device/io_req.h`>: moves `ior` into a fresh heap
-/// block, or returns `None` when the heap is exhausted, where the C
-/// dereferenced the null pointer.
+/// Moves `ior` into a fresh heap block, or returns `None` when the heap is
+/// exhausted.
 fn io_req_alloc(ior: IoReq) -> Option<KBox<IoReq, Kalloc>> {
     KBox::try_new(ior, Kalloc).ok()
 }
 
-/// `io_req_free` of <`device/io_req.h`>.
+/// Frees a request block [`io_req_alloc`] made.
 ///
 /// # Safety
 ///
@@ -679,7 +667,8 @@ unsafe fn io_req_free(ior: *mut IoReq) {
     drop(unsafe { KBox::from_raw(ior, Kalloc) });
 }
 
-/// `ds_device_open()` of `device/ds_routines.c`.
+/// Opens the device `name` with `mode` for the master device port `open_port`,
+/// replying through `reply_port` when the open completes later.
 ///
 /// # Safety
 ///
@@ -715,7 +704,7 @@ pub(crate) unsafe fn ds_device_open(
     })
 }
 
-/// `ds_device_close()` of `device/ds_routines.c`.
+/// Closes the device.
 ///
 /// # Safety
 ///
@@ -730,7 +719,7 @@ pub(crate) unsafe fn ds_device_close(
     }
 }
 
-/// `ds_device_write()` of `device/ds_routines.c`.
+/// Writes the `count` out-of-line bytes at `data` to the device at `recnum`.
 ///
 /// # Safety
 ///
@@ -768,7 +757,7 @@ pub(crate) unsafe fn ds_device_write(
     }
 }
 
-/// `ds_device_write_inband()` of `device/ds_routines.c`.
+/// Writes the `count` in-band bytes at `data` to the device at `recnum`.
 ///
 /// # Safety
 ///
@@ -806,7 +795,7 @@ pub(crate) unsafe fn ds_device_write_inband(
     }
 }
 
-/// `ds_device_read()` of `device/ds_routines.c`.
+/// Reads `count` bytes from the device at `recnum`, out of line.
 ///
 /// # Safety
 ///
@@ -844,7 +833,7 @@ pub(crate) unsafe fn ds_device_read(
     }
 }
 
-/// `ds_device_read_inband()` of `device/ds_routines.c`.
+/// Reads `count` bytes from the device at `recnum`, in band.
 ///
 /// # Safety
 ///
@@ -882,7 +871,7 @@ pub(crate) unsafe fn ds_device_read_inband(
     }
 }
 
-/// `ds_device_set_status()` of `device/ds_routines.c`.
+/// Applies the status flavor `flavor` from `status` to the device.
 ///
 /// # Safety
 ///
@@ -906,7 +895,7 @@ pub(crate) unsafe fn ds_device_set_status(
     }
 }
 
-/// `ds_device_get_status()` of `device/ds_routines.c`.
+/// Reports the device's status flavor `flavor` into `status`.
 ///
 /// # Safety
 ///
@@ -930,7 +919,8 @@ pub(crate) unsafe fn ds_device_get_status(
     }
 }
 
-/// `ds_device_set_filter()` of `device/ds_routines.c`.
+/// Installs the packet `filter` on the device for `receive_port`, at
+/// `priority`.
 ///
 /// # Safety
 ///
@@ -961,7 +951,8 @@ pub(crate) unsafe fn ds_device_set_filter(
     }
 }
 
-/// `ds_device_map()` of `device/ds_routines.c`.
+/// Makes a pager that maps `size` bytes of the device at `offset` with
+/// `protection`.
 ///
 /// # Safety
 ///
@@ -986,7 +977,7 @@ pub(crate) unsafe fn ds_device_map(
     }
 }
 
-/// `ds_device_intr_register()` of `device/ds_routines.c`.
+/// Registers `receive_port` to receive the device's interrupt `id`.
 ///
 /// # Safety
 ///
@@ -1024,8 +1015,8 @@ pub(crate) unsafe fn ds_device_intr_register(
         return Err(DeviceError::InvalidOperation);
     }
 
-    // SAFETY: `irqtab` is the live interrupt table, and the id is inside its
-    // NINTR entries.
+    // SAFETY: `irq::IRQTAB` is the live interrupt table, and the id is
+    // inside its `NINTR` entries.
     let Some(entry) = (unsafe {
         crate::device::intr::insert_intr_entry(
             ptr::addr_of_mut!(irq::IRQTAB),
@@ -1046,8 +1037,8 @@ pub(crate) unsafe fn ds_device_intr_register(
         )
     } {
         Ok(()) => {
-            // SAFETY: the handler holds a reference to the live port from
-            // here on, as the C's `ip_reference()` recorded.
+            // SAFETY: the handler holds a reference to the live port from here
+            // on.
             unsafe { ipc_object::reference(receive_port) };
             Ok(())
         }
@@ -1055,7 +1046,8 @@ pub(crate) unsafe fn ds_device_intr_register(
     }
 }
 
-/// `ds_device_intr_ack()` of `device/ds_routines.c`.
+/// Acknowledges the interrupt `receive_port` was notified of, enabling its
+/// line again.
 ///
 /// # Safety
 ///
@@ -1091,7 +1083,7 @@ pub(crate) unsafe fn ds_device_intr_ack(
     }
 }
 
-/// `ds_notify()` of `device/ds_routines.c`.
+/// Handles a notification sent to a device port, returning whether it was one.
 ///
 /// # Safety
 ///
@@ -1117,7 +1109,8 @@ pub(crate) unsafe fn ds_notify(msg: *mut c_void) -> bool {
     false
 }
 
-/// `ds_device_write_trap()` of `device/ds_routines.c`.
+/// Writes `count` bytes at the user address `data` to the device at `recnum`,
+/// as a trap.
 ///
 /// # Safety
 ///
@@ -1141,7 +1134,7 @@ pub(crate) unsafe fn ds_device_write_trap(
     }
 }
 
-/// `ds_device_writev_trap()` of `device/ds_routines.c`.
+/// Writes the user segments at `iovec` to the device at `recnum`, as a trap.
 ///
 /// # Safety
 ///
@@ -1166,7 +1159,7 @@ pub(crate) unsafe fn ds_device_writev_trap(
     }
 }
 
-/// `device_reference()` of `device/ds_routines.c`.
+/// Takes a reference on the device.
 ///
 /// # Safety
 ///
@@ -1181,7 +1174,7 @@ pub(crate) unsafe fn device_reference(dev: NonNull<c_void>) {
     }
 }
 
-/// `device_deallocate()` of `device/ds_routines.c`.
+/// Drops a reference on the device.
 ///
 /// # Safety
 ///
@@ -1196,11 +1189,12 @@ pub(crate) unsafe fn device_deallocate(dev: NonNull<c_void>) {
     }
 }
 
-/// `mach_convert_device_to_port()` of `device/ds_routines.c`.
+/// A send right for the device's port, consuming the caller's device
+/// reference.
 ///
 /// # Safety
 ///
-/// `device` is null or a live `mach_device`.
+/// `device` is null or a live [`MachDevice`].
 unsafe fn mach_convert_device_to_port(device: *mut c_void) -> *mut c_void {
     if device.is_null() {
         return ptr::null_mut();
@@ -1222,7 +1216,8 @@ unsafe fn mach_convert_device_to_port(device: *mut c_void) -> *mut c_void {
     }
 }
 
-/// `device_open()` of `device/ds_routines.c`.
+/// Opens the device with `mode`, through its driver, replying through
+/// `reply_port` when the driver queues the open.
 ///
 /// # Safety
 ///
@@ -1337,7 +1332,7 @@ unsafe fn device_open(
     Ok(Reply::Withheld)
 }
 
-/// `ds_open_done()` of `device/ds_routines.c`.
+/// Completes an open: binds the device to its port on success, and replies.
 ///
 /// # Safety
 ///
@@ -1396,7 +1391,7 @@ pub(crate) unsafe fn ds_open_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `device_close()` of `device/ds_routines.c`.
+/// Closes the device through its driver, once its pending requests are done.
 ///
 /// # Safety
 ///
@@ -1443,7 +1438,7 @@ unsafe fn device_close(dev: *mut c_void) -> Result<(), DeviceError> {
     Ok(())
 }
 
-/// `device_write()` of `device/ds_routines.c`.
+/// Writes an out-of-line buffer to the device through its driver.
 ///
 /// # Safety
 ///
@@ -1511,7 +1506,7 @@ unsafe fn device_write(
     }
 }
 
-/// `device_write_inband()` of `device/ds_routines.c`.
+/// Writes an in-band buffer to the device through its driver.
 ///
 /// # Safety
 ///
@@ -1572,7 +1567,8 @@ unsafe fn device_write_inband(
     }
 }
 
-/// `device_write_dealloc()` of `device/ds_routines.c`.
+/// Frees a write request's buffer, returning whether the request is finished
+/// with it.
 ///
 /// # Safety
 ///
@@ -1655,7 +1651,7 @@ pub(crate) unsafe fn device_write_dealloc(ior: *mut IoReq) -> bool {
     }
 }
 
-/// `ds_write_done()` of `device/ds_routines.c`.
+/// Completes a write and replies with the count written.
 ///
 /// # Safety
 ///
@@ -1703,7 +1699,7 @@ pub(crate) unsafe fn ds_write_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `device_read()` of `device/ds_routines.c`.
+/// Reads from the device into an out-of-line buffer through its driver.
 ///
 /// # Safety
 ///
@@ -1768,7 +1764,7 @@ unsafe fn device_read(
     Ok(Reply::Withheld)
 }
 
-/// `device_read_inband()` of `device/ds_routines.c`.
+/// Reads from the device into an in-band buffer through its driver.
 ///
 /// # Safety
 ///
@@ -1841,7 +1837,8 @@ unsafe fn device_read_inband(
     Ok(Reply::Withheld)
 }
 
-/// `device_read_alloc()` of `device/ds_routines.c`.
+/// Allocates the buffer a read request reads into, `size` bytes or the in-band
+/// maximum.
 ///
 /// # Safety
 ///
@@ -1874,7 +1871,7 @@ pub(crate) unsafe fn device_read_alloc(
     }
 }
 
-/// `ds_read_done()` of `device/ds_routines.c`.
+/// Completes a read and replies with the data.
 ///
 /// # Safety
 ///
@@ -1979,7 +1976,7 @@ pub(crate) unsafe fn ds_read_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `device_set_status()` of `device/ds_routines.c`.
+/// Applies a status flavor to the device through its driver.
 ///
 /// # Safety
 ///
@@ -2011,7 +2008,7 @@ unsafe fn device_set_status(
     }
 }
 
-/// `mach_device_get_status()` of `device/ds_routines.c`.
+/// Reports a status flavor of the device through its driver.
 ///
 /// # Safety
 ///
@@ -2043,7 +2040,7 @@ unsafe fn mach_device_get_status(
     }
 }
 
-/// `device_set_filter()` of `device/ds_routines.c`.
+/// Installs a packet filter on the device through its driver.
 ///
 /// # Safety
 ///
@@ -2082,7 +2079,7 @@ unsafe fn device_set_filter(
     }
 }
 
-/// `device_map()` of `device/ds_routines.c`.
+/// Makes the device pager for a mapping of the device.
 ///
 /// # Safety
 ///
@@ -2092,8 +2089,8 @@ unsafe fn device_map(
     dev: *mut c_void,
     protection: c_int,
     offset: VmOffset,
-    // The C's `device_pager_setup()` stored the size and never read it
-    // back, so the core does not take it.
+    // The size of the mapping is not kept, so the pager setup does not take
+    // it.
     _size: VmSize,
     pager: *mut *mut c_void,
     _unmap: c_int,
@@ -2115,7 +2112,8 @@ unsafe fn device_map(
     }
 }
 
-/// `ds_no_senders()` of `device/ds_routines.c`.
+/// Reports a no-senders notification on a device port, which needs nothing
+/// else.
 ///
 /// # Safety
 ///
@@ -2131,7 +2129,8 @@ unsafe fn ds_no_senders(notification: *mut c_void) {
     }
 }
 
-/// `iodone()` of <`device/io_req.h`>.
+/// Completes `ior`: wakes its waiter, or queues it for the I/O-done thread to
+/// call its done routine.
 ///
 /// # Safety
 ///
@@ -2164,7 +2163,8 @@ pub(crate) unsafe fn iodone(ior: *mut IoReq) {
     }
 }
 
-/// `io_done_thread_continue()` of `device/ds_routines.c`.
+/// The I/O-done thread's loop: calls the done routine of every completed
+/// request.
 unsafe extern "C" fn io_done_thread_continue() {
     loop {
         // SAFETY: the interrupt level and the list lock serialize the list
@@ -2198,8 +2198,8 @@ unsafe extern "C" fn io_done_thread_continue() {
                         // SAFETY: the completion released the request.
                         unsafe { io_req_free(ior) };
                     }
-                    // SAFETY: `splhigh()` is the asm entry of
-                    // <machine/spl.h>.
+                    // SAFETY: raising the level has no precondition the
+                    // I/O-done thread does not meet.
                     s = unsafe { spl::splhigh() };
                 }
             }
@@ -2208,7 +2208,7 @@ unsafe extern "C" fn io_done_thread_continue() {
     }
 }
 
-/// `io_done_thread()` of `device/ds_routines.c`.
+/// Starts the I/O-done thread.
 ///
 /// # Safety
 ///
@@ -2225,7 +2225,7 @@ pub(crate) unsafe extern "C" fn io_done_thread() {
     }
 }
 
-/// `mach_device_init()` of `device/ds_routines.c`.
+/// Sets up the device I/O map, the in-band cache and the trap-path cache.
 ///
 /// # Safety
 ///
@@ -2262,7 +2262,7 @@ pub(crate) unsafe fn mach_device_init() {
     mach_device_trap_init();
 }
 
-/// `mach_device_trap_init()` of `device/ds_routines.c`.
+/// Creates the cache of the trap path's request blocks.
 fn mach_device_trap_init() {
     // SAFETY: the cache is this module's static, unshared during boot.
     unsafe {
@@ -2277,14 +2277,14 @@ fn mach_device_trap_init() {
     }
 }
 
-/// `ds_trap_req_alloc()` of `device/ds_routines.c`.
+/// Allocates a request block for the trap path.
 ///
 /// Returns a recycled cache slot, or null: the caller writes the request
 /// whole over it, with the loaned data right after it.
 ///
 /// # Safety
 ///
-/// The `io_trap_cache` must be initialized.
+/// `IO_TRAP_CACHE` must be initialized.
 unsafe fn ds_trap_req_alloc(
     _device: *mut MachDevice,
     _data_size: VmSize,
@@ -2293,7 +2293,8 @@ unsafe fn ds_trap_req_alloc(
     ptr::with_exposed_provenance_mut::<IoReq>(addr)
 }
 
-/// `ds_trap_write_done()` of `device/ds_routines.c`.
+/// Completes a trap-path write: drops the device reference and frees the
+/// block.
 ///
 /// # Safety
 ///
@@ -2309,7 +2310,7 @@ unsafe fn ds_trap_write_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `device_write_trap()` of `device/ds_routines.c`.
+/// Writes a user buffer to the device as a trap, through its driver.
 ///
 /// # Safety
 ///
@@ -2375,7 +2376,7 @@ unsafe fn device_write_trap(
     }
 }
 
-/// `device_writev_trap()` of `device/ds_routines.c`.
+/// Writes user segments to the device as a trap, through its driver.
 ///
 /// # Safety
 ///

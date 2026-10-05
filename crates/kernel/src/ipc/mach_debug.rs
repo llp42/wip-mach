@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The mach-debug kernel calls, which `ipc/mach_debug.c` used to define and
-//! `mach_debug/mach_debug.defs` declares.
+//! The mach-debug kernel calls.
 
 use crate::arch::types::VmOffset;
 use crate::ipc::error::Error;
@@ -20,11 +19,11 @@ use core::ffi::c_uint;
 use core::mem::size_of;
 use core::ptr::{NonNull, with_exposed_provenance_mut};
 
-/// `MACH_PORT_RIGHT_RECEIVE` of <mach/port.h>.
+/// The receive-right type a debug call asks for.
 const MACH_PORT_RIGHT_RECEIVE: c_uint = 1;
-/// `MACH_PORT_TYPE_SEND_RECEIVE` of <mach/port.h>.
+/// The type bits of an entry with send and receive rights.
 const MACH_PORT_TYPE_SEND_RECEIVE: u32 = 0x0003_0000;
-/// `MACH_PORT_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NULL: c_uint = 0;
 
 /// A table count as an index; `usize` is at least 32 bits on both targets,
@@ -33,7 +32,7 @@ const fn as_index(count: c_uint) -> usize {
     count as usize
 }
 
-/// `mach_port_get_srights()` in C.
+/// The send-right count of the receive right `name` names.
 ///
 /// # Safety
 ///
@@ -59,7 +58,8 @@ pub(crate) unsafe fn get_srights(
     Ok(srights)
 }
 
-/// `host_ipc_marequest_info()` in C.
+/// The bucket occupancy of the message-accepted request table, as
+/// `host_ipc_marequest_info()` reports it.
 ///
 /// # Safety
 ///
@@ -142,7 +142,8 @@ pub(crate) unsafe fn marequest_info(
     Ok(())
 }
 
-/// `mach_port_dnrequest_info()` in C.
+/// The size and use of the dead-name request table of the receive right `name`
+/// names.
 ///
 /// # Safety
 ///
@@ -188,7 +189,7 @@ pub(crate) unsafe fn dnrequest_info(
     Ok((total, used))
 }
 
-/// `mach_port_kernel_object()` in C.
+/// The kernel-object type and object address of the port `name` names.
 ///
 /// # Safety
 ///

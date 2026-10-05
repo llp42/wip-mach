@@ -6,8 +6,8 @@
 //   Copyright 1988, 1989 by Olivetti Advanced Technology Center, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The 8250 serial driver of `i386/i386at/com.c`, the register bits of
-//! <i386at/comreg.h>, and the bus records C's autoconfiguration walks.
+//! The 8250 serial driver, its register bits, and the bus records the
+//! autoconfiguration walks.
 //!
 //! Every entry point runs at or above `spltty`, or at boot before interrupts
 //! are enabled, so [`COM`] needs no lock of its own.
@@ -38,7 +38,7 @@ use core::mem::{align_of, offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 
-/// `struct bus_driver` of <chips/busses.h>, field for field.
+/// A bus driver: its probe, attach and naming hooks.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct BusDriver {
@@ -87,7 +87,7 @@ const _: () = {
     assert!(offset_of!(BusDriver, flags) == 72);
 };
 
-/// `struct bus_ctlr` of <chips/busses.h>, field for field.
+/// A bus controller table entry.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct BusCtlr {
@@ -127,7 +127,7 @@ const _: () = {
     assert!(offset_of!(BusCtlr, sysdep1) == 72);
 };
 
-/// `struct bus_device` of <chips/busses.h>, field for field.
+/// A bus device table entry.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct BusDevice {
@@ -175,15 +175,14 @@ const _: () = {
     assert!(offset_of!(BusDevice, sysdep1) == 88);
 };
 
-/// `cominfo[]` of `i386/i386at/com.c`: the device attached to each unit, which
-/// `configure_bus_device()` writes through `comdriver.dinfo`.
+/// The device attached to each unit, which `configure_bus_device()` writes
+/// through `COMDRIVER.dinfo`.
 static mut COMINFO: [*mut BusDevice; NCOM] = [ptr::null_mut(); NCOM];
 
-/// `com_std[]` of `i386/i386at/com.c`: the CSR addresses `comdriver.addr`
-/// names.
+/// The CSR addresses `COMDRIVER.addr` names.
 static mut COM_STD: [VmOffset; NCOM] = [0; NCOM];
 
-/// `comdriver` of `i386/i386at/com.c`: the bus driver the AT bus table names.
+/// The bus driver the AT bus table names.
 pub(crate) static mut COMDRIVER: BusDriver = BusDriver {
     probe: Some(comprobe),
     slave: None,
@@ -197,9 +196,9 @@ pub(crate) static mut COMDRIVER: BusDriver = BusDriver {
     flags: 0,
 };
 
-/// The driver's mutable state: the C file's `com_tty`, `commodom`,
-/// `comcarrier`, `comfifo`, `comtimer_active`, `comtimer_state`, `rcline`,
-/// `comcndev`, `comoverrun`, the `comst_*` counters and `comtimer_interval`.
+/// The driver's mutable state: the ttys, modem and carrier bits, FIFO flags,
+/// the stuck-output timer, the console unit and line, the overrun flag and
+/// counters.
 struct Com {
     tty: [Tty; NCOM],
     modem: [c_int; NCOM],
@@ -246,7 +245,7 @@ fn com() -> &'static mut Com {
     unsafe { &mut *COM.0.get() }
 }
 
-/// `i*` of <i386at/comreg.h>.
+/// The 8250 register bits.
 const I_STB: u8 = 0x04;
 const I_PEN: u8 = 0x08;
 const I_EPS: u8 = 0x10;
@@ -274,7 +273,8 @@ const I_RLSD: u8 = 0x80;
 const I_FIFOENA: u8 = 0x01;
 const I_FIFO14CH: u8 = 0xc0;
 
-/// `MODi`, `TRAi`, `RECi`, `LINi`, `CTIi` and `MASKi` of <i386at/comreg.h>.
+/// The interrupt identifications: modem status, transmitter empty, received
+/// data, line status, character timeout, and their mask.
 const MODI: u8 = 0;
 const TRAI: u8 = 2;
 const RECI: u8 = 4;
@@ -282,100 +282,99 @@ const LINI: u8 = 6;
 const CTII: u8 = 0xc;
 const MASKI: u8 = 0xf;
 
-/// `TTY_*` flavors of <`device/tty_status.h`>.
+/// The tty status flavors.
 pub(crate) const TTY_STATUS: c_uint = 0x0074_0001;
 pub(crate) const TTY_MODEM: c_uint = 0x0074_0002;
 pub(crate) const TTY_SET_BREAK: c_uint = 0x0074_0006;
 pub(crate) const TTY_CLEAR_BREAK: c_uint = 0x0074_0007;
 
-/// The `B*` speed indices of <`device/tty_status.h`> the driver names.
+/// The tty speed indices the driver names.
 const B0: u8 = 0;
 const B110: u8 = 3;
 const B300: u8 = 7;
 const B115200: u8 = 17;
 
-/// `ISPEED` of `i386/i386at/com.c`.
+/// The initial line speed.
 const ISPEED: u8 = B115200;
 
-/// `RCBAUD` of `i386/i386at/com.c`.
+/// The console line speed.
 const RCBAUD: usize = B115200 as usize;
 
-/// `IFLAGS` of `i386/i386at/com.c`.
+/// The initial tty flags.
 const IFLAGS: c_int =
     TF_EVENP | TF_ODDP | TF_ECHO | TF_CRMOD | TF_XTABS | TF_LITOUT;
 
-/// `divisorreg[]` of `i386/i386at/com.c`, indexed by the tty speed.
+/// The 8250 divisor of each tty speed index.
 const DIVISORREG: [u16; chario::NSPEEDS] = [
     0, 2304, 1536, 1047, 857, 768, 576, 384, 192, 96, 64, 48, 24, 12, 6, 3, 2,
     1,
 ];
 
-/// `CONSOLE_PARAMETER` of `i386/i386at/com.c`.
+/// The command-line parameter that names the console line.
 const CONSOLE_PARAMETER: &CStr = c" console=com";
 
-/// `CN_DEAD` and `CN_REMOTE` of <device/cons.h>.
+/// The console priorities of a dead line and a remote one.
 const CN_DEAD: core::ffi::c_short = 0;
 const CN_REMOTE: core::ffi::c_short = 3;
 
-/// `TXRX()` of <i386at/comreg.h>.
+/// The transmit/receive register of the port at `addr`.
 const fn txrx(addr: u16) -> Port {
     Port::new(addr)
 }
 
-/// `BAUD_LSB()` of <i386at/comreg.h>.
+/// The low divisor byte of the port at `addr`.
 const fn baud_lsb(addr: u16) -> Port {
     Port::new(addr)
 }
 
-/// `BAUD_MSB()` of <i386at/comreg.h>.
+/// The high divisor byte of the port at `addr`.
 const fn baud_msb(addr: u16) -> Port {
     Port::new(addr + 1)
 }
 
-/// `INTR_ENAB()` of <i386at/comreg.h>.
+/// The interrupt-enable register of the port at `addr`.
 const fn intr_enab(addr: u16) -> Port {
     Port::new(addr + 1)
 }
 
-/// `INTR_ID()` of <i386at/comreg.h>.
+/// The interrupt-identification register of the port at `addr`.
 const fn intr_id(addr: u16) -> Port {
     Port::new(addr + 2)
 }
 
-/// `FIFO_CTL()` of <i386at/comreg.h>.
+/// The FIFO-control register of the port at `addr`.
 const fn fifo_ctl(addr: u16) -> Port {
     Port::new(addr + 2)
 }
 
-/// `LINE_CTL()` of <i386at/comreg.h>.
+/// The line-control register of the port at `addr`.
 const fn line_ctl(addr: u16) -> Port {
     Port::new(addr + 3)
 }
 
-/// `MODEM_CTL()` of <i386at/comreg.h>.
+/// The modem-control register of the port at `addr`.
 const fn modem_ctl_reg(addr: u16) -> Port {
     Port::new(addr + 4)
 }
 
-/// `LINE_STAT()` of <i386at/comreg.h>.
+/// The line-status register of the port at `addr`.
 const fn line_stat(addr: u16) -> Port {
     Port::new(addr + 5)
 }
 
-/// `MODEM_STAT()` of <i386at/comreg.h>.
+/// The modem-status register of the port at `addr`.
 const fn modem_stat(addr: u16) -> Port {
     Port::new(addr + 6)
 }
 
-/// `SCR()` of <i386at/comreg.h>.
+/// The scratch register of the port at `addr`.
 const fn scr(addr: u16) -> Port {
     Port::new(addr + 7)
 }
 
 /// `addr` as the 16-bit I/O port the C truncated it to at every access.
 const fn port_addr(addr: VmOffset) -> u16 {
-    // The x86 I/O port space is 16 bits wide, and every `in`/`out` in the C
-    // truncated to `u_short`.
+    // The x86 I/O port space is 16 bits wide.
     addr as u16
 }
 
@@ -384,12 +383,12 @@ fn tty_addr(tp: &Tty) -> u16 {
     port_addr(tp.t_addr.map_or(0, |p| p.as_ptr().addr()))
 }
 
-/// `minor()` of <sys/types.h>.
+/// The minor number of `dev`.
 const fn minor(dev: c_int) -> c_int {
     dev & 0xff
 }
 
-/// `makedev()` of <sys/types.h> with the C's major number zero.
+/// The device number of `minor`, with major number zero.
 const fn makedev(minor: c_int) -> u16 {
     (minor & 0xff) as u16
 }
@@ -458,7 +457,8 @@ pub(crate) fn irq(unit: c_int) -> c_int {
     unsafe { (*dev).sysdep1 as c_int }
 }
 
-/// `comprobe_general()` of `i386/i386at/com.c`.
+/// Whether an 8250 answers at `address` for `unit`, printing what it found
+/// when `noisy`.
 pub(crate) fn probe_general(
     address: VmOffset,
     unit: c_int,
@@ -524,11 +524,11 @@ pub(crate) fn probe_general(
     true
 }
 
-/// `comprobe()` of `i386/i386at/com.c`.
+/// The bus probe hook: whether the unit `dev` names answers.
 ///
 /// # Safety
 ///
-/// `dev` must point at a live `bus_ctlr` table entry; the bus configuration
+/// `dev` must point at a live `BusCtlr` table entry; the bus configuration
 /// calls it that way.
 pub(crate) unsafe fn comprobe(_port: VmOffset, dev: *mut BusCtlr) -> bool {
     let (unit, address) = unsafe {
@@ -540,7 +540,8 @@ pub(crate) unsafe fn comprobe(_port: VmOffset, dev: *mut BusCtlr) -> bool {
     probe_general(address, unit, false)
 }
 
-/// `comcnprobe()` of `i386/i386at/com.c`.
+/// Picks the console line from the command line, or the first unit that
+/// answers.
 pub(crate) fn cnprobe(cp: &mut ConsDev) {
     let parameter = CONSOLE_PARAMETER.to_bytes();
     let cmdline = crate::arch::x86_64::model_dep::kernel_cmdline();
@@ -575,7 +576,7 @@ pub(crate) fn cnprobe(cp: &mut ConsDev) {
     let mut pri = CN_DEAD;
     for device in autoconf::bus_devices() {
         // SAFETY: every entry up to the sentinel is an initialized
-        // `bus_device`, and the sentinel ends the walk.
+        // `BusDevice`, and the sentinel ends the walk.
         let (name, dev_unit, address) =
             unsafe { ((*device).name, (*device).unit, (*device).address) };
         // SAFETY: `name` is the entry's NUL-terminated name.
@@ -595,7 +596,7 @@ pub(crate) fn cnprobe(cp: &mut ConsDev) {
     cp.cn_pri = pri;
 }
 
-/// `comcnprobe()` of `i386/i386at/com.c`.
+/// The console table's probe entry of [`cnprobe`].
 ///
 /// # Safety
 ///
@@ -604,9 +605,9 @@ pub(crate) unsafe fn comcnprobe(cp: *mut ConsDev) {
     cnprobe(unsafe { &mut *cp });
 }
 
-/// `comattach()` of `i386/i386at/com.c`.
+/// Attaches the unit `dev` names: records it and resets its line.
 pub(crate) fn attach(dev: &BusDevice) {
-    // The C stored `dev->unit` in a `u_char`, truncating.
+    // The unit is kept in a byte, truncating.
     let unit = dev.unit as u8;
     let addr = port_addr(dev.address);
 
@@ -638,28 +639,28 @@ pub(crate) fn attach(dev: &BusDevice) {
     }
 }
 
-/// `comattach()` of `i386/i386at/com.c`.
+/// The bus attach hook of [`attach`].
 ///
 /// # Safety
 ///
-/// `dev` must point at a live `bus_device` table entry.
+/// `dev` must point at a live `BusDevice` table entry.
 pub(crate) unsafe fn comattach(dev: *mut BusDevice) {
     attach(unsafe { &*dev });
 }
 
-/// `comcninit()` of `i386/i386at/com.c`.
+/// Sets the console line up at its speed.
 pub(crate) fn cninit(cp: &ConsDev) {
     let Some(cndev) = NonNull::new(com().cndev) else {
         return;
     };
     let dev = cndev.as_ptr();
-    // SAFETY: `comcndev` was set by `cnprobe()` to a live table entry.
+    // SAFETY: `cndev` was set by `cnprobe()` to a live table entry.
     let (unit, address) = unsafe { ((*dev).unit, (*dev).address) };
-    // The C stored `comcndev->unit` in a `u_char`, truncating.
+    // The unit is kept in a byte, truncating.
     let unit = unit as u8;
     let addr = port_addr(address);
 
-    // SAFETY: `comcndev` is the live table entry `cnprobe()` selected.
+    // SAFETY: `cndev` is the live table entry `cnprobe()` selected.
     autoconf::take_dev_irq(unsafe { &*dev });
 
     // SAFETY: the entry the probe selected, and nothing else runs yet.
@@ -704,7 +705,7 @@ pub(crate) fn cninit(cp: &ConsDev) {
     }
 }
 
-/// `comcninit()` of `i386/i386at/com.c`.
+/// The console table's init entry of [`cninit`].
 ///
 /// # Safety
 ///
@@ -714,11 +715,11 @@ pub(crate) unsafe fn comcninit(cp: *mut ConsDev) {
     cninit(unsafe { &*cp });
 }
 
-/// `com_reprobe()` of `i386/i386at/com.c`.
+/// Probes and attaches the unit `unit` again, for a line found after boot.
 fn reprobe(unit: c_int) -> bool {
     for device in autoconf::bus_devices() {
         // SAFETY: every entry up to the sentinel is an initialized
-        // `bus_device`.
+        // `BusDevice`.
         let (driver, dev_unit, alive, ctlr, name, address, phys) = unsafe {
             (
                 (*device).driver,
@@ -748,7 +749,7 @@ fn reprobe(unit: c_int) -> bool {
     false
 }
 
-/// `comopen()` of `i386/i386at/com.c`.
+/// Opens the line `dev`, setting it up on the first open.
 pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> IoResult {
     let unit = minor(dev);
     let Some(index) = index(unit) else {
@@ -795,7 +796,7 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> IoResult {
     }
     let addr = tty_addr(tp);
 
-    // SAFETY: `spltty()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `spltty` has no precondition.
     let s = unsafe { spl::spltty() };
     if com().carrier[index] == 0 {
         tp.t_state |= TS_CARR_ON;
@@ -819,7 +820,7 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> IoResult {
         timer();
     }
 
-    // SAFETY: `spltty()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `spltty` has no precondition.
     let s = unsafe { spl::spltty() };
     while intr_id(addr).read_u8() & 1 == 0 {
         let _ = line_stat(addr).read_u8();
@@ -831,7 +832,7 @@ pub(crate) fn open(dev: c_int, flag: c_int, ior: &mut IoReq) -> IoResult {
     Ok(result)
 }
 
-/// `comopen()` of `i386/i386at/com.c`.
+/// The device-switch entry of [`open`].
 ///
 /// # Safety
 ///
@@ -844,7 +845,7 @@ pub(crate) unsafe fn comopen(
     open(c_int::from(dev), flag, unsafe { &mut *ior })
 }
 
-/// `comclose()` of `i386/i386at/com.c`.
+/// Closes the line `dev`, dropping the modem lines on a hang-up close.
 pub(crate) fn close(dev: c_int) {
     let unit = minor(dev);
     let Some(index) = index(unit) else {
@@ -853,9 +854,8 @@ pub(crate) fn close(dev: c_int) {
     let tp = &mut com().tty[index];
     let addr = tty_addr(tp);
 
-    // The C called `ttyclose()` here with no lock, which contradicts that
-    // routine's own contract; `kdclose()` takes the lock, and this does too.
-    // SAFETY: `splhigh()` is the asm entry of <machine/spl.h>.
+    // The tty is closed under its lock, as `chario::close` requires.
+    // SAFETY: raising to `splhigh` has no precondition.
     let s = unsafe { spl::splhigh() };
     tp.t_lock.lock();
     chario::close(tp);
@@ -874,7 +874,7 @@ pub(crate) fn close(dev: c_int) {
     }
 }
 
-/// `comclose()` of `i386/i386at/com.c`.
+/// The device-switch entry of [`close`].
 ///
 /// # Safety
 ///
@@ -883,7 +883,7 @@ pub(crate) unsafe fn comclose(dev: DevT, _flag: c_int) {
     close(c_int::from(dev));
 }
 
-/// `comread()` of `i386/i386at/com.c`.
+/// Reads from the line `dev` through its line discipline.
 pub(crate) fn read(dev: c_int, ior: &mut IoReq) -> IoResult {
     let Some(tp) = tty_mut(minor(dev)) else {
         return Err(DeviceError::NoSuchDevice);
@@ -891,7 +891,7 @@ pub(crate) fn read(dev: c_int, ior: &mut IoReq) -> IoResult {
     chario::read(tp, ior)
 }
 
-/// `comread()` of `i386/i386at/com.c`.
+/// The device-switch entry of [`read()`].
 ///
 /// # Safety
 ///
@@ -900,7 +900,7 @@ pub(crate) unsafe fn comread(dev: DevT, ior: *mut IoReq) -> IoResult {
     read(c_int::from(dev), unsafe { &mut *ior })
 }
 
-/// `comwrite()` of `i386/i386at/com.c`.
+/// Writes to the line `dev` through its line discipline.
 pub(crate) fn write(dev: c_int, ior: &mut IoReq) -> IoResult {
     let Some(tp) = tty_mut(minor(dev)) else {
         return Err(DeviceError::NoSuchDevice);
@@ -908,7 +908,7 @@ pub(crate) fn write(dev: c_int, ior: &mut IoReq) -> IoResult {
     chario::write(tp, ior)
 }
 
-/// `comwrite()` of `i386/i386at/com.c`.
+/// The device-switch entry of [`write()`].
 ///
 /// # Safety
 ///
@@ -917,7 +917,8 @@ pub(crate) unsafe fn comwrite(dev: DevT, ior: *mut IoReq) -> IoResult {
     write(c_int::from(dev), unsafe { &mut *ior })
 }
 
-/// `comportdeath()` of `i386/i386at/com.c`.
+/// Clears what the dead `port` held on the line `dev`, returning whether it
+/// held anything.
 pub(crate) fn port_death(dev: c_int, port: *mut c_void) -> bool {
     let Some(tp) = tty_mut(minor(dev)) else {
         return false;
@@ -925,7 +926,7 @@ pub(crate) fn port_death(dev: c_int, port: *mut c_void) -> bool {
     chario::port_death(tp, port)
 }
 
-/// `comportdeath()` of `i386/i386at/com.c`.
+/// The device-switch entry of [`port_death`].
 ///
 /// # Safety
 ///
@@ -934,7 +935,7 @@ pub(crate) unsafe fn comportdeath(dev: DevT, port: VmOffset) -> bool {
     port_death(c_int::from(dev), ptr::with_exposed_provenance_mut(port))
 }
 
-/// `comgetstat()` of `i386/i386at/com.c`.
+/// Reports a status flavor of the line: its modem bits, or the tty's flavors.
 ///
 /// # Safety
 ///
@@ -960,7 +961,8 @@ pub(crate) unsafe fn comgetstat(
     unsafe { chario::tty_get_status(ptr::from_mut(tp), flavor, data, count) }
 }
 
-/// `comsetstat()` of `i386/i386at/com.c`.
+/// Applies a status flavor to the line: its modem bits, a break, or the tty's
+/// flavors, then reapplies the line parameters.
 ///
 /// # Safety
 ///
@@ -1016,7 +1018,8 @@ pub(crate) fn modem_status(unit: c_int) -> c_int {
     com().modem[index]
 }
 
-/// `comintr()` of `i386/i386at/com.c`.
+/// Services the line `unit`'s pending interrupts: received data, transmitter
+/// empty, line and modem status.
 pub(crate) fn intr(unit: c_int) {
     let Some(index) = index(unit) else {
         return;
@@ -1105,7 +1108,7 @@ pub(crate) fn intr(unit: c_int) {
     }
 }
 
-/// `comintr()` of `i386/i386at/com.c`.
+/// The interrupt handler of [`intr`].
 ///
 /// # Safety
 ///
@@ -1114,19 +1117,19 @@ pub(crate) unsafe extern "C" fn comintr(unit: c_int) {
     intr(unit);
 }
 
-/// `comparam()` of `i386/i386at/com.c`, which `comsetstat()` reruns after a
-/// status write.
+/// Applies the tty's speed and flags to the line `unit`; [`comsetstat`] reruns
+/// it after a status write.
 pub(crate) fn apply_params(tp: &mut Tty, unit: c_int) {
     if let Some(index) = index(unit) {
         params(tp, index);
     }
 }
 
-/// `comparam()` of `i386/i386at/com.c`.
+/// Programs the line's divisor, character format and interrupts from the tty.
 fn params(tp: &mut Tty, index: usize) {
     let addr = tty_addr(tp);
 
-    // SAFETY: `spltty()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `spltty` has no precondition.
     let s = unsafe { spl::spltty() };
 
     if tp.t_ispeed == B0 {
@@ -1175,7 +1178,7 @@ fn params(tp: &mut Tty, index: usize) {
     unsafe { spl::splx(s) };
 }
 
-/// `comstart()` of `i386/i386at/com.c`.
+/// Sends the next queued character when the transmitter is free.
 pub(crate) fn start(tp: &mut Tty) {
     // One machine-wide com timer; arming re-arms it.
     static COM_TIMER: MachCallout =
@@ -1213,7 +1216,7 @@ pub(crate) fn start(tp: &mut Tty) {
     tp.t_state |= TS_BUSY;
 }
 
-/// `comstart()` of `i386/i386at/com.c`.
+/// The tty's start hook of [`start`].
 ///
 /// # Safety
 ///
@@ -1231,9 +1234,9 @@ fn com_timer_action(callout: Pin<&MachCallout>) {
     ));
 }
 
-/// `comtimer()` of `i386/i386at/com.c`.
+/// Kicks every line whose output stayed stuck across two ticks.
 pub(crate) fn timer() {
-    // SAFETY: `spltty()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `spltty` has no precondition.
     let s = unsafe { spl::spltty() };
 
     for index in 0..NCOM {
@@ -1258,7 +1261,7 @@ pub(crate) fn timer() {
     unsafe { spl::splx(s) };
 }
 
-/// `fix_modem_state()` of `i386/i386at/com.c`.
+/// Records the modem status `modem_stat` as the line `unit`'s modem bits.
 pub(crate) fn fix_modem_state(unit: c_int, modem_stat: c_int) {
     let Some(index) = index(unit) else {
         return;
@@ -1280,7 +1283,8 @@ pub(crate) fn fix_modem_state(unit: c_int, modem_stat: c_int) {
         (com().modem[index] & !(TM_CTS | TM_DSR | TM_RNG | TM_CAR)) | stat;
 }
 
-/// `commodem_intr()` of `i386/i386at/com.c`.
+/// Handles a modem-status change on the line `unit`, resuming or stopping
+/// output on a CTS change.
 pub(crate) fn modem_intr(unit: c_int, stat: c_int) {
     let Some(index) = index(unit) else {
         return;
@@ -1298,7 +1302,7 @@ pub(crate) fn modem_intr(unit: c_int, stat: c_int) {
     }
 }
 
-/// `commctl()` of `i386/i386at/com.c`.
+/// Sets, clears or reports the line's modem bits, per `how`.
 pub(crate) fn modem_ctl(tp: &Tty, bits: c_int, how: c_int) -> c_int {
     let unit = minor(tp.t_dev);
     let Some(index) = index(unit) else {
@@ -1324,7 +1328,7 @@ pub(crate) fn modem_ctl(tp: &Tty, bits: c_int, how: c_int) -> c_int {
     // SAFETY: `configure_bus_device()` wrote this live entry.
     let dev_addr = port_addr(unsafe { (*dev).address });
 
-    // SAFETY: `spltty()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `spltty` has no precondition.
     let s = unsafe { spl::spltty() };
 
     let mut b = 0;
@@ -1363,7 +1367,7 @@ pub(crate) fn modem_ctl(tp: &Tty, bits: c_int, how: c_int) -> c_int {
     com().modem[index]
 }
 
-/// `commctl()` of `i386/i386at/com.c`.
+/// The tty's modem-control hook of [`modem_ctl`].
 ///
 /// # Safety
 ///
@@ -1372,14 +1376,14 @@ pub(crate) unsafe fn commctl(tp: *mut Tty, bits: c_int, how: c_int) -> c_int {
     modem_ctl(unsafe { &mut *tp }, bits, how)
 }
 
-/// `comstop()` of `i386/i386at/com.c`.
+/// Asks a busy, unstopped line to flush its output.
 pub(crate) const fn stop(tp: &mut Tty) {
     if tp.t_state & TS_BUSY != 0 && tp.t_state & TS_TTSTOP == 0 {
         tp.t_state |= TS_FLUSH;
     }
 }
 
-/// `comstop()` of `i386/i386at/com.c`.
+/// The tty's stop hook of [`stop`].
 ///
 /// # Safety
 ///
@@ -1389,7 +1393,7 @@ pub(crate) unsafe fn comstop(tp: *mut Tty, _flags: c_int) {
     stop(unsafe { &mut *tp });
 }
 
-/// `comgetc()` of `i386/i386at/com.c`.
+/// Reads a character from the line `unit`, spinning for one.
 pub(crate) fn getc(unit: c_int) -> c_int {
     let Some(index) = index(unit) else {
         return 0;
@@ -1401,7 +1405,7 @@ pub(crate) fn getc(unit: c_int) -> c_int {
     // SAFETY: `configure_bus_device()` wrote this live entry.
     let addr = port_addr(unsafe { (*dev).address });
 
-    // SAFETY: `spltty()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `spltty` has no precondition.
     let s = unsafe { spl::spltty() };
     while line_stat(addr).read_u8() & I_DR == 0 {
         core::hint::spin_loop();
@@ -1412,7 +1416,8 @@ pub(crate) fn getc(unit: c_int) -> c_int {
     c_int::from(c)
 }
 
-/// `comcnputc()` of `i386/i386at/com.c`.
+/// Writes `c` to the console line, waiting for the transmitter; a newline goes
+/// out as CR LF.
 pub(crate) fn console_putc(dev: c_int, c: c_int) {
     let Some(index) = index(minor(dev)) else {
         return;
@@ -1435,7 +1440,7 @@ pub(crate) fn console_putc(dev: c_int, c: c_int) {
     txrx(addr).write_u8(c as u8);
 }
 
-/// `comcnputc()` of `i386/i386at/com.c`.
+/// The console table's putc entry of [`console_putc`].
 ///
 /// # Safety
 ///
@@ -1444,7 +1449,8 @@ pub(crate) unsafe fn comcnputc(dev: DevT, c: c_int) {
     console_putc(c_int::from(dev), c);
 }
 
-/// `comcngetc()` of `i386/i386at/com.c`.
+/// Reads a 7-bit character from the console line, or 0 when `wait` is clear
+/// and none is there.
 pub(crate) fn console_getc(dev: c_int, wait: bool) -> c_int {
     let Some(index) = index(minor(dev)) else {
         return 0;
@@ -1465,7 +1471,7 @@ pub(crate) fn console_getc(dev: c_int, wait: bool) -> c_int {
     c_int::from(txrx(addr).read_u8() & 0x7f)
 }
 
-/// `comcngetc()` of `i386/i386at/com.c`.
+/// The console table's getc entry of [`console_getc`].
 ///
 /// # Safety
 ///

@@ -4,15 +4,14 @@
 //   Copyright (C) 2025 Free Software Foundation
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The application-processor boot page, which `i386/i386/cpuboot.S` and
-//! `x86_64/cpuboot.S` used to define.
+//! The application-processor boot page.
 
 use crate::arch::x86_64::model_dep::GdtDescrTmp;
 use core::ffi::c_char;
 
 unsafe extern "C" {
-    /// `apboot` and `apbootend`: the AP boot code `start_other_cpus()`
-    /// copies to `apboot_addr`.
+    /// `apboot` and `apbootend`: the AP boot code `start_other_cpus()` copies
+    /// to `APBOOT_ADDR`.
     pub(crate) static apboot: c_char;
     pub(crate) static apbootend: c_char;
 

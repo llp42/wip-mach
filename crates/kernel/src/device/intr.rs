@@ -3,12 +3,10 @@
 //   Copyright (c) 2010, 2011, 2016, 2019 Free Software Foundation, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The interrupt device, which `device/intr.c` used to define and
-//! <device/intr.h> declares.
+//! The interrupt device.
 //!
-//! The registration list and the delivery thread are here; the `irqdev` and
-//! `user_intr_t` records belong to <device/intr.h> and are mirrored by
-//! [`crate::arch::x86_64::irq`].
+//! The registration list and the delivery thread are here; the
+//! interrupt-device records are mirrored by [`crate::arch::x86_64::irq`].
 
 use crate::arch::x86_64::io_req::DevT;
 use crate::arch::x86_64::ioapic::{self, InterruptHandler};
@@ -38,30 +36,29 @@ use core::ptr::{self, NonNull};
 use kmem::KBox;
 use lock::IrqSpinLock;
 
-/// `IRQGETPICMODE` of <`device/irq_status.h`>.
+/// The status flavor that reports the interrupt controller's mode.
 const IRQGETPICMODE: c_uint = 0;
 
-/// `SA_SHIRQ` of `device/intr.c`.
+/// The flag of a shared interrupt line.
 const SA_SHIRQ: c_ulong = 0x0400_0000;
 
-/// `MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND, 0)` of <mach/message.h>.
+/// The header bits of a message to a send right.
 const MACH_MSGH_BITS_PORT_SEND: u32 = 17;
 
-/// `MACH_MSG_TYPE_INTEGER_32` of <mach/message.h>.
+/// The type of a 32-bit integer in a message body.
 const MACH_MSG_TYPE_INTEGER_32: u32 = 2;
 
-/// `DEVICE_INTR_NOTIFY` of <device/notify.h>.
+/// The message id of a device interrupt notification.
 const DEVICE_INTR_NOTIFY: c_int = 100;
 
-/// `DEVICE_NOTIFY_MSGH_SEQNO` of <device/intr.h>.
+/// The sequence number a notification's header carries.
 const DEVICE_NOTIFY_MSGH_SEQNO: u32 = 0;
 
 /// The `mach_msg_type_t` initializer of `deliver_intr()`.
 const INTR_TYPE: MachMsgType =
     MachMsgType::new(MACH_MSG_TYPE_INTEGER_32 | (32 << 8) | (1 << 29), 1);
 
-/// `device_intr_notification_t` of <device/notify.h>: the message a delivery
-/// port receives, laid over the `struct ipc_kmsg` header.
+/// The message a delivery port receives, laid over the kernel-message header.
 #[repr(C)]
 #[allow(missing_docs)]
 struct DeviceIntrNotification {
@@ -78,7 +75,7 @@ const _: () = {
     assert!(offset_of!(DeviceIntrNotification, id) == 40);
 };
 
-/// `struct intr_list` of `device/intr.c`: one shared-IRQ registration.
+/// One shared-IRQ registration.
 #[repr(C)]
 #[allow(missing_docs)]
 struct IntrList {
@@ -87,11 +84,11 @@ struct IntrList {
     next: *mut Self,
 }
 
-/// `user_intr_handlers[]` of `device/intr.c`: one list per interrupt.
+/// One list per interrupt.
 static mut USER_INTR_HANDLERS: [*mut IntrList; NINTR] =
     [ptr::null_mut(); NINTR];
 
-/// `main_intr_queue` of <device/intr.h>, the queue `irqtab` points at.
+/// The queue [`irq::IRQTAB`] points at.
 pub static mut MAIN_INTR_QUEUE: UserIntrQueue = UserIntrQueue::new();
 
 /// The main interrupt queue head.
@@ -130,17 +127,17 @@ unsafe fn next_intr(
 ///
 /// # Safety
 ///
-/// `dev` must be the live `irqtab`, whose `intr_queue` is an initialized queue
-/// that never moves, and the caller must hold `INTR_LOCK` for as long as it
-/// uses the queue.
+/// `dev` must be the live [`irq::IRQTAB`], whose `intr_queue` is an
+/// initialized queue that never moves, and the caller must hold `INTR_LOCK`
+/// for as long as it uses the queue.
 unsafe fn dev_intr_queue<'a>(dev: *mut IrqDev) -> Pin<&'a mut UserIntrQueue> {
     // SAFETY: the caller promises the queue is live, stays in place and is
     // unshared.
     unsafe { Pin::new_unchecked(&mut *(*dev).intr_queue) }
 }
 
-/// `intr_lock` of `device/intr.c`, around the queue and the handler lists.
-/// An irq spin lock, since the shared vector handler takes it.
+/// Guards the queue and the handler lists.  An irq spin lock, since the shared
+/// vector handler takes it.
 static INTR_LOCK: IrqSpinLock<(), MachPlatform> = IrqSpinLock::new(());
 
 /// `e->dst_port` lost its last reference, or is unusable.
@@ -169,18 +166,17 @@ unsafe fn release_port(port: *mut c_void) {
     }
 }
 
-/// `irqtab.irq[id]`, or [`None`] outside the table.
+/// The line `id` stands for in `dev`'s table, or [`None`] outside the table.
 ///
 /// # Safety
 ///
-/// `dev` must be the live `irqtab`.
+/// `dev` must be the live [`irq::IRQTAB`].
 unsafe fn irq_of(dev: *mut IrqDev, id: c_int) -> Option<c_uint> {
     let index = usize::try_from(id).ok()?;
     unsafe { (*dev).irq.get(index).copied() }
 }
 
-/// The event the interrupt thread waits and wakes on: the C's
-/// `(event_t) &intr_thread`.
+/// The event the interrupt thread waits and wakes on.
 fn intr_event() -> *mut c_void {
     intr_thread as *const () as *mut c_void
 }
@@ -193,19 +189,20 @@ fn is_handler(
     current.is_some_and(|current| ptr::fn_addr_eq(current, wanted))
 }
 
-/// Wake the interrupt thread, as the C's `thread_wakeup()` did.
+/// Wakes the interrupt thread.
 fn wake_intr_thread() {
     // SAFETY: the event is this module's; a non-interruptible wait is woken
     // normally.
     unsafe { thread_wakeup_prim(intr_event(), 0, THREAD_AWAKENED) };
 }
 
-/// `search_intr()` of `device/intr.c`.
+/// The registration of `dst_port` in `dev`'s queue, or `None`.
 ///
 /// # Safety
 ///
-/// `dev` must be the live `irqtab`, whose `intr_queue` is an initialized
-/// queue of [`UserIntr`] entries with the chain as their first field.
+/// `dev` must be the live [`irq::IRQTAB`], whose `intr_queue` is an
+/// initialized queue of [`UserIntr`] entries with the chain as their first
+/// field.
 unsafe fn search_intr(
     dev: *mut IrqDev,
     dst_port: *mut c_void,
@@ -222,13 +219,12 @@ unsafe fn search_intr(
     None
 }
 
-/// `queue_intr()` of `device/intr.c`: account a delivery and wake the
-/// interrupt thread.
+/// Accounts a delivery and wakes the interrupt thread.
 ///
 /// # Safety
 ///
-/// `dev` must be the live `irqtab`, `id` inside its `irq` table, and `e` the
-/// live registration the line belongs to.
+/// `dev` must be the live [`irq::IRQTAB`], `id` inside its `irq` table, and
+/// `e` the live registration the line belongs to.
 unsafe fn queue_intr(dev: *mut IrqDev, id: c_int, e: *mut UserIntr) {
     unsafe {
         if let Some(irq) = irq_of(dev, id) {
@@ -241,12 +237,13 @@ unsafe fn queue_intr(dev: *mut IrqDev, id: c_int, e: *mut UserIntr) {
     wake_intr_thread();
 }
 
-/// `deliver_user_intr()` of `device/intr.c`.
+/// Queues a delivery of line `id` to `e` and returns `true`, or, when `e`'s
+/// port is dead, wakes the interrupt thread to drop it and returns `false`.
 ///
 /// # Safety
 ///
-/// `dev` must be the live `irqtab`, `id` inside its `irq` table, and `e` the
-/// live registration for that line.
+/// `dev` must be the live [`irq::IRQTAB`], `id` inside its `irq` table, and
+/// `e` the live registration for that line.
 pub(crate) unsafe fn deliver_user_intr(
     dev: *mut IrqDev,
     id: c_int,
@@ -261,12 +258,13 @@ pub(crate) unsafe fn deliver_user_intr(
     }
 }
 
-/// `insert_intr_entry()` of `device/intr.c`.
+/// Registers `dst_port` for line `id`, returning the new registration, or
+/// `None` when it cannot.
 ///
 /// # Safety
 ///
-/// `dev` must be the live `irqtab` with an initialized `intr_queue`, and
-/// `dst_port` a port the caller keeps alive.
+/// `dev` must be the live [`irq::IRQTAB`] with an initialized `intr_queue`,
+/// and `dst_port` a port the caller keeps alive.
 pub(crate) unsafe fn insert_intr_entry(
     dev: *mut IrqDev,
     id: c_int,
@@ -317,14 +315,14 @@ pub(crate) unsafe fn insert_intr_entry(
     result
 }
 
-/// `user_irq_handler()` of `device/intr.c`: the vector a shared line points
-/// at.
+/// The vector a shared line points at: delivers the interrupt to every
+/// registration of the line.
 unsafe extern "C" fn user_irq_handler(id: c_int) {
     let guard = INTR_LOCK.lock();
 
     let index = usize::try_from(id).ok().filter(|index| *index < NINTR);
     // SAFETY: the lock is held, and `index` keeps the table access inside
-    // `NINTR` exactly as the C's `user_intr_handlers[id]` assumed.
+    // `NINTR`.
     if let Some(index) = index {
         // SAFETY: a listed node is this module's live `IntrList`.
         unsafe {
@@ -345,11 +343,12 @@ unsafe extern "C" fn user_irq_handler(id: c_int) {
     drop(guard);
 }
 
-/// `install_user_intr_handler()` of `device/intr.c`.
+/// Installs the shared vector on line `id` with `flags`, and adds `user_intr`
+/// to the line's handler list.
 ///
 /// # Safety
 ///
-/// `dev` must be the live `irqtab`, `id` inside its `irq` table, and
+/// `dev` must be the live [`irq::IRQTAB`], `id` inside its `irq` table, and
 /// `user_intr` the live entry [`insert_intr_entry()`] returned.
 pub(crate) unsafe fn install_user_intr_handler(
     dev: *mut IrqDev,
@@ -415,7 +414,7 @@ pub(crate) unsafe fn install_user_intr_handler(
     Ok(())
 }
 
-/// `deliver_intr()` of `device/intr.c`: send the notification message.
+/// Sends the notification message.
 ///
 /// # Safety
 ///
@@ -453,7 +452,8 @@ unsafe fn deliver_intr(id: c_int, dst_port: NonNull<c_void>) -> bool {
     true
 }
 
-/// `intr_thread()` of `device/intr.c`: deliver the queued user interrupts.
+/// The interrupt service thread's loop: delivers the queued user interrupts
+/// and frees dead registrations.
 ///
 /// # Safety
 ///
@@ -500,7 +500,7 @@ pub(crate) unsafe fn intr_thread() {
                     // SAFETY: the current thread is the one waiting above.
                     unsafe { clear_wait(per_cpu::thread(), 0, 0) };
                     // SAFETY: `e` is live; the lock is still held, and
-                    // `irqtab` is the live table.
+                    // `irq::IRQTAB` is the live table.
                     let id = unsafe {
                         let id = (*e).id;
                         (*e).interrupts -= 1;
@@ -555,7 +555,7 @@ pub(crate) unsafe fn intr_thread() {
                 }
             }
 
-            // SAFETY: `irqtab` is the live table, and the lock is held.
+            // SAFETY: `irq::IRQTAB` is the live table, and the lock is held.
             let pending =
                 unsafe { (*ptr::addr_of!(irq::IRQTAB)).tot_num_intr };
             if deleted.is_null() && pending == 0 {
@@ -573,14 +573,14 @@ pub(crate) unsafe fn intr_thread() {
 /// Enable the line registration `id` names, outside the lock, as
 /// `irq_acknowledge()` did.
 pub(crate) fn enable_line(id: c_int) {
-    // SAFETY: `irqtab` is the live table, and `id` came from a registration.
+    // SAFETY: `irq::IRQTAB` is the live table, and `id` came from a
+    // registration.
     if let Some(irq) = unsafe { irq_of(ptr::addr_of_mut!(irq::IRQTAB), id) } {
         irq::__enable_irq(irq);
     }
 }
 
-/// `irq_acknowledge()` of `device/intr.c`: account a userland acknowledgement
-/// and report the line to enable.
+/// Accounts a userland acknowledgement and reports the line to enable.
 ///
 /// # Errors
 ///
@@ -627,7 +627,7 @@ pub(crate) const fn getstat(flavor: c_uint) -> Option<(c_int, u32)> {
     }
 }
 
-/// `irqgetstat()` in C.
+/// Reports the device's status flavor `flavor` into `data`.
 ///
 /// # Safety
 ///
@@ -652,7 +652,7 @@ pub(crate) unsafe fn irqgetstat(
     }
 }
 
-/// `intr_thread()` in C: the interrupt service thread.
+/// The kernel-thread entry of [`intr_thread`].
 ///
 /// # Safety
 ///

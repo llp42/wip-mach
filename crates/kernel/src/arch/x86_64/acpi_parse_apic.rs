@@ -5,9 +5,7 @@
 //   Written by Juan Bosco Garcia and Almudena Garcia Jurado-Centurion
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The ACPI-MADT parser, which `i386/i386at/acpi_parse_apic.c` used to define
-//! and `i386/i386at/acpi_parse_apic.h` declares, with the packed ACPI table
-//! mirrors of that header.
+//! The ACPI MADT parser, with the packed ACPI table records it reads.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::x86_64::apic::{
@@ -25,7 +23,7 @@ use core::ptr::{self, NonNull};
 use core::slice;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-/// `ACPI_RSDP_ALIGN` of <`i386at/acpi_parse_apic.h`>.
+/// The alignment of the RSDP signature.
 const ACPI_RSDP_ALIGN: usize = 16;
 /// `ACPI_RSDP_SIG`: the RSDP signature.
 const ACPI_RSDP_SIG: [u8; 8] = *b"RSD PTR ";
@@ -50,7 +48,7 @@ const ACPI_APIC_ENTRY_IOAPIC: u8 = 1;
 /// `ACPI_APIC_ENTRY_IRQ_OVERRIDE`.
 const ACPI_APIC_ENTRY_IRQ_OVERRIDE: u8 = 2;
 
-/// The byte count the C searches between `0xe0000` and `0x100000`.
+/// The bytes searched from `0xe0000` up to 1 MiB.
 const BIOS_SEARCH_LENGTH: u32 = 0x0010_0000 - 0xe0000;
 
 /// A 32-bit table field as a `usize`; `usize` holds every `u32`, so the
@@ -78,7 +76,7 @@ pub(crate) enum AcpiError {
     FitFailure,
 }
 
-/// `struct acpi_rsdp` of <`i386at/acpi_parse_apic.h`>.
+/// The ACPI 1.0 root system description pointer.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -90,7 +88,7 @@ struct AcpiRsdp {
     rsdt_addr: u32,
 }
 
-/// `struct acpi_rsdp2` of <`i386at/acpi_parse_apic.h`>.
+/// The ACPI 2.0 root system description pointer.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -103,7 +101,7 @@ struct AcpiRsdp2 {
     reserved: [u8; 3],
 }
 
-/// `struct acpi_dhdr` of <`i386at/acpi_parse_apic.h`>.
+/// The header every description table starts with.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -119,8 +117,7 @@ struct AcpiDhdr {
     creator_revision: u32,
 }
 
-/// `struct acpi_rsdt` of <`i386at/acpi_parse_apic.h>`: the header and the C's
-/// trailing `entry[0]`, one `u32` per table.
+/// The RSDT: the header and its trailing entries, one `u32` per table.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -129,8 +126,7 @@ struct AcpiRsdt {
     entry: [u32; 0],
 }
 
-/// `struct acpi_xsdt` of <`i386at/acpi_parse_apic.h>`: the header and the C's
-/// trailing `entry[0]`, one `u64` per table.
+/// The XSDT: the header and its trailing entries, one `u64` per table.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -139,7 +135,7 @@ struct AcpiXsdt {
     entry: [u64; 0],
 }
 
-/// `struct acpi_address` of <`i386at/acpi_parse_apic.h`>.
+/// A generic address structure.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -151,7 +147,7 @@ struct AcpiAddress {
     addr64: u64,
 }
 
-/// `struct acpi_apic_dhdr` of <`i386at/acpi_parse_apic.h`>.
+/// The header of one MADT entry.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -160,8 +156,8 @@ struct AcpiApicDhdr {
     length: u8,
 }
 
-/// `struct acpi_apic` of <`i386at/acpi_parse_apic.h>`: the MADT itself, whose
-/// trailing `entry[0]` holds one [`AcpiApicDhdr`] per interrupt controller.
+/// The MADT itself, whose trailing entries hold one [`AcpiApicDhdr`] per
+/// interrupt controller.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -172,7 +168,7 @@ struct AcpiApic {
     entry: [AcpiApicDhdr; 0],
 }
 
-/// `struct acpi_apic_lapic` of <`i386at/acpi_parse_apic.h`>.
+/// A MADT local-APIC entry.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -183,7 +179,7 @@ struct AcpiApicLapic {
     flags: u32,
 }
 
-/// `struct acpi_apic_ioapic` of <`i386at/acpi_parse_apic.h`>.
+/// A MADT I/O APIC entry.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -195,7 +191,7 @@ struct AcpiApicIoapic {
     gsi_base: u32,
 }
 
-/// `struct acpi_apic_irq_override` of <`i386at/acpi_parse_apic.h`>.
+/// A MADT interrupt source override entry.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -207,7 +203,7 @@ struct AcpiApicIrqOverride {
     flags: u16,
 }
 
-/// `struct acpi_hpet` of <`i386at/acpi_parse_apic.h`>.
+/// The HPET description table.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -309,10 +305,10 @@ const _: () = {
     assert!(offset_of!(AcpiHpet, flags) == 55);
 };
 
-/// `hpet_addr` of <i386/apic.h>: the mapped HPET register window.
+/// The mapped HPET register window.
 pub(crate) static HPET_ADDR: AtomicPtr<u32> = AtomicPtr::new(ptr::null_mut());
 
-/// `phystokv()` of <`i386/vm_param.h`>.
+/// The kernel virtual address of the physical address `phys`.
 const fn phystokv(phys: VmOffset) -> VmOffset {
     phys.wrapping_add(VM_MIN_KERNEL_ADDRESS)
 }
@@ -330,12 +326,12 @@ fn map_table<T>(
         .map(NonNull::cast::<T>)
 }
 
-/// `acpi_checksum()` in C: the wrapping byte sum of `bytes`.
+/// The wrapping byte sum of `bytes`.
 fn checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))
 }
 
-/// `acpi_checksum()` in C over the mapped table at `addr`.
+/// The checksum of the mapped table at `addr`.
 ///
 /// # Safety
 ///
@@ -365,7 +361,7 @@ const unsafe fn header_signature(header: *const AcpiDhdr) -> [u8; 4] {
     unsafe { ptr::read_unaligned(header.cast::<[u8; 4]>()) }
 }
 
-/// `rsdt->entry[index]` in C, past the packed header.
+/// The physical address in RSDT entry `index`, past the packed header.
 ///
 /// # Safety
 ///
@@ -380,7 +376,7 @@ const unsafe fn rsdt_entry(rsdt: *const AcpiRsdt, index: usize) -> VmOffset {
     from_u32(entry)
 }
 
-/// `xsdt->entry[index]` in C, past the packed header.
+/// The physical address in XSDT entry `index`, past the packed header.
 ///
 /// # Safety
 ///
@@ -396,8 +392,8 @@ const unsafe fn xsdt_entry(xsdt: *const AcpiXsdt, index: usize) -> VmOffset {
     entry as VmOffset
 }
 
-/// `acpi_check_rsdp()` in C: the ACPI version and the RSDT/XSDT physical base
-/// the RSDP at `addr` records, when its signature and checksum are good.
+/// The ACPI version and the RSDT/XSDT physical base the RSDP at `addr`
+/// records, when its signature and checksum are good.
 fn check_rsdp(addr: VmOffset) -> Option<(u8, VmOffset)> {
     // SAFETY: the caller only probes the EBDA and BIOS ranges, which the
     // kernel maps, and every candidate is 16-byte aligned.
@@ -448,7 +444,7 @@ fn check_rsdp(addr: VmOffset) -> Option<(u8, VmOffset)> {
     }
 }
 
-/// `acpi_search_rsdp()` in C: the first valid RSDP in `addr..addr + length`.
+/// The first valid RSDP in `addr..addr + length`.
 fn search_rsdp(addr: VmOffset, length: u32) -> Option<(u8, VmOffset)> {
     let end = addr.wrapping_add(from_u32(length));
     let mut cursor = addr;
@@ -461,7 +457,7 @@ fn search_rsdp(addr: VmOffset, length: u32) -> Option<(u8, VmOffset)> {
     None
 }
 
-/// `acpi_get_rsdp()` in C: the RSDP physical base and whether it is ACPI 2.0.
+/// The RSDP physical base and whether it is ACPI 2.0.
 fn get_rsdp() -> Option<(bool, VmOffset)> {
     // SAFETY: 0x040e is the EBDA paragraph word in the low memory the kernel
     // keeps mapped, and it is 2-byte aligned.
@@ -479,7 +475,7 @@ fn get_rsdp() -> Option<(bool, VmOffset)> {
         .map(|(version, sdt)| (version == 2, sdt))
 }
 
-/// `acpi_get_rsdt()` in C: the mapped RSDT and its entry count.
+/// The mapped RSDT and its entry count.
 fn get_rsdt(rsdp_phys: VmOffset) -> Option<(NonNull<AcpiRsdt>, c_int)> {
     let rsdt =
         map_table::<AcpiRsdt>(rsdp_phys, size_of::<AcpiRsdt>(), VmProt::READ)?;
@@ -499,7 +495,7 @@ fn get_rsdt(rsdp_phys: VmOffset) -> Option<(NonNull<AcpiRsdt>, c_int)> {
     Some((rsdt, entries as c_int))
 }
 
-/// `acpi_get_xsdt()` in C: the mapped XSDT and its entry count.
+/// The mapped XSDT and its entry count.
 fn get_xsdt(rsdp_phys: VmOffset) -> Option<(NonNull<AcpiXsdt>, c_int)> {
     let xsdt =
         map_table::<AcpiXsdt>(rsdp_phys, size_of::<AcpiXsdt>(), VmProt::READ)?;
@@ -558,7 +554,7 @@ fn inspect_entry(phys: VmOffset, madt: &mut Option<NonNull<AcpiApic>>) {
     }
 }
 
-/// `acpi_get_apic()` in C: the MADT one of the RSDT entries names.
+/// The MADT one of the RSDT entries names.
 fn get_apic(
     rsdt: NonNull<AcpiRsdt>,
     count: c_int,
@@ -574,7 +570,7 @@ fn get_apic(
     madt
 }
 
-/// `acpi_get_apic2()` in C: the MADT one of the XSDT entries names.
+/// The MADT one of the XSDT entries names.
 fn get_apic2(
     xsdt: NonNull<AcpiXsdt>,
     count: c_int,
@@ -590,14 +586,14 @@ fn get_apic2(
     madt
 }
 
-/// `acpi_apic_add_lapic()` in C: record one enabled or capable CPU.
+/// Records one enabled or capable CPU.
 fn add_lapic(entry: AcpiApicLapic) {
     if entry.flags & (ACPI_LAPIC_FLAG_ENABLED | ACPI_LAPIC_FLAG_CAPABLE) != 0 {
         apic::add_cpu(u16::from(entry.apic_id & apic::id_mask()));
     }
 }
 
-/// `acpi_apic_add_ioapic()` in C: map one IOAPIC and record it.
+/// Maps one I/O APIC and records it.
 fn add_ioapic(entry: AcpiApicIoapic) {
     let Some(unit) = map_table::<ApicIoUnit>(
         from_u32(entry.addr),
@@ -619,7 +615,7 @@ fn add_ioapic(entry: AcpiApicIoapic) {
     });
 }
 
-/// `acpi_apic_add_irq_override()` in C: record one IRQ override.
+/// Records one IRQ override.
 fn add_irq_override(entry: AcpiApicIrqOverride) {
     apic::add_irq_override(IrqOverrideData {
         bus: entry.bus,
@@ -629,7 +625,7 @@ fn add_irq_override(entry: AcpiApicIrqOverride) {
     });
 }
 
-/// `acpi_apic_parse_table()` in C: walk the MADT entries.
+/// Walks the MADT entries.
 fn parse_table(apic: NonNull<AcpiApic>) {
     // SAFETY: the caller passes the mapped MADT.
     let length = unsafe { header_length(apic.as_ptr().cast()) };
@@ -696,8 +692,7 @@ fn parse_table(apic: NonNull<AcpiApic>) {
     }
 }
 
-/// `acpi_apic_setup()` in C: map the local APIC, parse the MADT and build the
-/// ID tables.
+/// Maps the local APIC, parses the MADT and builds the ID tables.
 fn setup(apic: NonNull<AcpiApic>) -> Result<(), AcpiError> {
     // SAFETY: the caller passes the mapped MADT, and `lapic_addr` sits inside
     // its packed header.
@@ -730,8 +725,7 @@ fn setup(apic: NonNull<AcpiApic>) -> Result<(), AcpiError> {
     Ok(())
 }
 
-/// `acpi_apic_init()` in C: find the MADT in the ACPI tables and build the
-/// APIC tables.
+/// Finds the MADT in the ACPI tables and builds the APIC tables.
 ///
 /// # Errors
 ///

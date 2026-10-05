@@ -4,8 +4,7 @@
 //   Contributed by Agustina Arzille <avarzille@riseup.net>, 2016.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The global address-based synchronization, which `kern/gsync.c` used to
-//! define for `kern/gsync.h`.
+//! The global address-based synchronization.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::per_cpu;
@@ -31,21 +30,21 @@ use core::mem::size_of;
 use core::pin::Pin;
 use core::ptr::{self, NonNull, addr_of_mut};
 
-/// The `GSYNC_*` bits of <kern/gsync.h>.
+/// The flag bits of the gsync calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Flags(c_int);
 
 impl Flags {
-    /// `GSYNC_SHARED`: the address is shared, so the object keys it.
+    /// The address is shared, so the memory object keys it.
     pub const SHARED: Self = Self(0x01);
-    /// `GSYNC_QUAD`: check or write two words.
+    /// Check or write two words.
     pub const QUAD: Self = Self(0x02);
-    /// `GSYNC_TIMED`: the wait has a timeout.
+    /// The wait has a timeout.
     pub const TIMED: Self = Self(0x04);
-    /// `GSYNC_BROADCAST`: wake every matching waiter.
+    /// Wake every matching waiter.
     pub const BROADCAST: Self = Self(0x08);
-    /// `GSYNC_MUTATE`: write the value before waking.
+    /// Write the value before waking.
     pub const MUTATE: Self = Self(0x10);
 
     /// The `int` the C half passes.
@@ -61,10 +60,10 @@ impl Flags {
     }
 }
 
-/// `GSYNC_NBUCKETS` in kern/gsync.c.
+/// The number of buckets in the waiter hash table.
 const GSYNC_NBUCKETS: usize = 512;
 
-/// An entry in the global hash table: `struct gsync_hbucket` of kern/gsync.c.
+/// An entry in the global hash table of waiters.
 struct Bucket {
     entries: GsyncQueue,
     lock: KMutex,
@@ -79,7 +78,7 @@ impl Bucket {
     }
 }
 
-/// `gsync_buckets` of kern/gsync.c: the hash table of waiting threads.
+/// The hash table of waiting threads.
 static mut GSYNC_BUCKETS: [Bucket; GSYNC_NBUCKETS] =
     [const { Bucket::new() }; GSYNC_NBUCKETS];
 
@@ -90,9 +89,8 @@ fn bucket(index: usize) -> *mut Bucket {
     unsafe { addr_of_mut!(GSYNC_BUCKETS).cast::<Bucket>().add(index) }
 }
 
-/// `union gsync_key` of kern/gsync.c: what identifies the address a thread
-/// waits on.  The C union never compares a task-local key equal to a shared
-/// one, so the Rust form keeps the kind.
+/// What identifies the address a thread waits on.  A task-local key never
+/// compares equal to a shared one, so the key keeps its kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     /// A task-local address: the C `local.map`/`local.addr` pair.
@@ -101,13 +99,12 @@ enum Key {
     Shared { object: usize, offset: VmOffset },
 }
 
-/// `MIX2_LL()` in kern/gsync.c.
+/// Mixes `y` into `x` for the key hash.
 const fn mix(x: u32, y: u32) -> u32 {
     x.rotate_left(5) ^ y
 }
 
-/// `gsync_key_hash()` in kern/gsync.c: mix the key's two words through the
-/// C's rotation.
+/// Mixes the key's two words into a bucket index.
 fn hash(key: Key) -> usize {
     let (u, v) = match key {
         Key::Local { map, addr } => (map as u64, addr as u64),
@@ -121,7 +118,7 @@ fn hash(key: Key) -> usize {
     ret as usize
 }
 
-/// A thread blocked on an address: `struct gsync_waiter` of kern/gsync.c.
+/// A thread blocked on an address.
 pub(crate) struct GsyncWaiter {
     link: tail_queue::Link,
     /// Whether the waiter is on its bucket's list; guarded by the bucket
@@ -156,14 +153,13 @@ unsafe fn queue_of<'a>(bucketp: *mut Bucket) -> Pin<&'a mut GsyncQueue> {
     unsafe { Pin::new_unchecked(&mut *addr_of_mut!((*bucketp).entries)) }
 }
 
-/// `struct vm_args` of kern/gsync.c: the object and offset a probe found.
+/// The object and offset a probe found.
 struct VmArgs {
     object: *mut VmObject,
     offset: VmOffset,
 }
 
-/// `probe_address()` in kern/gsync.c: look `addr` up in `map` and hand back
-/// the locked object and its offset.
+/// Looks `addr` up in `map` and hands back the locked object and its offset.
 fn probe(
     map: *mut VmMap,
     addr: VmOffset,
@@ -200,8 +196,8 @@ fn probe(
     }
 }
 
-/// `gsync_prepare_key()` in kern/gsync.c: probe the address, build the key
-/// from it, and return the bucket the key hashes to.
+/// Probes the address, builds the key from it, and returns the bucket the key
+/// hashes to.
 fn prepare_key(
     task: &Task,
     addr: VmOffset,
@@ -223,8 +219,7 @@ fn prepare_key(
     Ok((key, hash(key) % GSYNC_NBUCKETS))
 }
 
-/// `temp_mapping()` in kern/gsync.c: map `addr`'s page into the kernel, or
-/// zero when the mapping fails.
+/// Maps `addr`'s page into the kernel, or returns zero when the mapping fails.
 fn temp_mapping(args: &VmArgs, addr: VmOffset, prot: VmProt) -> VmOffset {
     let mut paddr = VM_MIN_KERNEL_ADDRESS;
     let offset = args
@@ -251,9 +246,8 @@ fn temp_mapping(args: &VmArgs, addr: VmOffset, prot: VmProt) -> VmOffset {
     }
 }
 
-/// `gsync_find_key()` in kern/gsync.c: the first entry not less than `key`,
-/// or `None` for the head when there is none.  The flag is true when an entry
-/// compared equal.
+/// The first entry not less than `key`, or `None` for the head when there is
+/// none.  The flag is true when an entry compared equal.
 fn find_key(
     entries: &GsyncQueue,
     key: Key,
@@ -270,9 +264,7 @@ fn find_key(
     (None, false)
 }
 
-/// `dequeue_waiter()` in kern/gsync.c: unlink `waiter` and wake its thread;
-/// clearing `queued` does what the C's explicit re-initialization of the link
-/// did.
+/// Unlinks `waiter` and wakes its thread; clearing `queued` resets the link.
 ///
 /// # Safety
 ///
@@ -324,8 +316,8 @@ unsafe fn wait_compare(
 
         let offset = addr & (PAGE_SIZE - 1);
         let mapped = paddr.wrapping_add(offset);
-        // SAFETY: the temporary mapping covers this page, and the C read the
-        // first `int`, plus the second under `GSYNC_QUAD`.
+        // SAFETY: the temporary mapping covers this page, and the check reads
+        // the first `int`, plus the second with `Flags::QUAD`.
         equal = unsafe { (mapped as *const c_uint).read() == lo };
         if flags.contains(Flags::QUAD) {
             equal = equal
@@ -392,7 +384,8 @@ unsafe fn wait_compare(
     Ok(())
 }
 
-/// `gsync_wait()` in kern/gsync.c.
+/// Waits on `addr` in `task` while it holds `lo` (and `hi` with
+/// [`Flags::QUAD`]), for up to `msec` milliseconds with [`Flags::TIMED`].
 pub(crate) fn wait(
     task: NonNull<Task>,
     addr: VmOffset,
@@ -508,7 +501,8 @@ pub(crate) fn wait(
     })
 }
 
-/// `gsync_wake()` in kern/gsync.c.
+/// Wakes one waiter on `addr` in `task`, or every one with
+/// [`Flags::BROADCAST`], writing `val` first with [`Flags::MUTATE`].
 pub(crate) fn wake(
     task: NonNull<Task>,
     addr: VmOffset,
@@ -636,11 +630,10 @@ pub(crate) fn wake(
     result
 }
 
-/// The splice loop of `gsync_requeue()` in kern/gsync.c: move the run of
-/// waiters that shares `src_key`, from `input` on in `bp1`, to just after
-/// `output` in `bp2`, re-keyed to `dst_key`, waking the first when
-/// `wake_one`.  `output` of `None` anchors the run at the front, as the C's
-/// head anchor did.
+/// Moves the run of waiters that shares `src_key`, from `input` on in `bp1`,
+/// to just after `output` in `bp2`, re-keyed to `dst_key`, waking the first
+/// when `wake_one`.  `output` of `None` anchors the run at the front of the
+/// bucket.
 ///
 /// # Safety
 ///
@@ -713,7 +706,8 @@ unsafe fn requeue_run(
     }
 }
 
-/// `gsync_requeue()` in kern/gsync.c.
+/// Moves the waiters on `src` to `dst`, waking one first when `wake_one` is
+/// set.
 pub(crate) fn requeue(
     task: NonNull<Task>,
     src: VmOffset,
@@ -812,11 +806,11 @@ pub(crate) fn requeue(
     result
 }
 
-/// `gsync_setup()` in kern/gsync.c.
+/// Initializes the bucket locks and lists.
 pub(crate) fn setup() {
     for i in 0..GSYNC_NBUCKETS {
-        // SAFETY: `kern/startup.c` calls this once during the boot, before
-        // any other CPU or thread can reach the table.
+        // SAFETY: the boot path calls this once, before any other CPU or
+        // thread can reach the table.
         unsafe {
             (*bucket(i)).entries = GsyncQueue::new();
         };

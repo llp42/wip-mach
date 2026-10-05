@@ -4,14 +4,11 @@
 //   Written by Almudena Garcia Jurado-Centurion
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The APIC and HPET accessors, which `i386/i386/apic.c` used to define and
-//! `i386/i386/apic.h` declares; the two `hpclock_*` entries are also declared
-//! in <`kern/mach_clock.h`>.
+//! The APIC and HPET accessors, with the high-precision clock entries.
 //!
 //! The `ApicReg`, `ApicIoUnit`, `ApicLocalUnit`, `IoApicData`,
-//! `IrqOverrideData` and `ApicInfo` mirrors follow that header's field order,
-//! so the C code that still reads `lapic->...` reaches the same offsets the
-//! Rust accessors do.
+//! `IrqOverrideData` and `ApicInfo` records keep the hardware's and the MADT's
+//! field order.
 
 use crate::arch::x86_64::acpi_parse_apic::HPET_ADDR;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
@@ -26,7 +23,7 @@ use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
-/// `HPET_CAP_PERIOD` of `i386/i386/apic.c`: the tick-period register.
+/// The tick-period register.
 const HPET_CAP_PERIOD: usize = 0x04;
 /// `HPET_CFG`: the configuration register.
 const HPET_CFG: usize = 0x10;
@@ -51,19 +48,19 @@ const HPET_T0_COMPARATOR: usize = 0x108;
 
 /// `FSEC_PER_NSEC`: femtoseconds in a nanosecond.
 const FSEC_PER_NSEC: u32 = 1_000_000;
-/// `MAX_IOAPICS` of <i386/apic.h>: the IOAPIC entries `ApicInfo` stores.
+/// The IOAPIC entries `ApicInfo` stores.
 const MAX_IOAPICS: usize = 16;
-/// `MAX_IRQ_OVERRIDE` of <i386/apic.h>: the IRQ overrides `ApicInfo` stores.
+/// The IRQ overrides `ApicInfo` stores.
 const MAX_IRQ_OVERRIDE: usize = 24;
 
-/// `LAPIC_ENABLE` of <i386/apic.h>: software-enable the local APIC.
+/// The spurious-vector bit that software-enables the local APIC.
 const LAPIC_ENABLE: u32 = 0x100;
 /// `LAPIC_ENABLE_DIRECTED_EOI`: use directed end-of-interrupt.
 const LAPIC_ENABLE_DIRECTED_EOI: u32 = 0x1000;
 /// `LAPIC_DISABLE`: mask an LVT entry.
 pub(crate) const LAPIC_DISABLE: u32 = 0x10000;
 
-/// `APIC_MSR` of <i386/apic.h>: the local APIC base MSR.
+/// The local APIC base MSR.
 pub(crate) const APIC_MSR: u32 = 0x1b;
 /// `APIC_MSR_BSP`: this CPU is the bootstrap processor.
 pub(crate) const APIC_MSR_BSP: u32 = 0x100;
@@ -79,28 +76,28 @@ const APIC_EXT_FEATURE_HAS_8BITID: u32 = 1 << 2;
 /// `APIC_EXT_CTRL_ENABLE_8BITID`: software enabled 8-bit IDs.
 const APIC_EXT_CTRL_ENABLE_8BITID: u32 = 1 << 2;
 
-/// `IOAPIC_SPURIOUS_BASE` of <i386at/idt.h>: the spurious-vector base.
+/// The spurious-vector base.
 pub(crate) const IOAPIC_SPURIOUS_BASE: u32 = 0xff;
 
-/// `APIC_IO_VERSION` of <i386/apic.h>: the IOAPIC version register index.
+/// The IOAPIC version register index.
 pub(crate) const APIC_IO_VERSION: u32 = 0x01;
 /// `APIC_IO_VERSION_SHIFT`: where the version register holds the version.
 pub(crate) const APIC_IO_VERSION_SHIFT: u32 = 0;
 /// `APIC_IO_ENTRIES_SHIFT`: where the version register holds the entry count.
 pub(crate) const APIC_IO_ENTRIES_SHIFT: u32 = 16;
 
-/// The ICR-low fields `apic_send_ipi()` overwrites: vector, delivery mode,
+/// The ICR-low fields [`send_ipi`] overwrites: vector, delivery mode,
 /// destination mode, level, trigger mode and destination shorthand.
 const ICR_LOW_FIELDS: u32 =
     0xff | (0x7 << 8) | (1 << 11) | (1 << 14) | (1 << 15) | (0x3 << 18);
 
-/// `SEND_PENDING` of <i386/apic.h>: the `delivery_status` bit of `icr_low`.
+/// The delivery-status bit of `icr_low`.
 const SEND_PENDING: u32 = 1 << 12;
 
-/// `cpu_id_lut` entries of `i386/i386/apic.c`.
+/// The entries of [`CPU_ID_LUT`].
 const CPU_ID_LUT_SIZE: usize = 256;
 
-/// `ApicReg` of <i386/apic.h>: one 128-bit register slot.
+/// One 128-bit register slot.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -113,7 +110,7 @@ impl ApicReg {
     const ZERO: Self = Self { r: 0, p: [0; 3] };
 }
 
-/// `ApicIoUnit` of <i386/apic.h>: the IOAPIC's register window.
+/// The IOAPIC's register window.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct ApicIoUnit {
@@ -123,11 +120,10 @@ pub struct ApicIoUnit {
     pub eoi: ApicReg,
 }
 
-/// `ApicLocalUnit` of <i386/apic.h>: the local APIC's register page.
+/// The local APIC's register page.
 ///
-/// `icr_low` and `icr_high` are the header's `IcrLReg` and `IcrHReg` unions;
-/// both are one `ApicReg` wide, and the unions' bitfield views alias its
-/// value word.
+/// `icr_low` and `icr_high` are each one `ApicReg` wide, and their bitfields
+/// alias its value word.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct ApicLocalUnit {
@@ -175,7 +171,7 @@ pub struct ApicLocalUnit {
 }
 
 impl ApicLocalUnit {
-    /// The zero image the C's `dummy_lapic` began with.
+    /// The zero image of [`DUMMY_LAPIC`].
     const ZERO: Self = Self {
         reserved0: ApicReg::ZERO,
         reserved1: ApicReg::ZERO,
@@ -221,7 +217,7 @@ impl ApicLocalUnit {
     };
 }
 
-/// `IoApicData` of <i386/apic.h>: one MADT IOAPIC entry.
+/// One MADT IOAPIC entry.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -243,7 +239,7 @@ impl IoApicData {
     };
 }
 
-/// `IrqOverrideData` of <i386/apic.h>: one MADT IRQ override entry.
+/// One MADT IRQ override entry.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -263,8 +259,7 @@ impl IrqOverrideData {
     };
 }
 
-/// `ApicInfo` of <i386/apic.h>: the CPUs, IOAPICs and IRQ overrides the MADT
-/// named.
+/// The CPUs, IOAPICs and IRQ overrides the MADT named.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct ApicInfo {
@@ -361,25 +356,25 @@ const _: () = {
     assert!(offset_of!(ApicInfo, irq_override_list) == 400);
 };
 
-/// `hpet_period_nsec` of `i386/i386/apic.c`: the HPET period in nanoseconds.
+/// The HPET period in nanoseconds.
 static HPET_PERIOD_NSEC: AtomicU32 = AtomicU32::new(0);
 
-/// `dummy_lapic` of `i386/i386/apic.c`: the zero page `lapic` points at until
-/// ACPI maps the real one, so a lookup before then reports the master.
+/// The zero page [`LAPIC`] points at until ACPI maps the real one, so a lookup
+/// before then reports the master.
 static mut DUMMY_LAPIC: ApicLocalUnit = ApicLocalUnit::ZERO;
 
-/// `lapic` of <i386/apic.h>: the mapped local-APIC page.
+/// The mapped local-APIC page.
 static LAPIC: AtomicPtr<ApicLocalUnit> = AtomicPtr::new(&raw mut DUMMY_LAPIC);
 
-/// `cpu_id_lut` of `i386/i386/apic.c`: the APIC ID to kernel ID table.
+/// The APIC ID to kernel ID table.
 #[unsafe(export_name = "cpu_id_lut")]
 pub static mut CPU_ID_LUT: [c_int; CPU_ID_LUT_SIZE] = [0; CPU_ID_LUT_SIZE];
 
-/// `apic_data` of `i386/i386/apic.c`: the lists the MADT parse fills.
+/// The lists the MADT parse fills.
 pub static mut APIC_DATA: ApicInfo = ApicInfo::ZERO;
 
-/// `apic_id_mask` of <i386/apic.h>: the APIC-ID bits the platform implements.
-/// The AP boot code reads it as a plain byte.
+/// The APIC-ID bits the platform implements.  The AP boot code reads it as a
+/// plain byte.
 #[unsafe(export_name = "apic_id_mask")]
 static APIC_ID_MASK: AtomicU8 = AtomicU8::new(0xf);
 
@@ -413,9 +408,7 @@ impl Hpet {
     /// Write `value` to the 32-bit register at byte `offset`.
     fn write(&self, offset: usize, value: u32) {
         // SAFETY: `Hpet::new()` established that the base is the mapped HPET
-        // window, and the callers pass the register constants above;
-        // the volatile store is the C's `*(volatile uint32_t *) =`
-        // through `HPET32()`.
+        // window, and the callers pass the register constants above.
         unsafe {
             ptr::write_volatile(
                 self.base.as_ptr().add(offset).cast::<u32>(),
@@ -425,11 +418,10 @@ impl Hpet {
     }
 }
 
-/// `cpu_intr_save()` of <i386/cpu.h>: the current EFLAGS, interrupts off.
+/// The current EFLAGS, interrupts off.
 pub(crate) fn intr_save() -> c_ulong {
     let flags: c_ulong;
-    // SAFETY: `pushf`, `pop` and `cli` are the instructions the C inline
-    // expands to, and the stack stays balanced.
+    // SAFETY: PUSHF, POP and CLI keep the stack balanced.
     unsafe {
         asm!(
             "pushf",
@@ -442,7 +434,7 @@ pub(crate) fn intr_save() -> c_ulong {
     flags
 }
 
-/// `cpu_intr_restore()` of <i386/cpu.h>: put `flags` back into EFLAGS.
+/// Puts `flags` back into EFLAGS.
 pub(crate) fn intr_restore(flags: c_ulong) {
     // SAFETY: `flags` came from `intr_save()`, so it holds a valid RFLAGS
     // image; the stack stays balanced.
@@ -460,7 +452,7 @@ pub(crate) fn intr_restore(flags: c_ulong) {
 ///
 /// # Safety
 ///
-/// `reg` must point into the mapped local-APIC page, as `lapic` does.
+/// `reg` must point into the mapped local-APIC page, as [`LAPIC`] does.
 pub(crate) unsafe fn reg_read(reg: *const ApicReg) -> u32 {
     unsafe { ptr::read_volatile(&raw const (*reg).r) }
 }
@@ -474,8 +466,7 @@ pub(crate) unsafe fn reg_write(reg: *mut ApicReg, value: u32) {
     unsafe { ptr::write_volatile(&raw mut (*reg).r, value) }
 }
 
-/// The `lapic->icr_low.delivery_status == SEND_PENDING` test the IPI sender
-/// waits on.
+/// Whether the local APIC is still sending the last IPI.
 pub(crate) fn ipi_pending() -> bool {
     let ptr = lapic_ptr();
     // SAFETY: `ptr` is the mapped local-APIC page, and the read is the C's
@@ -483,7 +474,7 @@ pub(crate) fn ipi_pending() -> bool {
     unsafe { reg_read(&raw const (*ptr).icr_low) & SEND_PENDING != 0 }
 }
 
-/// Publish the mapped local-APIC page, the C's `apic_lapic_init()`.
+/// Publishes the mapped local-APIC page.
 pub(crate) fn publish_lapic(unit: *mut ApicLocalUnit) {
     LAPIC.store(unit, Ordering::Relaxed);
 }
@@ -500,9 +491,9 @@ pub(crate) fn apic_id() -> u32 {
     (result.ebx >> 24) & 0xff
 }
 
-/// `apic_data_init()` in C: reset the lists and allocate the CPU table.
+/// Resets the lists and allocates the CPU table.
 pub(crate) fn data_init() -> bool {
-    // SAFETY: `apic_data` is this module's state, written at boot only.
+    // SAFETY: `APIC_DATA` is this module's state, written at boot only.
     unsafe {
         APIC_DATA.cpu_lapic_list = ptr::null_mut();
         APIC_DATA.ncpus = 0;
@@ -518,7 +509,7 @@ pub(crate) fn data_init() -> bool {
     true
 }
 
-/// `apic_add_cpu()` in C: append one APIC ID to the CPU list.
+/// Appends one APIC ID to the CPU list.
 pub(crate) fn add_cpu(apic_id: u16) {
     // SAFETY: `data_init()` allocated the list and the callers keep `ncpus`
     // below `MAX_NCPUS`.
@@ -529,11 +520,10 @@ pub(crate) fn add_cpu(apic_id: u16) {
     }
 }
 
-/// `apic_add_ioapic()` in C: append one IOAPIC to the list.
+/// Appends one IOAPIC to the list.
 pub(crate) fn add_ioapic(ioapic: IoApicData) {
-    // SAFETY: `apic_data` is this module's state; the bound check keeps a
-    // runaway entry count inside the array, where the C would overwrite the
-    // next field.
+    // SAFETY: `APIC_DATA` is this module's state; the bound check keeps a
+    // runaway entry count inside the array.
     unsafe {
         let index = usize::from(APIC_DATA.nioapics);
         if index < MAX_IOAPICS {
@@ -546,11 +536,10 @@ pub(crate) fn add_ioapic(ioapic: IoApicData) {
     }
 }
 
-/// `apic_add_irq_override()` in C: append one IRQ override to the list.
+/// Appends one IRQ override to the list.
 pub(crate) fn add_irq_override(irq_over: IrqOverrideData) {
-    // SAFETY: `apic_data` is this module's state; the bound check keeps a
-    // runaway entry count inside the array, where the C would overwrite the
-    // next field.
+    // SAFETY: `APIC_DATA` is this module's state; the bound check keeps a
+    // runaway entry count inside the array.
     unsafe {
         let Some(count) = usize::try_from(APIC_DATA.nirqoverride).ok() else {
             return;
@@ -565,13 +554,13 @@ pub(crate) fn add_irq_override(irq_over: IrqOverrideData) {
     }
 }
 
-/// `acpi_get_irq_override()` in C: the override whose IRQ is `pin`.
+/// The override whose IRQ is `pin`.
 pub(crate) fn irq_override(pin: u8) -> Option<NonNull<IrqOverrideData>> {
-    // SAFETY: `apic_data` is this module's state; the entries stay live for
+    // SAFETY: `APIC_DATA` is this module's state; the entries stay live for
     // the kernel's life.
     let count = unsafe { APIC_DATA.nirqoverride };
     let count = usize::try_from(count).ok()?;
-    // SAFETY: `apic_data` is this module's state; the raw pointer avoids a
+    // SAFETY: `APIC_DATA` is this module's state; the raw pointer avoids a
     // reference into it.
     let list = unsafe {
         (&raw mut APIC_DATA.irq_override_list).cast::<IrqOverrideData>()
@@ -583,14 +572,14 @@ pub(crate) fn irq_override(pin: u8) -> Option<NonNull<IrqOverrideData>> {
         // SAFETY: `i` is below both `count` and the array's length.
         if unsafe { (*list.add(i)).irq } == pin {
             // SAFETY: `i` is below both `count` and the array's length and the
-            // entry stays live in `apic_data`.
+            // entry stays live in `APIC_DATA`.
             return Some(unsafe { NonNull::new_unchecked(list.add(i)) });
         }
     }
     None
 }
 
-/// `apic_get_cpu_apic_id()` in C: the APIC ID recorded for a kernel ID.
+/// The APIC ID recorded for a kernel ID.
 fn cpu_apic_id(kernel_id: c_int) -> c_int {
     let Ok(index) = usize::try_from(kernel_id) else {
         return -1;
@@ -603,7 +592,7 @@ fn cpu_apic_id(kernel_id: c_int) -> c_int {
     c_int::from(unsafe { *APIC_DATA.cpu_lapic_list.add(index) })
 }
 
-/// `apic_get_ioapic()` in C: the IOAPIC recorded for a kernel ID.
+/// The IOAPIC recorded for a kernel ID.
 pub(crate) fn ioapic(kernel_id: c_int) -> Option<NonNull<IoApicData>> {
     let Ok(index) = usize::try_from(kernel_id) else {
         return None;
@@ -611,7 +600,7 @@ pub(crate) fn ioapic(kernel_id: c_int) -> Option<NonNull<IoApicData>> {
     if MAX_IOAPICS <= index {
         return None;
     }
-    // SAFETY: `index` is inside `apic_data.ioapic_list`, whose entries stay
+    // SAFETY: `index` is inside `APIC_DATA.ioapic_list`, whose entries stay
     // live for the kernel's life.
     Some(unsafe {
         NonNull::new_unchecked(
@@ -622,15 +611,15 @@ pub(crate) fn ioapic(kernel_id: c_int) -> Option<NonNull<IoApicData>> {
     })
 }
 
-/// `apic_get_numcpus()` in C.
+/// The number of CPUs the MADT named.
 pub(crate) fn ncpus() -> u8 {
-    // SAFETY: `apic_data` is this module's state; the load only reads it.
+    // SAFETY: `APIC_DATA` is this module's state; the load only reads it.
     unsafe { APIC_DATA.ncpus }
 }
 
-/// `apic_get_num_ioapics()` in C.
+/// The number of I/O APICs the MADT named.
 pub(crate) fn num_ioapics() -> u8 {
-    // SAFETY: `apic_data` is this module's state; the load only reads it.
+    // SAFETY: `APIC_DATA` is this module's state; the load only reads it.
     unsafe { APIC_DATA.nioapics }
 }
 
@@ -639,9 +628,9 @@ pub(crate) fn id_mask() -> u8 {
     APIC_ID_MASK.load(Ordering::Relaxed)
 }
 
-/// `apic_refit_cpulist()` in C: shrink the CPU list to the CPUs found.
+/// Shrinks the CPU list to the CPUs found.
 pub(crate) fn refit_cpulist() -> bool {
-    // SAFETY: `apic_data` is this module's state; the list stays allocated
+    // SAFETY: `APIC_DATA` is this module's state; the list stays allocated
     // until the kernel frees it below.
     let old_list = unsafe { APIC_DATA.cpu_lapic_list };
     if old_list.is_null() {
@@ -672,7 +661,7 @@ pub(crate) fn refit_cpulist() -> bool {
     true
 }
 
-/// `apic_generate_cpu_id_lut()` in C: fill the APIC ID to kernel ID table.
+/// Fills the APIC ID to kernel ID table.
 pub(crate) fn generate_cpu_id_lut() {
     for i in 0..c_int::from(ncpus()) {
         let apic_id = cpu_apic_id(i);
@@ -692,7 +681,7 @@ pub(crate) fn generate_cpu_id_lut() {
     }
 }
 
-/// `apic_print_info()` in C: list each CPU and IOAPIC with its APIC ID.
+/// Lists each CPU and IOAPIC with its APIC ID.
 pub(crate) fn print_info() {
     kprint!("CPUS:\n");
     for i in 0..c_int::from(ncpus()) {
@@ -711,7 +700,7 @@ pub(crate) fn print_info() {
             kprint!("ERROR: invalid IOAPIC ID {:x}\n", i);
             continue;
         };
-        // SAFETY: `ioapic` points into `apic_data`.
+        // SAFETY: `ioapic` points into `APIC_DATA`.
         let (apic_id, unit) =
             unsafe { ((*ioapic.as_ptr()).apic_id, (*ioapic.as_ptr()).ioapic) };
         kprint!(
@@ -723,7 +712,7 @@ pub(crate) fn print_info() {
     }
 }
 
-/// `apic_send_ipi()` in C: program both halves of the ICR and post them.
+/// Programs both halves of the ICR and posts them.
 pub(crate) fn send_ipi(
     dest_shorthand: c_uint,
     deliv_mode: c_uint,
@@ -752,7 +741,7 @@ pub(crate) fn send_ipi(
     }
 }
 
-/// `lapic_enable()` in C.
+/// Software-enables the local APIC.
 pub(crate) fn enable() {
     let ptr = lapic_ptr();
     // SAFETY: `ptr` is the mapped local-APIC page.
@@ -762,7 +751,7 @@ pub(crate) fn enable() {
     }
 }
 
-/// `lapic_disable()` in C.
+/// Software-disables the local APIC.
 fn disable() {
     let ptr = lapic_ptr();
     // SAFETY: `ptr` is the mapped local-APIC page.
@@ -772,7 +761,7 @@ fn disable() {
     }
 }
 
-/// `fix_apic_id_mask()` in C: decide the APIC-ID width the platform keeps.
+/// Decides the APIC-ID width the platform keeps.
 pub(crate) fn fix_id_mask() {
     let ptr = lapic_ptr();
     // SAFETY: `ptr` is the mapped local-APIC page; the three reads are the
@@ -798,8 +787,8 @@ pub(crate) fn fix_id_mask() {
     APIC_ID_MASK.store(0xff, Ordering::Relaxed);
 }
 
-/// `lapic_setup()` in C: put the local APIC into the flat, software-enabled
-/// state Mach runs it in, with interrupts off across the sequence.
+/// Puts the local APIC into the flat, software-enabled state the kernel runs
+/// it in, with interrupts off across the sequence.
 ///
 /// Runs after [`per_cpu::init()`] of this CPU, which the block's `self_ptr`
 /// records, and before any other CPU sends this one an IPI: it records the
@@ -815,8 +804,8 @@ pub(crate) fn setup() {
     let flags = intr_save();
     let ptr = lapic_ptr();
 
-    // SAFETY: `ptr` is the mapped local-APIC page; the `let _` reads are the
-    // C's `volatile uint32_t dummy` assignments.
+    // SAFETY: `ptr` is the mapped local-APIC page; the discarded reads are
+    // volatile.
     unsafe {
         // The ID register, not CPUID: physical destinations match what is
         // actually set there, as for the IOAPIC routes.
@@ -851,7 +840,7 @@ pub(crate) fn setup() {
     intr_restore(flags);
 }
 
-/// `lapic_eoi()` in C: acknowledge the in-service interrupt.
+/// Acknowledges the in-service interrupt.
 pub(crate) fn eoi() {
     let ptr = lapic_ptr();
     // SAFETY: `ptr` is the mapped local-APIC page.
@@ -874,8 +863,7 @@ pub(crate) unsafe fn ioapic_entry_count(unit: *mut ApicIoUnit) -> u8 {
     entries as u8
 }
 
-/// `hpet_init()` in C: program the HPET for 32-bit periodic counting with
-/// interrupts off.
+/// Programs the HPET for 32-bit periodic counting with interrupts off.
 fn hpet_setup() {
     let Some(hpet) = Hpet::new() else {
         kprint!("HPET not available\n");
@@ -916,22 +904,23 @@ fn counter_period_nsec() -> u32 {
     HPET_PERIOD_NSEC.load(Ordering::Relaxed)
 }
 
-/// `lapic_enable()` in C.
+/// Software-enables the local APIC.
 pub(crate) fn lapic_enable() {
     enable();
 }
 
-/// `lapic_disable()` in C.
+/// Software-disables the local APIC.
 pub(crate) fn lapic_disable() {
     disable();
 }
 
-/// `lapic_setup()` in C.
+/// Puts the local APIC into the state the kernel runs it in.
 pub(crate) fn lapic_setup() {
     setup();
 }
 
-/// `lapic_eoi()` in C.
+/// Acknowledges the in-service interrupt; the interrupt entry calls it from
+/// assembly.
 pub(crate) extern "C" fn lapic_eoi() {
     eoi();
 }

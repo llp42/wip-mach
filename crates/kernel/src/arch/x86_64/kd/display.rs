@@ -76,13 +76,13 @@ pub(crate) fn scrolldn() {
     dclear(0, c_int::from(ONE_LINE / ONE_SPACE), state().kd_attr);
 }
 
-/// `text_put()` in C.
+/// Writes `ch` with the attribute `chattr` at the screen offset `pos`.
 ///
 /// # Safety
 ///
 /// `pos` and `pos + 1` must be in-bounds offsets of the mapped screen
-/// `vid_start` points at, and the caller must run at `SPLKD` so nothing
-/// else writes the screen concurrently.
+/// `vid_start` points at, and the caller must run at `spltty` so nothing else
+/// writes the screen concurrently.
 unsafe fn text_put(pos: c_short, ch: c_char, chattr: c_char) {
     let s = state();
     // SAFETY: `vid_start` is the mapped screen and `pos` is in range.
@@ -92,11 +92,11 @@ unsafe fn text_put(pos: c_short, ch: c_char, chattr: c_char) {
     }
 }
 
-/// `set_cursor()` in C.
+/// Moves the hardware cursor to the screen offset `newpos`.
 ///
 /// # Safety
 ///
-/// The caller must run at `SPLKD`, so the CRTC index/data ports are the
+/// The caller must run at `spltty`, so the CRTC index/data ports are the
 /// driver's alone for the two-write index/value sequence.
 unsafe fn set_cursor(newpos: c_short) {
     let curpos = newpos / ONE_SPACE;
@@ -116,13 +116,13 @@ fn word_count(count: c_int) -> Option<usize> {
     usize::try_from(count).ok()
 }
 
-/// `move_up()` in C.
+/// Moves `count` cells from the screen offset `from` up to `to`.
 ///
 /// # Safety
 ///
 /// `from` and `to` must both be in-bounds offsets of the mapped screen
 /// `vid_start` points at, with `count` words available from each, and the
-/// caller must run at `SPLKD`.
+/// caller must run at `spltty`.
 unsafe fn move_up(from: c_short, to: c_short, count: c_int) {
     let s = state();
     let Some(count) = word_count(count) else {
@@ -138,13 +138,13 @@ unsafe fn move_up(from: c_short, to: c_short, count: c_int) {
     };
 }
 
-/// `move_down()` in C.
+/// Moves `count` cells from the screen offset `from` down to `to`.
 ///
 /// # Safety
 ///
 /// `from` and `to` must both be in-bounds offsets of the mapped screen
 /// `vid_start` points at, with `count` words available from each, and the
-/// caller must run at `SPLKD`.
+/// caller must run at `spltty`.
 unsafe fn move_down(from: c_short, to: c_short, count: c_int) {
     let s = state();
     let Some(count) = word_count(count) else {
@@ -160,13 +160,14 @@ unsafe fn move_down(from: c_short, to: c_short, count: c_int) {
     };
 }
 
-/// `text_clear()` in C.
+/// Clears `count` cells from the screen offset `to`, with the attribute
+/// `chattr`.
 ///
 /// # Safety
 ///
-/// `to` must be an in-bounds offset of the mapped screen `vid_start`
-/// points at, with `count` words available from it, and the caller must
-/// run at `SPLKD`.
+/// `to` must be an in-bounds offset of the mapped screen `vid_start` points
+/// at, with `count` words available from it, and the caller must run at
+/// `spltty`.
 unsafe fn text_clear(to: c_short, count: c_int, chattr: c_char) {
     let s = state();
     let value = (u16::from(chattr as u8) << 8) + u16::from(K_SPACE);
@@ -179,7 +180,7 @@ unsafe fn text_clear(to: c_short, count: c_int, chattr: c_char) {
     };
 }
 
-/// `noop_reset()` in C.
+/// Resets nothing: the text display needs no reset.
 ///
 /// # Safety
 ///
@@ -193,13 +194,13 @@ pub(crate) const fn reset() {
     unsafe { noop_reset() };
 }
 
-/// `phystokv()` of <`i386/i386/vm_param.h`>.
+/// The kernel virtual address of the physical address `addr`.
 const fn phystokv(addr: usize) -> usize {
     const BASE: usize = 0xffff_ffff_8000_0000;
     addr.wrapping_add(BASE)
 }
 
-/// `get_cursor()` in C.
+/// Reads the screen offset of the hardware cursor.
 fn get_cursor() -> c_short {
     let s = state();
     Port::new(s.kd_index_reg as u16).write_u8(C_HIGH);
@@ -210,7 +211,7 @@ fn get_cursor() -> c_short {
     ONE_SPACE * pos as c_short
 }
 
-/// `kd_xga_init()` in C; called once, from `kdinit()`.
+/// Sets up the EGA/VGA text display; called once, from `kdinit()`.
 pub(crate) fn xga_init() {
     {
         let s = state();

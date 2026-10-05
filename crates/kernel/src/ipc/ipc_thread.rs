@@ -5,15 +5,14 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! IPC operations on threads, which `ipc/ipc_thread.c` used to define.
+//! IPC operations on threads.
 
 use crate::kern::thread::Thread;
 use core::ffi::c_void;
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 
-/// What a thread blocked in a message transfer was left with, the
-/// `ith_state` of the C.
+/// What a thread blocked in a message transfer was left with.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IpcWait {
@@ -34,12 +33,12 @@ pub enum IpcWait {
     PortChanged,
 }
 
-/// `ipc_thread_t`: a reference to a thread, opaque to this module.
+/// A reference to a thread, opaque to this module.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadRef(NonNull<c_void>);
 
-/// `struct ipc_thread_queue`: a LIFO stack of threads.
+/// A LIFO stack of threads.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct IpcThreadQueue {
@@ -137,18 +136,18 @@ impl IpcThreadQueue {
         Self { base: None }
     }
 
-    /// `ipc_thread_queue_init()` in C.
+    /// Empties the queue.
     pub const fn init(&mut self) {
         *self = Self::new();
     }
 
-    /// `ipc_thread_queue_first()` in C.
+    /// The thread on top of the queue, when there is one.
     #[must_use]
     pub const fn first(&self) -> Option<ThreadRef> {
         self.base
     }
 
-    /// `ipc_thread_enqueue()` in C.
+    /// Pushes `thread` on the queue.
     ///
     /// # Safety
     ///
@@ -179,7 +178,7 @@ impl IpcThreadQueue {
         self.base = Some(thread);
     }
 
-    /// `ipc_thread_dequeue()` in C.
+    /// Pops the thread on top of the queue.
     ///
     /// # Safety
     ///
@@ -191,7 +190,7 @@ impl IpcThreadQueue {
         Some(first)
     }
 
-    /// `ipc_thread_rmqueue()` in C.
+    /// Removes `thread` from the queue.
     ///
     /// # Safety
     ///
@@ -227,8 +226,7 @@ impl IpcThreadQueue {
         }
     }
 
-    /// `ipc_thread_rmqueue_first()` in C; the caller's macro used to assume
-    /// `thread` was the first.
+    /// Removes `thread`, which must be the one on top of the queue.
     ///
     /// # Safety
     ///
@@ -262,7 +260,7 @@ impl IpcThreadQueue {
     }
 }
 
-/// `ipc_thread_enqueue()` in C.
+/// [`IpcThreadQueue::enqueue`] over raw pointers.
 ///
 /// # Safety
 ///
@@ -275,7 +273,7 @@ pub(crate) unsafe fn ipc_thread_enqueue(
     unsafe { (*queue).enqueue(ThreadRef::new(thread)) };
 }
 
-/// `ipc_thread_dequeue()` in C.
+/// [`IpcThreadQueue::dequeue`] over a raw pointer.
 ///
 /// # Safety
 ///
@@ -288,7 +286,7 @@ pub(crate) unsafe fn ipc_thread_dequeue(
     thread.map_or(ptr::null_mut(), ThreadRef::as_ptr)
 }
 
-/// `ipc_thread_rmqueue()` in C.
+/// [`IpcThreadQueue::rmqueue`] over raw pointers.
 ///
 /// # Safety
 ///
@@ -301,7 +299,7 @@ pub(crate) unsafe fn ipc_thread_rmqueue(
     unsafe { (*queue).rmqueue(ThreadRef::new(thread)) };
 }
 
-/// `ipc_thread_links_init()` in C.
+/// Initializes `thread`'s queue links as unlinked.
 ///
 /// # Safety
 ///
@@ -310,7 +308,7 @@ pub(crate) unsafe fn ipc_thread_links_init(thread: *mut c_void) {
     unsafe { ThreadRef::new(thread).links_init() };
 }
 
-/// `ipc_thread_queue_init()` in C.
+/// [`IpcThreadQueue::init`] over a raw pointer.
 ///
 /// # Safety
 ///
@@ -319,7 +317,7 @@ pub(crate) unsafe fn ipc_thread_queue_init(queue: *mut IpcThreadQueue) {
     unsafe { (*queue).init() };
 }
 
-/// `ipc_thread_queue_first()` in C.
+/// [`IpcThreadQueue::first`] over a raw pointer.
 ///
 /// # Safety
 ///
@@ -331,8 +329,7 @@ pub(crate) unsafe fn ipc_thread_queue_first(
     thread.map_or(ptr::null_mut(), ThreadRef::as_ptr)
 }
 
-/// `ipc_thread_rmqueue_first()` in C, where it was
-/// `ipc_thread_rmqueue_first_macro()`.
+/// [`IpcThreadQueue::rmqueue_first`] over raw pointers.
 ///
 /// # Safety
 ///

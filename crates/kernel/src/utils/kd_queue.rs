@@ -5,23 +5,22 @@
 //   Copyright 1988, 1989 by Olivetti Advanced Technology Center, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The keyboard/mouse event ring buffer, which `i386/i386at/kd_queue.c` used
-//! to define.
+//! The keyboard/mouse event ring buffer.
 
 use crate::mig::time_value::RpcTimeValue;
 use core::ffi::c_int;
 use core::mem::{offset_of, size_of};
 
-/// `KDQSIZE` in <`i386at/kd_queue.h`>.
+/// The slots of a queue.
 const KDQSIZE: usize = 100;
 
-/// `kev_type` of <device/input.h>: an event type.
+/// An event type.
 pub type KevType = u16;
 
-/// `Scancode` of <device/input.h>: a keyboard scan code.
+/// A keyboard scan code.
 pub type Scancode = u8;
 
-/// `struct mouse_motion` of <device/input.h>.
+/// A mouse movement.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -31,7 +30,7 @@ pub struct MouseMotion {
     pub mm_delta_y: i16,
 }
 
-/// The `value` union of `kd_event` in <device/input.h>.
+/// The payload of a [`KdEvent`]: a scan code or a movement.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -42,7 +41,7 @@ union KdValue {
     mmotion: MouseMotion,
 }
 
-/// `kd_event` of <device/input.h>, field for field.
+/// One keyboard or mouse event, with its type and time.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -53,7 +52,8 @@ pub struct KdEvent {
     value: KdValue,
 }
 
-/// `kd_event_queue` of <`i386at/kd_queue.h`>.
+/// A ring of events: `firstfree` is where the next one goes and `firstout`
+/// where the next one leaves.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct KdEventQueue {
@@ -94,7 +94,7 @@ impl KdEvent {
         }
     }
 
-    /// A `MOUSE_MOTION` event carrying `moved`.
+    /// A motion event carrying `moved`.
     #[must_use]
     pub const fn motion(moved: MouseMotion) -> Self {
         Self {
@@ -121,7 +121,7 @@ impl KdEvent {
         }
     }
 
-    /// A `KEYBD_EVENT` carrying scancode `sc`: what `kd_enqsc()` builds.
+    /// A keyboard event carrying the scan code `sc`.
     #[must_use]
     pub const fn scancode(sc: Scancode) -> Self {
         Self {

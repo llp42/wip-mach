@@ -32,7 +32,7 @@ use core::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering;
 
-/// `vm_cache_statistics()` of `vm/vm_user.c`.
+/// Reports the statistics of the memory-object cache.
 ///
 /// # Safety
 ///
@@ -50,7 +50,8 @@ pub unsafe extern "C" fn vm_cache_statistics(
     KERN_SUCCESS
 }
 
-/// `thread_terminate_release()` of kern/thread.c.
+/// Terminates `thread` and releases, in `task`, its port name `thread_name`,
+/// the reply port `reply_port` and the memory at `address..address + size`.
 ///
 /// # Safety
 ///
@@ -80,7 +81,7 @@ pub unsafe extern "C" fn thread_terminate_release(
     }
 }
 
-/// `task_set_name()` of kern/task.c.
+/// Sets `task`'s name, for debugging.
 ///
 /// # Safety
 ///
@@ -99,7 +100,7 @@ pub unsafe extern "C" fn task_set_name(
     }
 }
 
-/// `register_new_task_notification()` of kern/task.c.
+/// Registers `notification` to hear of every new task.
 ///
 /// # Safety
 ///
@@ -129,7 +130,8 @@ pub unsafe extern "C" fn register_new_task_notification(
     }
 }
 
-/// `gsync_wait()` of kern/gsync.c.
+/// Waits on the word at `addr` of `task` while it holds `lo`, and `hi` for a
+/// 64-bit word, for at most `msec` milliseconds when timed.
 ///
 /// # Safety
 ///
@@ -152,7 +154,8 @@ pub unsafe extern "C" fn gsync_wait(
     }
 }
 
-/// `gsync_wake()` of kern/gsync.c.
+/// Wakes the waiters on the word at `addr` of `task`, storing `val` first when
+/// asked.
 ///
 /// # Safety
 ///
@@ -173,7 +176,8 @@ pub unsafe extern "C" fn gsync_wake(
     }
 }
 
-/// `gsync_requeue()` of kern/gsync.c.
+/// Moves the waiters on `src_addr` to `dst_addr`, waking one first when
+/// `wake_one` is set.
 ///
 /// # Safety
 ///
@@ -201,7 +205,7 @@ pub unsafe extern "C" fn gsync_requeue(
     }
 }
 
-/// `vm_wire_all()` of `vm/vm_user.c`.
+/// Wires the present or future mappings of `map`, per `flags`.
 ///
 /// # Safety
 ///
@@ -216,7 +220,8 @@ pub unsafe extern "C" fn vm_wire_all(
     kern_return(unsafe { vm_user::wire_all(port, map, flags) })
 }
 
-/// `vm_object_sync()` in C.
+/// Returns the range of `object`'s dirty pages to its pager when
+/// `should_return` is set, and flushes them when `should_flush` is set.
 ///
 /// # Safety
 ///
@@ -242,7 +247,8 @@ pub unsafe extern "C" fn vm_object_sync(
     ))
 }
 
-/// `vm_msync()` in C.
+/// Synchronizes the range of `map` at `address` with its memory objects, per
+/// `sync_flags`.
 ///
 /// # Safety
 ///
@@ -262,7 +268,8 @@ pub unsafe extern "C" fn vm_msync(
     })
 }
 
-/// `vm_allocate_contiguous()` of `vm/vm_user.c`.
+/// Allocates `size` bytes of physically contiguous memory in `map` between
+/// `pmin` and `pmax`, aligned to `palign`, reporting both addresses.
 ///
 /// # Safety
 ///
@@ -302,7 +309,7 @@ pub unsafe extern "C" fn vm_allocate_contiguous(
     }
 }
 
-/// `task_set_essential()` of kern/task.c.
+/// Sets whether `task` is essential to the system.
 ///
 /// # Safety
 ///
@@ -318,7 +325,7 @@ pub unsafe extern "C" fn task_set_essential(
     }
 }
 
-/// `vm_pages_phys()` of `vm/vm_user.c`.
+/// Reports the physical addresses of the pages of `map` in the range.
 ///
 /// # Safety
 ///
@@ -350,7 +357,7 @@ pub unsafe extern "C" fn vm_pages_phys(
     }
 }
 
-/// `thread_set_name()` of kern/thread.c.
+/// Sets `thread`'s name, for debugging.
 ///
 /// # Safety
 ///
@@ -367,7 +374,7 @@ pub unsafe extern "C" fn thread_set_name(
     }
 }
 
-/// `thread_get_name()` of kern/thread.c.
+/// Reports `thread`'s name.
 ///
 /// # Safety
 ///
@@ -384,7 +391,7 @@ pub unsafe extern "C" fn thread_get_name(
     }
 }
 
-/// `vm_set_size_limit()` of `vm/vm_user.c`.
+/// Sets `map`'s size limits, which only the privileged host may raise.
 ///
 /// # Safety
 ///
@@ -402,7 +409,7 @@ pub unsafe extern "C" fn vm_set_size_limit(
     })
 }
 
-/// `vm_get_size_limit()` in C.
+/// Reports `map`'s size limits.
 ///
 /// # Safety
 ///

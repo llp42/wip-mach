@@ -4,8 +4,7 @@
 //   Copyright (c) 1991 IBM Corporation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The default local descriptor table, which `i386/i386/ldt.c` used to define
-//! and `i386/i386/ldt.h` declares.
+//! The default local descriptor table.
 
 use crate::arch::types::VmOffset;
 use crate::arch::vm_param::VM_MAX_USER_ADDRESS;
@@ -21,19 +20,19 @@ use core::ffi::c_int;
 use core::mem::size_of;
 use core::ptr;
 
-/// `VM_MIN_USER_ADDRESS` of <`i386/vm_param.h`>.
+/// The lowest user address.
 const VM_MIN_USER_ADDRESS: VmOffset = 0;
 
-/// `ldt` of <i386/ldt.h>: the default table every thread starts with.
+/// The default table every thread starts with.
 pub(crate) static mut LDT: DescriptorTable<{ seg::LDTSZ }> =
     DescriptorTable([RealDescriptor::ZERO; seg::LDTSZ]);
 
-/// `EFL_IF` and `EFL_IOPL_USER` of <mach/machine/eflags.h>, the mask
-/// programmed into `MSR_REG_FMASK`.
+/// `EFL_IF` and `EFL_IOPL_USER`: the flags mask programmed into
+/// `MSR_REG_FMASK`.
 const EFL_IF: u64 = 0x0000_0200;
 const EFL_IOPL_USER: u64 = 0x0000_3000;
 
-/// `USER_SEGMENT_SIZEBITS` of `i386/i386/ldt.c`.
+/// The size bits of the user code and data segments.
 const USER_SEGMENT_SIZEBITS: u8 = seg::SZ_64;
 
 /// The `limit` of the LDT's own GDT descriptor.
@@ -55,7 +54,7 @@ pub(crate) unsafe fn entry(index: usize) -> RealDescriptor {
     }
 }
 
-/// The `syscall` enablement of `ldt_fill()`.
+/// Enables the SYSCALL instruction and points it at the kernel's entry.
 fn enable_syscall() {
     if !pmap::cpu_has_feature(pmap::CPU_FEATURE_SEP) {
         kpanic!("ldt_fill", "syscall support is missing on 64 bit")
@@ -73,7 +72,8 @@ fn enable_syscall() {
     pcb::write_msr(pcb::MSR_REG_FMASK, EFL_IF | EFL_IOPL_USER);
 }
 
-/// `ldt_fill()` of `i386/i386/ldt.c`.
+/// Installs `myldt` in `gdt_table` with the user code and data segments,
+/// enables SYSCALL, and loads it.
 ///
 /// # Safety
 ///
@@ -119,7 +119,7 @@ unsafe fn ldt_fill(
     seg::lldt(seg::KERNEL_LDT as u16);
 }
 
-/// `ldt_init()` of <i386/ldt.h>.
+/// Loads the default table on the boot CPU.
 pub(crate) fn ldt_init() {
     // SAFETY: `ldt` is the default table and `gdt` the boot CPU's full one.
     unsafe {
@@ -130,7 +130,7 @@ pub(crate) fn ldt_init() {
     }
 }
 
-/// `ap_ldt_init()` of <i386/ldt.h>.
+/// Loads the default table on the application processor `cpu`.
 pub(crate) fn ap_ldt_init(cpu: c_int) {
     // SAFETY: `mp_desc_init()` stored this CPU's table set before any CPU ran
     // `ap_ldt_init()` on it.

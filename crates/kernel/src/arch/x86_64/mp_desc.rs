@@ -5,8 +5,7 @@
 //   Copyright (c) 1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The interrupt stacks and the per-processor descriptor tables, which
-//! `i386/i386/mp_desc.c` used to define and `i386/i386/mp_desc.h` declares.
+//! The interrupt stacks and the per-processor descriptor tables.
 
 use crate::arch::types::{AtomicVmOffset, VmOffset};
 use crate::arch::x86_64::apic;
@@ -28,43 +27,41 @@ use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// The number of iterations [`simple_lock_pause`] spins, which the C kept in
-/// the global `simple_lock_pause_loop`.
+/// The number of iterations [`simple_lock_pause`] spins.
 const PAUSE_LOOP: u32 = 100;
 
-/// The count [`simple_lock_pause`] adds one to per call, which the C kept in
-/// the global `simple_lock_pause_count`.
+/// The count [`simple_lock_pause`] adds one to per call.
 static PAUSE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// The counter the pause loop increments, which the C kept in a function-local
 /// `static volatile int`.
 static PAUSE_DUMMY: AtomicU32 = AtomicU32::new(0);
 
-/// `INTSTACK_SIZE` of <`i386/vm_param.h>`: `I386_PGBYTES`, one page per
-/// interrupt stack.
+/// The size of one interrupt stack: one page.
 pub(crate) const INTSTACK_SIZE: usize = 4096;
 
 const _: () = assert!(INTSTACK_SIZE == 4096);
 
-/// `IDTSZ` of <i386at/idt.h>.
+/// The number of IDT gates.
 pub(crate) const IDTSZ: usize = 0x100;
 
-/// `GDTSZ` of <i386/gdt.h>: `sel_idx(0x70)`, the eight-byte descriptors up to
-/// the per-CPU segment.
+/// The number of GDT descriptors: the eight-byte descriptors up to the per-CPU
+/// segment.
 pub(crate) const GDTSZ: usize = 14;
 
-/// `LDTSZ` of <i386/ldt.h>.
+/// The number of LDT descriptors.
 const LDTSZ: usize = 4;
 
-/// `struct real_gate` of <i386/seg.h>: the two words followed by the offset
-/// extension and its reserved word.
+/// An IDT gate: the two words followed by the offset extension and its
+/// reserved word.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
 pub struct RealGate {
-    /// `offset_low:16` followed by `selector:16`.
+    /// The 16-bit offset low half followed by the 16-bit selector.
     pub offset_low_selector: u32,
-    /// `word_count:8`, `access:8` and `offset_high:16`.
+    /// The 8-bit word count, the 8-bit access byte and the 16-bit offset high
+    /// half.
     pub word_count_access_offset_high: u32,
     pub offset_ext: u32,
     pub reserved: u32,
@@ -89,8 +86,8 @@ impl RealGate {
     };
 }
 
-/// `struct mp_desc_table` of <`i386/mp_desc.h>`: one CPU's descriptor tables,
-/// which the `gdt`, `idt`, `ktss` and `ldt` modules fill.
+/// One CPU's descriptor tables, which the `gdt`, `idt`, `ktss` and `ldt`
+/// modules fill.
 ///
 /// The sizes, offsets and alignment below were read from the built kernel's
 /// debug information.
@@ -112,57 +109,56 @@ const _: () = {
     assert!(offset_of!(MpDescTable, ktss) == 4240);
 };
 
-/// The interrupt stacks, which `boothdr.S` starts the boot CPU on and the
-/// interrupt entry points switch to.
+/// The interrupt stacks, which the boot CPU starts on and the interrupt entry
+/// points switch to.
 #[repr(C, align(4096))]
 #[allow(missing_docs)]
 pub(crate) struct IntStacks(pub(crate) [u8; MAX_NCPUS * INTSTACK_SIZE]);
 
-/// `solid_intstack` of `i386/i386/mp_desc.c`.
+/// The interrupt stacks of every CPU.
 #[unsafe(export_name = "solid_intstack")]
 pub(crate) static mut SOLID_INTSTACK: IntStacks =
     IntStacks([0; MAX_NCPUS * INTSTACK_SIZE]);
 
-/// `int_stack_base` of <`i386at/model_dep.h>`: one stack bottom per CPU.
+/// One stack bottom per CPU.
 #[unsafe(export_name = "int_stack_base")]
 pub static mut INT_STACK_BASE: [VmOffset; MAX_NCPUS] = [0; MAX_NCPUS];
 
-/// `int_stack_top` of <`i386at/model_dep.h>`: one stack top per CPU.
+/// One stack top per CPU.
 #[unsafe(export_name = "int_stack_top")]
 pub static mut INT_STACK_TOP: [VmOffset; MAX_NCPUS] = [0; MAX_NCPUS];
 
-/// `apboot_addr` of <`i386/model_dep.h>`: the physical page the AP boot code
-/// was copied to.
+/// The physical page the AP boot code was copied to.
 pub static APBOOT_ADDR: AtomicVmOffset = AtomicVmOffset::new(0);
 
-/// `mp_desc_table` of <`i386/mp_desc.h>`: one allocated table set per CPU other
-/// than the boot CPU, which shares the `gdt.c`/`ktss.c` tables.
+/// One allocated table set per CPU other than the boot CPU, which uses the
+/// [`gdt`] and [`ktss`]
+/// tables.
 pub static mut MP_DESC_TABLE: [*mut MpDescTable; MAX_NCPUS] =
     [ptr::null_mut(); MAX_NCPUS];
 
-/// `mp_ktss` of <`i386/mp_desc.h>`: the TSS of each CPU.
+/// The TSS of each CPU.
 pub static mut MP_KTSS: [*mut TaskTss; MAX_NCPUS] =
     [ptr::null_mut(); MAX_NCPUS];
 
-/// `mp_gdt` of <`i386/mp_desc.h>`: the GDT of each CPU.
+/// The GDT of each CPU.
 pub static mut MP_GDT: [*mut RealDescriptor; MAX_NCPUS] =
     [ptr::null_mut(); MAX_NCPUS];
 
-/// `phystokv()` of <`i386/vm_param.h`>.
+/// The kernel virtual address of the physical address `pa`.
 const fn phystokv(pa: VmOffset) -> VmOffset {
     pa.wrapping_add(crate::vm::vm_kern::VM_MIN_KERNEL_ADDRESS)
 }
 
-/// `flush_instr_queue()` of <`i386/proc_reg.h>`: the jump that discards the
-/// instructions the processor prefetched before a control-register change.
+/// The jump that discards the instructions the processor prefetched before a
+/// control-register change.
 pub(crate) fn flush_instr_queue() {
     // SAFETY: the jump changes no machine state, its label is local to the
     // block, and it neither reads nor writes memory.
     unsafe { asm!("jmp 2f", "2:", options(nostack, nomem, preserves_flags)) };
 }
 
-/// Wait a bit for a lock another CPU holds in the opposite order, which
-/// `kern/lock.h` declares.
+/// Waits a bit for a lock another CPU holds in the opposite order.
 pub(crate) fn simple_lock_pause() {
     PAUSE_COUNT.fetch_add(1, Ordering::Relaxed);
     for _ in 0..PAUSE_LOOP {
@@ -173,8 +169,7 @@ pub(crate) fn simple_lock_pause() {
     }
 }
 
-/// The machine-dependent processor control hook, which
-/// `i386/i386/mp_desc.h` declares.
+/// The machine-dependent processor control hook.
 ///
 /// # Errors
 ///
@@ -203,7 +198,7 @@ pub(crate) fn interrupt_processor(cpu: CpuId) {
     smp::pmap_update(cpu);
 }
 
-/// `interrupt_stack_alloc()` of <`i386/mp_desc.h`>.
+/// Assigns each CPU its interrupt stack.
 pub(crate) fn interrupt_stack_alloc() {
     // SAFETY: `interrupt_stack_alloc` runs before any other CPU, and it is
     // the first reader or writer of the stacks.
@@ -220,7 +215,8 @@ pub(crate) fn interrupt_stack_alloc() {
     }
 }
 
-/// `mp_desc_init()` of <`i386/mp_desc.h`>.
+/// Points CPU `mycpu` at its descriptor tables: the static ones for the boot
+/// CPU, a fresh zeroed set for the others.  Returns `mycpu`.
 pub(crate) fn mp_desc_init(mycpu: c_int) -> c_int {
     if mycpu == 0 {
         // SAFETY: the boot CPU uses the tables `gdt.rs` and `ktss.rs` built,
@@ -269,8 +265,8 @@ pub(crate) fn mp_desc_init(mycpu: c_int) -> c_int {
     mycpu
 }
 
-/// `paging_enable()` in `i386/i386/mp_desc.c`.  The C's `CR0_WP` is left off,
-/// as its own comment asked.
+/// Turns paging on for an AP, with PAE and, when the CPU has it, PGE.  Write
+/// protection stays off.
 fn paging_enable() {
     fpu::write_cr4(fpu::read_cr4() | fpu::CR4_PAE);
     fpu::write_cr0(fpu::read_cr0() | fpu::CR0_PG);
@@ -286,7 +282,7 @@ fn ap_stage(cpu: c_int, stage: &CStr) {
     kprint!("AP=({}) {} done\n", cpu as c_uint, CStrArg::from(stage));
 }
 
-/// `cpu_setup()` in `i386/i386/mp_desc.c`, the boot path of an AP.
+/// The boot path of an AP.
 fn cpu_setup(cpu: c_int) -> ! {
     pmap::pmap_set_page_dir();
     ap_stage(cpu, c"pagedir");
@@ -321,12 +317,11 @@ fn cpu_setup(cpu: c_int) -> ! {
         (*slot).cpu_subtype = CPU_SUBTYPE_AT386;
         (*slot).cpu_type = (*crate::kern::machine::slot(CpuId::BOOT)).cpu_type;
     }
-    // SAFETY: `init_fpu` is the real C routine of `i386/i386/fpu.c`.
+    // SAFETY: the FPU init runs once, on this AP.
     unsafe { fpu::init_fpu() };
     apic::lapic_setup();
     apic::lapic_enable();
-    // SAFETY: `cpu_launch_first_thread` is the real C routine of
-    // `kern/startup.c`, and it never returns.
+    // SAFETY: this AP launches its first thread once; the call never returns.
     unsafe { crate::kern::startup::cpu_launch_first_thread(ptr::null_mut()) }
 }
 
@@ -335,7 +330,7 @@ pub(crate) extern "C" fn cpu_ap_main() -> ! {
     cpu_setup(cpu_id().bits() as c_int)
 }
 
-/// `CPU_SUBTYPE_AT386` of <mach/machine.h>.
+/// The CPU subtype of an AT-compatible PC.
 const CPU_SUBTYPE_AT386: c_int = 1;
 
 /// Copy the AP boot code to the page `biosmem_bootstrap()` claimed.
@@ -343,7 +338,7 @@ fn copy_apboot() {
     let begin = ptr::addr_of!(cpuboot::apboot).addr();
     let length = ptr::addr_of!(cpuboot::apbootend).addr() - begin;
     let target = phystokv(APBOOT_ADDR.load(Ordering::Relaxed));
-    // SAFETY: `apboot_addr` names the page `biosmem_bootstrap()` reserved for
+    // SAFETY: `APBOOT_ADDR` names the page `biosmem_bootstrap()` reserved for
     // this copy, `apboot`/`apbootend` bracket the image, and this runs on one
     // CPU before any AP starts.
     unsafe {
@@ -355,7 +350,7 @@ fn copy_apboot() {
     }
 }
 
-/// `start_other_cpus()` of <`i386/mp_desc.h`>.
+/// Copies the AP boot code down and starts the other CPUs on it.
 pub(crate) fn start_other_cpus() {
     let ncpus = kern_smp::ncpus();
     if ncpus == 1 {
@@ -364,8 +359,8 @@ pub(crate) fn start_other_cpus() {
 
     copy_apboot();
 
-    // SAFETY: `splhigh()` is the real asm function <i386/spl.h> declares, and
-    // nothing restores the level because the BSP stays at it afterwards.
+    // SAFETY: raising to `splhigh` has no precondition, and nothing restores
+    // the level because the BSP stays at it afterwards.
     unsafe { spl::splhigh() };
 
     apic::lapic_disable();
@@ -378,7 +373,7 @@ pub(crate) fn start_other_cpus() {
     }
 
     let bsp = apic::apic_id();
-    // `apboot_addr` is the physical page `copy_apboot` filled.
+    // `APBOOT_ADDR` is the physical page `copy_apboot` filled.
     smp::startup_cpus(bsp, APBOOT_ADDR.load(Ordering::Relaxed) as c_ulong);
 
     for cpu in CpuId::online().skip(1) {

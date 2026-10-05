@@ -24,8 +24,7 @@
 //   the rights to redistribute these changes.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The IDT init table, which `i386/i386/idt_inittab.S` and
-//! `x86_64/idt_inittab.S` used to define.
+//! The IDT init table: the gate of each processor exception.
 
 use crate::arch::x86_64::idt::IdtInitEntry;
 use crate::arch::x86_64::locore;
@@ -37,9 +36,8 @@ use core::ffi::c_ushort;
 /// terminator entry.
 const IDT_INITTAB_LEN: usize = 32;
 
-// The gate type of `EXCEPTION`/`EXCEP_USR`/`EXCEP_ERR` in <i386/seg.h>.
-// The C field is an `unsigned short`, and `From` is not a `const fn`, so
-// the access byte is widened here.
+// The gate types.  The access byte is widened here because the field is 16
+// bits and `From` is not a `const fn`.
 /// `ACC_PL_K | ACC_TRAP_GATE`, the kernel trap gate.
 const EXCEPTION: c_ushort = (seg::ACC_PL_K | seg::ACC_TRAP_GATE) as c_ushort;
 /// `ACC_PL_U | ACC_TRAP_GATE`, the user-accessible trap gate.
@@ -124,8 +122,7 @@ error_stub! {
     0x0c => t_stack_fault,
 }
 
-/// The `EXCEP_SPC(0x08, ...)` entry: it points at `t_dbl_fault` of
-/// `x86_64/locore.S` with IST 1.
+/// The double-fault entry: it points at `t_dbl_fault` with IST 1.
 const DBL_FAULT: IdtInitEntry =
     IdtInitEntry::with_ist(locore::t_dbl_fault, 0x08, EXCEPTION, 1);
 

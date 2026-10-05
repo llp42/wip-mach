@@ -8,25 +8,21 @@
 //   Laboratory at the University of Utah (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Page geometry, from `i386/include/mach/i386/vm_param.h`, the header the
-//! 64-bit kernel installs as `<machine/vm_param.h>`.
+//! Page geometry of the 64-bit kernel interface.
 
 use crate::arch::types::{VmOffset, VmSize};
 
-/// `PAGE_SHIFT` of <`machine/vm_param.h>`: `I386_PGSHIFT`, the number of bits to
-/// shift for pages.
+/// The number of bits to shift for pages.
 pub const PAGE_SHIFT: u32 = 12;
 
-/// `PAGE_SIZE`: one page, `1 << PAGE_SHIFT` in the C.
+/// `PAGE_SIZE`: one page, `1 << PAGE_SHIFT`.
 pub const PAGE_SIZE: VmSize = 1 << PAGE_SHIFT;
 
-/// `PAGE_MASK`: the in-page offset bits, `PAGE_SIZE - 1` in the C.
+/// `PAGE_MASK`: the in-page offset bits, `PAGE_SIZE - 1`.
 pub const PAGE_MASK: VmSize = PAGE_SIZE - 1;
 
-/// `KERNEL_STACK_SIZE` of <`machine/vm_param.h>`: the size and alignment of one
-/// kernel stack, `1*I386_PGBYTES` in the C.
+/// The size and alignment of one kernel stack: one page.
 pub const KERNEL_STACK_SIZE: VmSize = PAGE_SIZE;
 
-/// `VM_MAX_USER_ADDRESS` of <`machine/vm_param.h>`: the top of a user map, half
-/// the address space.
+/// The top of a user map, half the address space.
 pub const VM_MAX_USER_ADDRESS: VmOffset = 0x8000_0000_0000;

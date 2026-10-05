@@ -5,8 +5,7 @@
 //   Copyright 1988, 1989 by Intel Corporation, Santa Clara, California.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The 8254 timer, which `i386/i386/pit.c` used to define and
-//! `i386/i386/pit.h` declares.
+//! The 8254 timer.
 
 use crate::arch::x86_64::per_cpu::cpu_id;
 use crate::arch::x86_64::pio::Port;
@@ -14,15 +13,15 @@ use crate::arch::x86_64::spl;
 use crate::kern::smp::CpuId;
 use core::ffi::c_int;
 
-/// The PIT control port, `PITCTL_PORT` of <i386/pit.h>.
+/// The PIT control port.
 const PITCTL_PORT: Port = Port::new(0x43);
-/// Counter 0's data port, `PITCTR0_PORT` of <i386/pit.h>.
+/// Counter 0's data port.
 const PITCTR0_PORT: Port = Port::new(0x40);
-/// Counter 2's data port, `PITCTR2_PORT` of <i386/pit.h>.
+/// Counter 2's data port.
 const PITCTR2_PORT: Port = Port::new(0x42);
-/// The PIT auxiliary port, `PITAUX_PORT` of <i386/pit.h>.
+/// The PIT auxiliary port.
 const PITAUX_PORT: Port = Port::new(0x61);
-/// The port read for a tiny I/O delay, `POST_PORT` of <i386/pit.h>.
+/// The port read for a tiny I/O delay.
 const POST_PORT: Port = Port::new(0x80);
 
 /// Counter 2's gate input in the auxiliary port, `PITAUX_GATE2`.
@@ -51,10 +50,10 @@ const PIT_ONESHOTMODE: u8 = 0x02;
 /// `PIT_C0|PIT_SQUAREMODE|PIT_READMODE`.
 const PIT0_MODE: u8 = PIT_C0 | PIT_SQUAREMODE | PIT_READMODE;
 
-/// The timer input clock, `CLKNUM` of <i386/pit.h>, in ticks per second.
+/// The timer input clock, in ticks per second.
 const CLKNUM: u32 = 1_193_182;
 
-/// The longest wait one counter load covers, `MAX_PIT_USEC` of <i386/pit.h>.
+/// The longest wait one counter load covers.
 const MAX_PIT_USEC: u32 = 54924;
 
 /// Program counter 2 for a one-shot wait of `usec` microseconds.
@@ -82,7 +81,7 @@ fn sleep() {
     while PITAUX_PORT.read_u8() & PITAUX_VAL == 0 {}
 }
 
-/// Busy-wait for `usec` microseconds, the core of `pit_udelay()`.
+/// Busy-waits for `usec` microseconds.
 pub(crate) fn udelay(mut usec: u32) {
     while usec > MAX_PIT_USEC {
         prepare_sleep(MAX_PIT_USEC);
@@ -104,8 +103,7 @@ pub(crate) fn clkstart() {
         return;
     }
 
-    // SAFETY: `sploff()` is the function <i386/spl.h> declares and
-    // `src/arch/x86_64/spl.rs` defines.
+    // SAFETY: disabling interrupts has no precondition.
     let s = unsafe { spl::sploff() };
 
     PITCTL_PORT.write_u8(PIT0_MODE);

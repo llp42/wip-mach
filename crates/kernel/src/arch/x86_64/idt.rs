@@ -4,8 +4,7 @@
 //   Laboratory at the University of Utah (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The interrupt descriptor table, which `i386/i386/idt.c` used to define and
-//! `i386/i386at/idt.h` declares.
+//! The interrupt descriptor table.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::idt_inittab::IDT_INITTAB;
@@ -15,11 +14,11 @@ use core::ffi::{c_int, c_ulong, c_ushort};
 use core::mem::size_of;
 use core::ptr;
 
-/// `idt` of <i386at/idt-gen.h>: the boot CPU's table, which the other CPUs
-/// get copies of through `mp_desc_table`.
+/// The boot CPU's table, which the other CPUs get copies of through
+/// `MP_DESC_TABLE`.
 pub(crate) static mut IDT: [RealGate; IDTSZ] = [RealGate::ZERO; IDTSZ];
 
-/// `struct idt_init_entry` of `i386/i386/idt.c`.
+/// One entry of the table [`idt_fill`] installs.
 ///
 /// The entrypoint is the Rust spelling of the C's `unsigned long`: an
 /// `Option<unsafe extern "C" fn()>` is pointer-sized, and the null
@@ -48,8 +47,7 @@ const _: () = {
 };
 
 impl IdtInitEntry {
-    /// The ordinary `IDT_ENTRY` line of `i386/i386/idt_inittab.S` and
-    /// `x86_64/idt_inittab.S`.
+    /// An ordinary gate.
     pub(crate) const fn new(
         entrypoint: unsafe extern "C" fn(),
         vector: c_ushort,
@@ -64,8 +62,7 @@ impl IdtInitEntry {
         }
     }
 
-    /// The `EXCEP_SPC(0x08, t_dbl_fault, 1)` line of
-    /// `x86_64/idt_inittab.S`, the one gate with an IST.
+    /// The double-fault gate, the one gate with an IST.
     pub(crate) const fn with_ist(
         entrypoint: unsafe extern "C" fn(),
         vector: c_ushort,
@@ -93,13 +90,12 @@ impl IdtInitEntry {
     }
 }
 
-/// The `limit` of the pseudo-descriptor `idt_fill()` loads, whose type in the
-/// C `struct pseudo_descriptor` is 16 bits.
+/// The `limit` of the pseudo-descriptor [`idt_fill`] loads, a 16-bit field.
 const IDT_LIMIT: usize = IDTSZ * size_of::<RealGate>() - 1;
 
 const _: () = assert!(IDT_LIMIT <= u16::MAX as usize);
 
-/// `idt_fill()` of `i386/i386/idt.c`.
+/// Fills `myidt` from the init table and loads it.
 ///
 /// # Safety
 ///
@@ -146,13 +142,13 @@ unsafe fn idt_fill(myidt: *mut RealGate) {
     seg::lidt(&pdesc);
 }
 
-/// `idt_init()` of <i386at/idt.h>.
+/// Loads the boot CPU's table.
 pub(crate) fn idt_init() {
     // SAFETY: `idt` is the boot CPU's table, valid for `IDTSZ` gates.
     unsafe { idt_fill(ptr::addr_of_mut!(IDT).cast::<RealGate>()) };
 }
 
-/// `ap_idt_init()` of <i386at/idt.h>.
+/// Loads the table of the application processor `cpu`.
 pub(crate) fn ap_idt_init(cpu: c_int) {
     // SAFETY: `mp_desc_init()` stored this CPU's table before any CPU ran
     // `ap_idt_init()` on it.

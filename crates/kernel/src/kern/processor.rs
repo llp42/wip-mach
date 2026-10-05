@@ -7,8 +7,7 @@
 //   Copyright (c) 1993-1988 Carnegie Mellon University
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Processors and processor sets, which `kern/processor.h` declares and
-//! `kern/processor.c` used to define.
+//! Processors and processor sets.
 
 use crate::arch::x86_64::mp_desc::cpu_control;
 use crate::arch::x86_64::{per_cpu, smp};
@@ -87,7 +86,7 @@ impl AtomicProcessorState {
     }
 }
 
-/// `struct processor` of <kern/processor.h>.
+/// A processor: one CPU's scheduling state.
 ///
 /// The atomic fields are the ones code reads without the lock guarding their
 /// writes, from another CPU or at interrupt level. `state`, `next_thread`
@@ -341,7 +340,7 @@ pub fn iter() -> impl Iterator<Item = ProcessorRef> {
         .map(|slot| unsafe { ProcessorRef::from_static(slot.0.get()) })
 }
 
-/// `struct processor_set` of <kern/processor.h>.
+/// A processor set: the processors, tasks and threads that schedule together.
 pub struct ProcessorSet {
     /// `runq`: the run queue the set's unbound threads wait on.
     pub runq: RunQueue,
@@ -389,8 +388,7 @@ pub struct ProcessorSet {
     /// `quantum_adj_index`: the round-robin slot staggering the processors'
     /// quantum adjustments.
     pub quantum_adj_index: c_int,
-    /// `quantum_adj_lock`: protects `quantum_adj_index`; the C `struct
-    /// slock_irq` wraps one `struct slock`, so it is a [`SimpleLock`] here.
+    /// Protects `quantum_adj_index`.
     pub quantum_adj_lock: SimpleLock,
     /// `machine_quantum`: the quantum for each processor count the set may
     /// run.
@@ -430,25 +428,23 @@ pub type ProcessorList = SimpleQueue<'static, ProcessorPsetAdapter>;
 /// Every processor set.
 pub type PsetList = SimpleQueue<'static, ProcessorSetAllAdapter>;
 
-/// `default_pset` of <kern/processor.h>: the set every task starts in.
+/// The set every task starts in.
 static mut DEFAULT_PSET: ProcessorSet = ProcessorSet::zeroed();
 
-/// `all_psets` of <kern/processor.h>: the chain of every processor set.
+/// The chain of every processor set.
 static ALL_PSETS: SyncCell<PsetList> =
     SyncCell(UnsafeCell::new(PsetList::new()));
 
-/// `all_psets_count` of <kern/processor.h>: how many sets `all_psets` holds,
-/// under [`ALL_PSETS_LOCK`].
+/// How many sets [`ALL_PSETS`] holds, under [`ALL_PSETS_LOCK`].
 static ALL_PSETS_COUNT: SyncCell<u32> = SyncCell(UnsafeCell::new(0));
 
-/// `all_psets_lock` of <kern/processor.h>.
+/// Serializes the set list.
 static ALL_PSETS_LOCK: SimpleLock = SimpleLock::new();
 
-/// `pset_cache` of kern/processor.c: the `struct processor_set` slab cache.
+/// The slab cache of [`ProcessorSet`] records.
 static mut PSET_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `slave_pset` of <kern/processor.h>: the set of every CPU but the boot
-/// CPU.
+/// The set of every CPU but the boot CPU.
 static SLAVE_PSET: AtomicPtr<ProcessorSet> = AtomicPtr::new(ptr::null_mut());
 
 /// The live `default_pset` static.
@@ -501,13 +497,13 @@ pub(crate) fn all_psets_lock() -> &'static SimpleLock {
     &ALL_PSETS_LOCK
 }
 
-/// `master_processor` of <`kern/processor.h`>: the boot CPU's processor
-/// record.
+/// The boot CPU's processor record.
 pub(crate) fn boot_processor() -> *mut Processor {
     processor_at(CpuId::BOOT).as_ptr()
 }
 
-/// The live `slave_pset`, or null before `pset_sys_init()` sets it.
+/// The live set of every CPU but the boot CPU, or null before [`system_init`]
+/// sets it.
 pub(crate) fn slave_pset() -> *mut ProcessorSet {
     SLAVE_PSET.load(Ordering::Relaxed)
 }
@@ -517,8 +513,7 @@ fn pset_cache() -> *mut KmemCache {
     ptr::addr_of_mut!(PSET_CACHE)
 }
 
-/// Put an unlocked simple lock in `storage`, as the C `simple_lock_init()`
-/// did.
+/// Puts an unlocked simple lock in `storage`.
 ///
 /// # Safety
 ///
@@ -528,8 +523,7 @@ const unsafe fn init_lock(storage: *mut SimpleLock) {
     unsafe { storage.write(SimpleLock::new()) };
 }
 
-/// Self-link the `NRQS` run-queue heads of `runq`, as the C `queue_init()`
-/// loop did.
+/// Self-links the `NRQS` run-queue heads of `runq`.
 ///
 /// # Safety
 ///
@@ -550,7 +544,7 @@ impl Processor {
     /// # Safety
     ///
     /// `pr` must point at writable storage for a [`Processor`] that no other
-    /// thread can see yet; `pset_sys_bootstrap()` is the only caller.
+    /// thread can see yet; [`bootstrap`] is the only caller.
     pub unsafe fn init(pr: *mut Self, cpu: CpuId) {
         unsafe {
             init_runq(&raw mut (*pr).runq);
@@ -573,7 +567,8 @@ impl Processor {
         }
     }
 
-    /// `processor_start()` of kern/processor.c.
+    /// Starts the processor's CPU; starting a CPU at run time is not
+    /// supported.
     ///
     /// # Errors
     ///
@@ -583,7 +578,7 @@ impl Processor {
         Err(Error::Failure)
     }
 
-    /// `processor_exit()` of kern/processor.c.
+    /// Takes the processor's CPU offline.
     ///
     /// # Errors
     ///
@@ -595,7 +590,7 @@ impl Processor {
         unsafe { machine::shutdown(ptr::from_mut(self)) }
     }
 
-    /// `processor_control()` of kern/processor.c.
+    /// Hands `info` to the processor's machine-dependent control.
     ///
     /// # Errors
     ///
@@ -613,7 +608,7 @@ impl Processor {
             .map_err(Error::from)
     }
 
-    /// `processor_get_assignment()` of kern/processor.c.
+    /// The set the processor is assigned to.
     ///
     /// # Errors
     ///
@@ -731,9 +726,9 @@ impl ProcessorSet {
     ///
     /// # Safety
     ///
-    /// `pset` must point at writable storage for a full `struct processor_set`
-    /// that no other thread can see yet; `pset_sys_bootstrap()` and
-    /// `processor_set_create()` are the callers.
+    /// `pset` must point at writable storage for a full [`ProcessorSet`] that
+    /// no other thread can see yet; [`bootstrap`] and [`create`] are the
+    /// callers.
     pub unsafe fn init(pset: *mut Self) {
         unsafe {
             init_runq(&raw mut (*pset).runq);
@@ -755,8 +750,8 @@ impl ProcessorSet {
             (*pset).pset_name_self = ptr::null_mut();
             (*pset).max_priority = BASEPRI_SYSTEM;
             (*pset).policies = POLICY_TIMESHARE;
-            // The quantum is set by `sched_init()` before
-            // `pset_sys_bootstrap()` calls this init.
+            // The scheduler set the quantum before `bootstrap` calls this
+            // init.
             let quantum_min = min_quantum();
             (*pset).set_quantum = quantum_min;
             (*pset).quantum_adj_index = 0;
@@ -768,14 +763,14 @@ impl ProcessorSet {
         }
     }
 
-    /// `pset_reference()` of kern/processor.c.
+    /// Takes a reference on the set.
     pub fn reference(&mut self) {
         self.ref_lock.lock();
         self.ref_count = self.ref_count.wrapping_add(1);
         self.ref_lock.unlock();
     }
 
-    /// `pset_deallocate()` of kern/processor.c.
+    /// Drops a reference on the set, freeing it on the last one.
     pub fn deallocate(&mut self) {
         self.ref_lock.lock();
         self.ref_count = self.ref_count.wrapping_sub(1);
@@ -828,7 +823,7 @@ impl ProcessorSet {
         unsafe { (*pset_cache()).free(NonNull::from_mut(self).cast::<u8>()) };
     }
 
-    /// `pset_add_thread()` of kern/processor.c.
+    /// Adds `thread` to the set.
     ///
     /// # Safety
     ///
@@ -844,7 +839,7 @@ impl ProcessorSet {
         }
     }
 
-    /// `pset_remove_thread()` of kern/processor.c.
+    /// Removes `thread` from the set.
     ///
     /// # Safety
     ///
@@ -860,7 +855,7 @@ impl ProcessorSet {
         }
     }
 
-    /// `pset_add_task()` of kern/processor.c.
+    /// Adds `task` to the set.
     ///
     /// # Safety
     ///
@@ -875,7 +870,7 @@ impl ProcessorSet {
         }
     }
 
-    /// `pset_remove_task()` of kern/processor.c.
+    /// Removes `task` from the set.
     ///
     /// # Safety
     ///
@@ -894,13 +889,14 @@ impl ProcessorSet {
         }
     }
 
-    /// `quantum_set()` of kern/processor.c.
+    /// Sets the set's quantum for each possible number of runnable threads,
+    /// from its processor count.
     pub fn quantum_set(&mut self) {
         let ncpus = self.processor_count;
         let runq_count = self.runq.count.load(Ordering::Relaxed);
 
-        // The quantum `sched_init()` stored before `pset_sys_bootstrap()`
-        // built this set.
+        // The quantum the scheduler stored before `bootstrap` built this
+        // set.
         let quantum_min = min_quantum();
 
         for i in 1..=ncpus {
@@ -929,7 +925,7 @@ impl ProcessorSet {
         }
     }
 
-    /// `pset_add_processor()` of kern/processor.c.
+    /// Adds `processor` to the set.
     ///
     /// # Safety
     ///
@@ -949,7 +945,7 @@ impl ProcessorSet {
         self.quantum_set();
     }
 
-    /// `pset_remove_processor()` of kern/processor.c.
+    /// Removes `processor` from the set.
     ///
     /// # Safety
     ///
@@ -981,7 +977,7 @@ impl ProcessorSet {
         self.quantum_set();
     }
 
-    /// `processor_set_policy_enable()` of kern/processor.c.
+    /// Enables `policy` for the set.
     ///
     /// # Errors
     ///
@@ -999,7 +995,8 @@ impl ProcessorSet {
         Ok(())
     }
 
-    /// `processor_set_policy_disable()` of kern/processor.c.
+    /// Disables `policy` for the set, moving its threads that use it back to
+    /// timesharing when `change_threads` is set.
     ///
     /// # Errors
     ///
@@ -1045,7 +1042,8 @@ impl ProcessorSet {
         Ok(())
     }
 
-    /// `processor_set_max_priority()` of kern/processor.c.
+    /// Sets the set's maximum priority, lowering its threads to it when
+    /// `change_threads` is set.
     ///
     /// # Errors
     ///
@@ -1091,7 +1089,7 @@ impl ProcessorSet {
 }
 
 impl Thread {
-    /// `thread_change_psets()` of kern/processor.c.
+    /// Moves `thread` from `old_pset` to `new_pset`.
     ///
     /// # Safety
     ///
@@ -1127,8 +1125,7 @@ enum Thing {
 }
 
 impl ProcessorSet {
-    /// `processor_set_destroy()` of kern/processor.c: reassign everything in
-    /// the set and release it.
+    /// Reassigns everything in the set and releases it.
     ///
     /// # Errors
     ///
@@ -1198,8 +1195,8 @@ impl ProcessorSet {
         Ok(())
     }
 
-    /// `processor_set_things()` of kern/processor.c: the task or thread ports
-    /// of every member of the set, in the array `kalloc()` built.
+    /// The task or thread ports of every member of the set, in the array
+    /// `kalloc()` built.
     ///
     /// # Safety
     ///
@@ -1392,22 +1389,20 @@ impl ProcessorSet {
     }
 }
 
-/// `pset_sys_bootstrap()` of kern/processor.c: build the default set and the
-/// processor records so the scheduler can run.
+/// Builds the default set and the processor records so the scheduler can run.
 ///
 /// # Safety
 ///
-/// `kern/sched_prim.c`'s `sched_init()` is the only caller, and it runs during
-/// the single-threaded boot before any other CPU starts.
+/// The scheduler's init is the only caller, and it runs during the
+/// single-threaded boot before any other CPU starts.
 pub(crate) unsafe fn bootstrap() {
     // SAFETY: single-threaded boot; this is the first initialization of the
     // default set, the per-CPU records and the global list.
     unsafe {
         ProcessorSet::init(default_pset());
-        // As in Mach's `pset_sys_bootstrap()`: the default set counts as
-        // populated before `cpu_up()` adds the boot CPU, or `thread_create()`
-        // gives the startup thread an extra suspend count that its one
-        // `thread_resume()` never drops.
+        // The default set counts as populated before `cpu_up()` adds the boot
+        // CPU, or `thread_create()` gives the startup thread an extra suspend
+        // count that its one `thread_resume()` never drops.
         (*default_pset()).empty = 0;
 
         for cpu in CpuId::all() {
@@ -1421,7 +1416,7 @@ pub(crate) unsafe fn bootstrap() {
     }
 }
 
-/// `processor_set_create()` of kern/processor.c: build a fresh set.
+/// Builds a fresh set.
 ///
 /// # Safety
 ///
@@ -1434,8 +1429,8 @@ pub(crate) unsafe fn create(
         return Err(Error::InvalidArgument);
     }
 
-    // SAFETY: the cache was initialized by `pset_sys_init()`, and the object
-    // is unshared until it is linked below.
+    // SAFETY: the cache was initialized by `system_init`, and the object is
+    // unshared until it is linked below.
     let Some(mem) = (unsafe { (*pset_cache()).alloc() }) else {
         return Err(Error::ResourceShortage);
     };
@@ -1468,7 +1463,7 @@ pub(crate) unsafe fn create(
 ///
 /// # Safety
 ///
-/// `kern/startup.c` is the only caller; it runs after `bootstrap()` and before
+/// The boot path is the only caller; it runs after `bootstrap()` and before
 /// any other CPU is started.
 pub(crate) unsafe fn system_init() {
     // SAFETY: `pset_cache` is the cache storage this boot step owns, and the
@@ -1505,7 +1500,7 @@ pub(crate) unsafe fn system_init() {
     }
 }
 
-/// `processor_set_tasks()` of kern/processor.c.
+/// Send rights for the tasks in the set.
 ///
 /// # Safety
 ///
@@ -1519,7 +1514,7 @@ pub(crate) unsafe fn tasks(
     unsafe { (*pset.as_ptr()).things(Thing::Task) }
 }
 
-/// `processor_set_threads()` of kern/processor.c.
+/// Send rights for the threads in the set.
 ///
 /// # Safety
 ///

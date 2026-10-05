@@ -7,8 +7,7 @@
 //   Copyright (c) 2013 Free Software Foundation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The quantum recalculation `kern/priority.c` used to define for
-//! <kern/priority.h>.
+//! The quantum recalculation.
 
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
@@ -23,11 +22,11 @@ use crate::kern::thread::Thread;
 use core::ffi::{c_int, c_uint};
 use core::sync::atomic::Ordering;
 
-/// `USAGE_THRESHOLD` in kern/priority.c: the change that moves a thread
-/// between run queues.
+/// The change that moves a thread between run queues.
 const USAGE_THRESHOLD: c_uint = 1 << (PRI_SHIFT + 2 + SCHED_SHIFT);
 
-/// `thread_quantum_update()` of kern/priority.c.
+/// Charges `nticks` to `thread`'s quantum and usage, and requests a reschedule
+/// when the quantum runs out.
 ///
 /// # Safety
 ///

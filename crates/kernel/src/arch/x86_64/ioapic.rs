@@ -3,9 +3,7 @@
 //   Copyright (C) 2019 Free Software Foundation, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The IOAPIC configuration and the interrupt vectors, which
-//! `i386/i386at/ioapic.c` used to define and `i386/i386/apic.h` and
-//! `i386/i386at/idt.h` declare.
+//! The I/O APIC configuration and the interrupt vectors.
 
 use crate::arch::x86_64::apic;
 use crate::arch::x86_64::kd::keyboard::kdintr;
@@ -23,12 +21,10 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use lock::IrqSpinLock;
 
-/// `interrupt_handler_fn` of <i386/ipl.h>: one `ivect` entry, or [`None`]
-/// where C leaves the vector unset.
+/// One [`IVECT`] entry, or [`None`] where the vector is unset.
 pub type InterruptHandler = Option<unsafe extern "C" fn(c_int)>;
 
-/// `struct irqinfo` of <i386/apic.h>: one line's programmed vector and
-/// trigger mode.
+/// One line's programmed vector and trigger mode.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -44,7 +40,7 @@ const _: () = {
     assert!(offset_of!(IrqInfo, vector) == 1);
 };
 
-/// `struct ioapic_route_entry` of <i386/apic.h>: one redirection entry.
+/// One I/O APIC redirection entry.
 ///
 /// GCC packs the C bitfields least-significant first on x86, and Rust cannot
 /// express them, so each accessor below masks the same bit of the raw words.
@@ -114,59 +110,59 @@ impl RouteEntry {
     }
 }
 
-/// `IOAPIC_INT_BASE` of <i386at/idt.h>: the first vector the IOAPIC raises.
+/// The first vector the I/O APIC raises.
 const IOAPIC_INT_BASE: u32 = 0x30;
 
-/// `LAPIC_TIMER_PERIODIC` of <i386/apic.h>: reload the LAPIC timer.
+/// The LAPIC timer mode that reloads the count.
 const LAPIC_TIMER_PERIODIC: u32 = 0x20000;
-/// `LAPIC_TIMER_DIVIDE_2` of <i386/apic.h>.
+/// The LAPIC timer divider of two.
 const LAPIC_TIMER_DIVIDE_2: u32 = 0;
 
-/// `IOAPIC_FIXED` of <i386/apic.h>: the fixed delivery mode.
+/// The fixed delivery mode.
 const IOAPIC_FIXED: u32 = 0;
-/// `IOAPIC_PHYSICAL` of <i386/apic.h>: physical destination mode.
+/// The physical destination mode.
 const IOAPIC_PHYSICAL: u32 = 0;
-/// `IOAPIC_ACTIVE_HIGH` of <i386/apic.h>.
+/// The active-high pin polarity.
 const IOAPIC_ACTIVE_HIGH: u32 = 0;
-/// `IOAPIC_ACTIVE_LOW` of <i386/apic.h>.
+/// The active-low pin polarity.
 const IOAPIC_ACTIVE_LOW: u32 = 1;
-/// `IOAPIC_EDGE_TRIGGERED` of <i386/apic.h>.
+/// The edge trigger mode.
 const IOAPIC_EDGE_TRIGGERED: u32 = 0;
-/// `IOAPIC_LEVEL_TRIGGERED` of <i386/apic.h>.
+/// The level trigger mode.
 const IOAPIC_LEVEL_TRIGGERED: u32 = 1;
-/// `IOAPIC_MASK_ENABLED` of <i386/apic.h>.
+/// The redirection mask bit of an enabled line.
 const IOAPIC_MASK_ENABLED: u32 = 0;
-/// `IOAPIC_MASK_DISABLED` of <i386/apic.h>.
+/// The redirection mask bit of a disabled line.
 const IOAPIC_MASK_DISABLED: u32 = 1;
 
-/// `APIC_IRQ_OVERRIDE_POLARITY_MASK` of <i386/apic.h>.
+/// The polarity bits of a MADT override's flags.
 const APIC_IRQ_OVERRIDE_POLARITY_MASK: u16 = 1;
-/// `APIC_IRQ_OVERRIDE_ACTIVE_LOW` of <i386/apic.h>.
+/// The MADT override polarity of an active-low line.
 const APIC_IRQ_OVERRIDE_ACTIVE_LOW: u16 = 2;
-/// `APIC_IRQ_OVERRIDE_TRIGGER_MASK` of <i386/apic.h>.
+/// The trigger bits of a MADT override's flags.
 const APIC_IRQ_OVERRIDE_TRIGGER_MASK: u16 = 4;
-/// `APIC_IRQ_OVERRIDE_LEVEL_TRIGGERED` of <i386/apic.h>.
+/// The MADT override trigger of a level-triggered line.
 const APIC_IRQ_OVERRIDE_LEVEL_TRIGGERED: u16 = 8;
 
-/// `ACPI_PICMODE_APIC` of <`device/irq_status.h`>.
+/// The interrupt-controller mode of the APIC.
 const ACPI_PICMODE_APIC: c_int = 1;
-/// `PIC_SLAVE_OCW` of the removed <i386/pic.h>: the 8259 slave OCW port.
+/// The 8259 slave OCW port.
 const PIC_SLAVE_OCW: u16 = 0xa1;
-/// `PIC_MASTER_OCW` of the removed <i386/pic.h>: the 8259 master OCW port.
+/// The 8259 master OCW port.
 const PIC_MASTER_OCW: u16 = 0x21;
-/// `PICS_MASK` of the removed <i386/pic.h>: every slave line masked.
+/// Every slave line masked.
 const PICS_MASK: u8 = 0xff;
-/// `PICM_MASK` of the removed <i386/pic.h>: every master line masked.
+/// Every master line masked.
 const PICM_MASK: u8 = 0xff;
-/// `SPLHI` of <i386/ipl.h>.
+/// The highest interrupt level.
 const SPLHI: c_int = 7;
 
-/// `ivect` of `i386/i386at/ioapic.c`, which <i386/ipl.h> declares.  The
-/// interrupt stubs index it directly, so this layout is the ABI.
+/// The handler of each interrupt line.  The interrupt stubs index it directly,
+/// so this layout is the ABI.
 pub static mut IVECT: [InterruptHandler; NINTR] = {
     let mut table: [InterruptHandler; NINTR] = [Some(intnull); NINTR];
-    // SAFETY: The C cast `hardclock` to `interrupt_handler_fn` for this slot;
-    // the trampoline passes it the one `int` its own entry point ignores.
+    // SAFETY: the clock's entry is stored under the handler type; the
+    // trampoline passes it the one `int` its own entry point ignores.
     table[0] = Some(unsafe {
         core::mem::transmute::<
             unsafe extern "C" fn(
@@ -183,12 +179,11 @@ pub static mut IVECT: [InterruptHandler; NINTR] = {
     table
 };
 
-/// `iunit` of `i386/i386at/ioapic.c`, which <i386/ipl.h> and
-/// [`interrupt`](crate::arch::x86_64::interrupt::interrupt) index.
+/// The unit each line's handler is called with, which
+/// [`interrupt`](crate::arch::x86_64::interrupt::interrupt) indexes.
 pub static mut IUNIT: [c_int; NINTR] = iunit_image();
 
-/// The `iunit` initializer of `i386/i386at/ioapic.c`: each line maps to
-/// itself.
+/// The initial [`IUNIT`]: each line maps to itself.
 const fn iunit_image() -> [c_int; NINTR] {
     let mut table = [0; NINTR];
     let mut irq = 0;
@@ -200,57 +195,53 @@ const fn iunit_image() -> [c_int; NINTR] {
     table
 }
 
-/// `curr_ipl` of `i386/i386at/ioapic.c`, which <i386/ipl.h> declares and
-/// `src/arch/x86_64/spl.rs` reads and writes.
+/// The current interrupt level of each CPU, which
+/// [`spl`] reads and writes.
 pub static mut CURR_IPL: [c_int; MAX_NCPUS] = [0; MAX_NCPUS];
 
-/// `spl_init` of <i386/spl.h>: whether the interrupt system is up.
+/// Whether the interrupt system is up.
 pub static SPL_INIT: AtomicBool = AtomicBool::new(false);
 
-/// `pic_mode` of `i386/i386at/ioapic.c`: the PIC mode the platform runs in,
-/// always the APIC now that the 8259 driver is gone.
+/// The interrupt-controller mode the platform runs in: always the APIC.
 pub const PIC_MODE: c_int = ACPI_PICMODE_APIC;
 
-/// `timer_pin` of <i386/apic.h>: the pin `ioapic_configure()` remapped the
-/// timer to.
+/// The pin [`ioapic_configure`] remapped the timer to.
 pub static TIMER_PIN: AtomicI32 = AtomicI32::new(0);
 
-/// `irqinfo` of <i386/apic.h>: one entry per interrupt line.
+/// One entry per interrupt line.
 pub static mut IRQINFO: [IrqInfo; NINTR] = [IrqInfo {
     trigger: 0,
     vector: 0,
 }; NINTR];
 
-/// `calibrated_ticks` of `i386/i386at/ioapic.c`: the LAPIC timer ticks per
-/// Mach tick.
+/// The LAPIC timer ticks per Mach tick.
 pub static CALIBRATED_TICKS: AtomicU32 = AtomicU32::new(0);
 
-/// `has_irq_specific_eoi` of `i386/i386at/ioapic.c`.
+/// Whether the I/O APIC acknowledges a line through its EOI register.
 static HAS_IRQ_SPECIFIC_EOI: AtomicBool = AtomicBool::new(false);
 
-/// `ioapic_lock` of `i386/i386at/ioapic.c`: serializes the non-atomic
-/// select/window register pairs.  An irq spin lock, since interrupt
-/// handlers mask and acknowledge lines.
+/// Serializes the non-atomic select/window register pairs.  An irq spin lock,
+/// since interrupt handlers mask and acknowledge lines.
 static IOAPIC_LOCK: IrqSpinLock<(), MachPlatform> = IrqSpinLock::new(());
 
-/// `APIC_IO_REDIR_LOW(pin)` of <i386/apic.h>: the low redirection register.
+/// The low redirection register of `pin`.
 const fn redir_low(pin: c_int) -> u32 {
     // Pins are below 64, so the offset stays far inside the register byte.
     (0x10 + pin * 2) as u32
 }
 
-/// `APIC_IO_REDIR_HIGH(pin)` of <i386/apic.h>: the high redirection register.
+/// The high redirection register of `pin`.
 const fn redir_high(pin: c_int) -> u32 {
     // As `redir_low()`.
     (0x11 + pin * 2) as u32
 }
 
-/// The body of `ioapic_read()` in C: read one IOAPIC register.
+/// Reads one I/O APIC register.
 fn read(apic: c_int, reg: u32) -> u32 {
     let Some(ioapic) = apic::ioapic(apic) else {
         return 0;
     };
-    // SAFETY: `ioapic` points into `apic_data`, whose entries stay live for
+    // SAFETY: `ioapic` points into `APIC_DATA`, whose entries stay live for
     // the kernel's life.
     let unit = unsafe { (*ioapic.as_ptr()).ioapic };
     if unit.is_null() {
@@ -265,26 +256,26 @@ fn read(apic: c_int, reg: u32) -> u32 {
     }
 }
 
-/// The body of `ioapic_write()` in C: write one IOAPIC register.
+/// Writes one I/O APIC register.
 fn write(apic: c_int, reg: u32, value: u32) {
     let Some(ioapic) = apic::ioapic(apic) else {
         return;
     };
-    // SAFETY: `ioapic` points into `apic_data`, whose entries stay live for
+    // SAFETY: `ioapic` points into `APIC_DATA`, whose entries stay live for
     // the kernel's life.
     let unit = unsafe { (*ioapic.as_ptr()).ioapic };
     if unit.is_null() {
         return;
     }
-    // SAFETY: `ioapic` points into `apic_data`, whose entries stay live for
-    // the kernel's life; both stores are the C's volatile accesses.
+    // SAFETY: `ioapic` points into `APIC_DATA`, whose entries stay live for
+    // the kernel's life; both stores are volatile.
     unsafe {
         ptr::write_volatile(&raw mut (*unit).select.r, reg);
         ptr::write_volatile(&raw mut (*unit).window.r, value);
     }
 }
 
-/// The body of `ioapic_read_entry()` in C.
+/// Reads the redirection entry of `pin`.
 fn read_entry(apic: c_int, pin: c_int) -> RouteEntry {
     RouteEntry {
         lo: read(apic, redir_low(pin)),
@@ -292,15 +283,15 @@ fn read_entry(apic: c_int, pin: c_int) -> RouteEntry {
     }
 }
 
-/// The body of `ioapic_write_entry()` in C.  The high word goes first
-/// because the mask bit lives in the low word.
+/// Writes the redirection entry of `pin`.  The high word goes first because
+/// the mask bit lives in the low word.
 fn write_entry(apic: c_int, pin: c_int, entry: RouteEntry) {
     write(apic, redir_high(pin), entry.hi);
     write(apic, redir_low(pin), entry.lo);
 }
 
-/// The body of `ioapic_toggle_entry()` in C: change only the low word, so
-/// the mask bit flips without rewriting the entry.
+/// Changes only the low word of `pin`'s entry, so the mask bit flips without
+/// rewriting the entry.
 fn toggle_entry(apic: c_int, pin: c_int, mask: u32) {
     let _guard = IOAPIC_LOCK.lock();
     let mut entry = read_entry(apic, pin);
@@ -308,14 +299,14 @@ fn toggle_entry(apic: c_int, pin: c_int, mask: u32) {
     write(apic, redir_low(pin), entry.lo);
 }
 
-/// The body of `ioapic_version()` in C.
+/// The version of the I/O APIC `apic`.
 fn version(apic: c_int) -> c_int {
     let raw = read(apic, apic::APIC_IO_VERSION);
     // The mask leaves eight bits, so the narrowing is exact.
     c_int::from(((raw >> apic::APIC_IO_VERSION_SHIFT) & 0xff) as u8)
 }
 
-/// The body of `ioapic_gsis()` in C.
+/// The number of interrupt inputs of the I/O APIC `apic`.
 fn gsis(apic: c_int) -> c_int {
     let raw = read(apic, apic::APIC_IO_VERSION);
     // The mask leaves eight bits, and the field counts entries from zero.
@@ -325,7 +316,7 @@ fn gsis(apic: c_int) -> c_int {
 /// The override whose IRQ is `pin`, if the MADT has one.
 fn override_for(pin: c_int) -> Option<apic::IrqOverrideData> {
     let pin = u8::try_from(pin).ok()?;
-    // SAFETY: `irq_override()` answers a pointer into `apic_data`, whose
+    // SAFETY: `irq_override()` answers a pointer into `APIC_DATA`, whose
     // entries stay live for the kernel's life; the copy drops the borrow.
     apic::irq_override(pin).map(|over| unsafe { *over.as_ptr() })
 }
@@ -359,8 +350,7 @@ fn irqinfo_vector(pin: c_int) -> u8 {
     unsafe { (*(&raw const IRQINFO).cast::<IrqInfo>().add(index)).vector }
 }
 
-/// The body of `override_irq()` in C: apply one MADT override to `entry` and
-/// answer the GSI it selects.
+/// Applies one MADT override to `entry` and answers the GSI it selects.
 fn override_irq(over: &apic::IrqOverrideData, entry: &mut RouteEntry) -> u32 {
     if over.flags & APIC_IRQ_OVERRIDE_TRIGGER_MASK != 0 {
         entry.set_trigger(
@@ -413,25 +403,19 @@ fn override_irq(over: &apic::IrqOverrideData, entry: &mut RouteEntry) -> u32 {
     over.gsi
 }
 
-/// The body of `picdisable()` in C: stop the 8259s and raise every CPU's
-/// software IPL.
+/// Masks the 8259s and raises every CPU's software level.
 fn disable_pic() {
-    // SAFETY: `cli` disables interrupts; it touches no memory and uses no
-    // stack.
+    // SAFETY: CLI touches no memory and uses no stack.
     unsafe { asm!("cli", options(nostack, nomem)) };
-    // SAFETY: `curr_ipl` is the array `src/arch/x86_64/spl.rs` reads; the store
-    // replaces the whole MAX_NCPUS-entry image the C's loop built.
+    // SAFETY: `CURR_IPL` is the array `spl` reads;
+    // the store replaces the whole MAX_NCPUS-entry image.
     unsafe { (&raw mut CURR_IPL).write([SPLHI; MAX_NCPUS]) };
     Port::new(PIC_SLAVE_OCW).write_u8(PICS_MASK);
     Port::new(PIC_MASTER_OCW).write_u8(PICM_MASK);
 }
 
-/// `timer_expiry_callback()` of `i386/i386at/ioapic.c`: mark the measurement
-/// finished.
-///
-/// The body of `timer_measure_10x_apic_hz()` in C: time the LAPIC timer
-/// against ten Mach ticks, busy-waiting on the HPET rather than a wheel
-/// (the wheel is not up at calibration).
+/// Times the LAPIC timer against ten clock ticks, busy-waiting on the HPET
+/// rather than a wheel (the wheel is not up at calibration).
 fn measure_10x_apic_hz() -> u32 {
     let unit = apic::lapic_ptr();
     let start = u32::MAX;
@@ -472,7 +456,7 @@ fn measure_10x_apic_hz() -> u32 {
     unsafe { start.wrapping_sub(apic::reg_read(&raw const (*unit).cur_count)) }
 }
 
-/// The body of `calibrate_lapic_timer()` in C.
+/// Sets the LAPIC timer up and measures its ticks per clock tick, once.
 fn calibrate_timer() {
     let unit = apic::lapic_ptr();
 
@@ -484,10 +468,10 @@ fn calibrate_timer() {
     }
 
     if CALIBRATED_TICKS.load(Ordering::Relaxed) == 0 {
-        // SAFETY: `splhigh()` is the real asm routine <machine/spl.h>
-        // declares, and its result is only handed back to `splx()`.
+        // SAFETY: raising to `splhigh` has no precondition, and its result is
+        // only handed back to `splx()`.
         let saved = unsafe { spl::splhigh() };
-        // SAFETY: `spl0()` is the real asm routine <machine/spl.h> declares.
+        // SAFETY: lowering to `spl0` here has no lock to hold back.
         unsafe { spl::spl0() };
         let ticks = measure_10x_apic_hz() / 10;
         CALIBRATED_TICKS.store(ticks, Ordering::Relaxed);
@@ -496,7 +480,7 @@ fn calibrate_timer() {
     }
 }
 
-/// The body of `lapic_enable_timer()` in C.
+/// Starts this CPU's LAPIC timer, periodic at the calibrated count.
 fn enable_timer() {
     let unit = apic::lapic_ptr();
     let ticks = CALIBRATED_TICKS.load(Ordering::Relaxed);
@@ -517,8 +501,7 @@ fn enable_timer() {
     kprint!("LAPIC timer configured on cpu{}\n", cpu_id());
 }
 
-/// The body of `ioapic_configure()` in C: program the IOAPICs from the MADT
-/// data.
+/// Programs the I/O APICs from the MADT data.
 fn configure() {
     let mut apic: c_int = 0;
     let version = version(apic);
@@ -618,22 +601,22 @@ fn configure() {
     apic::enable();
 }
 
-/// `mask_irq()` of <i386/apic.h>: disable the line.
+/// Disables the line.
 pub(crate) fn mask(pin: c_int) {
     toggle(0, pin, IOAPIC_MASK_DISABLED);
 }
 
-/// `unmask_irq()` of <i386/apic.h>: enable the line.
+/// Enables the line.
 pub(crate) fn unmask(pin: c_int) {
     toggle(0, pin, IOAPIC_MASK_ENABLED);
 }
 
-/// The body of `ioapic_toggle()` in C.
+/// Sets or clears the mask bit of `pin`.
 fn toggle(apic: c_int, pin: c_int, mask: u32) {
     toggle_entry(apic, pin, mask);
 }
 
-/// The body of `ioapic_irq_eoi()` in C, ending the interrupt on the LAPIC.
+/// Acknowledges the line `pin`, ending the interrupt on the LAPIC.
 pub(crate) fn irq_eoi(pin: c_int) {
     if pin != 0 {
         let _guard = IOAPIC_LOCK.lock();
@@ -647,7 +630,7 @@ pub(crate) fn irq_eoi(pin: c_int) {
             write_entry(0, pin, entry);
             write_entry(0, pin, old);
         } else if let Some(ioapic) = apic::ioapic(0) {
-            // SAFETY: `ioapic` points into `apic_data`.
+            // SAFETY: `ioapic` points into `APIC_DATA`.
             let unit = unsafe { (*ioapic.as_ptr()).ioapic };
             if !unit.is_null() {
                 let vector = irqinfo_vector(pin);
@@ -664,27 +647,27 @@ pub(crate) fn irq_eoi(pin: c_int) {
     apic::eoi();
 }
 
-/// `ioapic_irq_eoi()` in C.
+/// Acknowledges the line `pin`; the interrupt entry calls it from assembly.
 pub(crate) extern "C" fn ioapic_irq_eoi(pin: c_int) {
     irq_eoi(pin);
 }
 
-/// `picdisable()` in C.
+/// Masks the 8259s and raises every CPU's software level.
 pub(crate) fn picdisable() {
     disable_pic();
 }
 
-/// `calibrate_lapic_timer()` in C.
+/// Sets the LAPIC timer up and measures its ticks per clock tick, once.
 pub(crate) fn calibrate_lapic_timer() {
     calibrate_timer();
 }
 
-/// `lapic_enable_timer()` in C.
+/// Starts this CPU's LAPIC timer.
 pub(crate) fn lapic_enable_timer() {
     enable_timer();
 }
 
-/// `ioapic_configure()` in C.
+/// Programs the I/O APICs from the MADT data.
 pub(crate) fn ioapic_configure() {
     configure();
 }

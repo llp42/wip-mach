@@ -3,8 +3,7 @@
 //   Copyright (c) 1993, 1992,1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The thread scheduling entries of `kern/ipc_sched.c`, declared in
-//! <`kern/sched_prim.h`> and <`kern/ipc_sched.h`>.
+//! The thread scheduling entries of the IPC paths.
 
 use crate::arch::x86_64::pcb::stack_handoff;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
@@ -22,8 +21,7 @@ use crate::kern::thread::{
 };
 use core::ffi::c_uint;
 
-/// `convert_ipc_timeout_to_ticks()` of <`kern/sched_prim.h>`: round a
-/// millisecond timeout up to whole ticks.
+/// Rounds a millisecond timeout up to whole ticks.
 pub(crate) const fn ipc_timeout_to_ticks(msecs: c_uint) -> c_uint {
     let hz = machine::CLOCK_HZ;
     // The C expression is unsigned arithmetic over the `int` rate converted to
@@ -31,7 +29,7 @@ pub(crate) const fn ipc_timeout_to_ticks(msecs: c_uint) -> c_uint {
     msecs.wrapping_mul(hz as c_uint).wrapping_add(999) / 1000
 }
 
-/// `thread_go()` of `kern/ipc_sched.c`.
+/// Makes a waiting thread runnable with a successful wait result.
 ///
 /// # Safety
 ///
@@ -68,7 +66,7 @@ pub(crate) unsafe fn thread_go(thread: *mut Thread) {
     }
 }
 
-/// `thread_will_wait()` of `kern/ipc_sched.c`.
+/// Marks `thread` as about to wait uninterruptibly.
 ///
 /// # Safety
 ///
@@ -86,7 +84,7 @@ pub(crate) unsafe fn thread_will_wait(thread: *mut Thread) {
     }
 }
 
-/// `thread_will_wait_with_timeout()` of `kern/ipc_sched.c`.
+/// Marks `thread` as about to wait, with a timeout of `timeout` ticks.
 ///
 /// # Safety
 ///
@@ -112,8 +110,7 @@ pub(crate) unsafe fn thread_will_wait_with_timeout(
     }
 }
 
-/// `check_processor_set()` of `kern/ipc_sched.c`, the `MACH_HOST` arm both
-/// configured builds take.
+/// Whether `thread` may run on the current processor's set.
 ///
 /// # Safety
 ///
@@ -122,7 +119,7 @@ unsafe fn check_processor_set(thread: *mut Thread) -> bool {
     per_cpu::processor().processor_set() == unsafe { (*thread).processor_set }
 }
 
-/// `check_bound_processor()` of `kern/ipc_sched.c`.
+/// Whether `thread` is bound to no processor, or to the current one.
 ///
 /// # Safety
 ///
@@ -132,8 +129,8 @@ unsafe fn check_bound_processor(thread: *mut Thread) -> bool {
     bound.is_null() || bound == per_cpu::processor().as_ptr()
 }
 
-/// `thread_handoff()` of `kern/ipc_sched.c`: switch to `new`, leaving `old`
-/// blocked with `continuation` as its resume point.
+/// Switches to `new`, leaving `old` blocked with `continuation` as its resume
+/// point.
 ///
 /// # Safety
 ///

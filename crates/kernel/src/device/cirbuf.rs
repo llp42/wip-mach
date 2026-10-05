@@ -3,8 +3,7 @@
 //   Copyright (c) 1992,1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The circular character buffers of `device/cirbuf.c`, the implementation of
-//! <device/cirbuf.h>.
+//! The circular character buffers.
 
 use crate::arch::types::VmSize;
 use crate::kern::slab::{kalloc, kfree};
@@ -12,7 +11,7 @@ use core::ffi::{c_char, c_short};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
 
-/// `struct cirbuf` of <device/cirbuf.h>, field for field.
+/// A circular character buffer.
 ///
 /// # Invariants
 ///
@@ -21,7 +20,7 @@ use core::ptr::{self, NonNull};
 /// `c_end` one past its last byte, and `c_cf` and `c_cl` inside it.
 #[repr(C)]
 #[allow(missing_docs)]
-// The field names are the C `struct cirbuf`'s `c_*` members.
+// The fields keep their `c_` prefix.
 #[allow(clippy::struct_field_names)]
 pub struct Cirbuf {
     c_start: *mut c_char,
@@ -270,7 +269,7 @@ impl Default for Cirbuf {
     }
 }
 
-/// `cb_alloc()` in C.
+/// Gives `cb` a buffer of `buf_size` bytes, empty.
 ///
 /// # Safety
 ///

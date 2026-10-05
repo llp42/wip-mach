@@ -3,9 +3,7 @@
 //   Copyright (c) 1994,1993,1992,1991 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The per-thread LDT and user GDT entries, which `i386/i386/user_ldt.c` used
-//! to define and `i386/i386/user_ldt.h` and the MIG `mach_i386` interface
-//! declare.
+//! The per-thread LDT and user GDT entries, and the `mach_i386` calls on them.
 //!
 //! The MIG server entries are in [`crate::mig::mach_i386`].
 
@@ -46,8 +44,7 @@ const TEMPLATE: RealDescriptor = RealDescriptor {
     access_and_base_high: (seg::ACC_P as u32) << 8,
 };
 
-/// `struct descriptor` of <`mach/i386/mach_i386_types.h`>, the MIG view of a
-/// descriptor.
+/// `struct descriptor`: the MIG view of a descriptor.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -63,7 +60,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Descriptor, high_word) == 4);
 };
 
-/// `sel_idx()` of <i386/seg.h> on a signed selector.
+/// The descriptor index of a signed selector.
 const fn sel_idx(selector: c_int) -> c_int {
     selector >> 3
 }
@@ -79,7 +76,7 @@ fn ipc_kernel_map() -> *mut vm_map::VmMap {
     ipc_init::ipc_kernel_map()
 }
 
-/// `user_ldt_free()` of <`i386/user_ldt.h`>.
+/// Frees `user_ldt`.
 ///
 /// # Safety
 ///
@@ -93,13 +90,13 @@ pub(crate) unsafe fn free(user_ldt: *mut UserLdt) {
     unsafe { kfree(NonNull::new_unchecked(user_ldt.cast::<u8>()), size) };
 }
 
-/// `i386_set_ldt()` of `i386/i386/user_ldt.c`.
+/// Sets `count` descriptors of `thread`'s LDT from `first_selector` on.
 ///
 /// # Safety
 ///
-/// `thread` must be a live thread; `desc_list` must point at `count`
-/// writable descriptors when `desc_list_inline` is true, and at a live
-/// `vm_map_copy` the caller owns when it is false.
+/// `thread` must be a live thread; `desc_list` must point at `count` writable
+/// descriptors when `desc_list_inline` is true, and at a live `VmMapCopy` the
+/// caller owns when it is false.
 pub(crate) unsafe fn set_ldt(
     thread: NonNull<Thread>,
     first_selector: c_int,
@@ -254,9 +251,9 @@ type LdtList = (
 ///
 /// # Safety
 ///
-/// `desc_list` must be the caller's live `vm_map_copy` when
-/// `desc_list_inline` is false, and the kernel IPC map must be unlocked.
-/// The returned address and copy must go to [`free_copy()`].
+/// `desc_list` must be the caller's live `VmMapCopy` when `desc_list_inline`
+/// is false, and the kernel IPC map must be unlocked.  The returned address
+/// and copy must go to [`free_copy()`].
 unsafe fn copyin_ldt_list(
     desc_list: *mut RealDescriptor,
     count: c_uint,
@@ -383,7 +380,8 @@ fn free_copy(
     }
 }
 
-/// `i386_get_ldt()` of `i386/i386/user_ldt.c`.
+/// Reports `selector_count` descriptors of `thread`'s LDT from
+/// `first_selector` on.
 ///
 /// # Safety
 ///
@@ -513,8 +511,8 @@ pub(crate) unsafe fn get_ldt(
     Ok((ldt_count, copy))
 }
 
-/// Trim, page-pad, and copy this call's kernel buffer into a fresh
-/// `vm_map_copy`, as the C's `vm_map_copyin` path did.
+/// Trims and page-pads this call's kernel buffer and copies it into a fresh
+/// `VmMapCopy`.
 ///
 /// # Safety
 ///

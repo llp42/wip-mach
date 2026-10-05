@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The message-queue routines, which `ipc/ipc_mqueue.c` used to define and
-//! `ipc/ipc_mqueue.h` declares.
+//! The message-queue routines.
 
 use crate::arch::x86_64::per_cpu;
 use crate::ipc::error::{ReceiveError, SendError};
@@ -31,34 +30,34 @@ use crate::kern::thread::{Continuation, IpcKmsgQueue, Thread};
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::{self, with_exposed_provenance_mut};
 
-/// `MACH_MSGH_BITS_REMOTE_MASK` of <mach/message.h>.
+/// The remote-disposition bits of a message header.
 const MACH_MSGH_BITS_REMOTE_MASK: u32 = 0x0000_00ff;
-/// `MACH_MSGH_BITS_CIRCULAR` of <mach/message.h>: a message sent to itself.
+/// The header bit of a circular message.
 const MACH_MSGH_BITS_CIRCULAR: u32 = 0x4000_0000;
-/// `MACH_MSG_TYPE_PORT_SEND_ONCE` of <mach/message.h>.
+/// The send-once right disposition.
 const MACH_MSG_TYPE_PORT_SEND_ONCE: u32 = 18;
-/// `MACH_SEND_TIMEOUT` of <mach/message.h>: the caller wants a timeout.
+/// The send option asking for a timeout.
 const MACH_SEND_TIMEOUT: c_uint = 0x0000_0010;
-/// `MACH_RCV_TIMEOUT` of <mach/message.h>: the caller wants a timeout.
+/// The receive option asking for a timeout.
 const MACH_RCV_TIMEOUT: c_uint = 0x0000_0100;
-/// `MACH_SEND_ALWAYS` of <mach/message.h>: internal, ignore the queue limit.
+/// The kernel's send option that ignores the queue limit.
 const MACH_SEND_ALWAYS: c_uint = 0x0001_0000;
-/// `MACH_MSG_TIMEOUT_NONE` of <mach/message.h>.
+/// No timeout.
 const MACH_MSG_TIMEOUT_NONE: c_uint = 0;
-/// `MACH_PORT_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NULL: usize = 0;
-/// `THREAD_TIMED_OUT` of <`kern/sched_prim.h`>.
+/// The wait result of a timed-out wait.
 const THREAD_TIMED_OUT: c_int = 1;
-/// `THREAD_INTERRUPTED` of <`kern/sched_prim.h`>.
+/// The wait result of an interrupted wait.
 const THREAD_INTERRUPTED: c_int = 2;
 
-/// The object and locked queue `ipc_mqueue_copyin()` returned.
+/// The object and locked queue [`copyin`] returned.
 pub(crate) struct Copyin {
     pub(crate) object: *mut c_void,
     pub(crate) mqueue: *mut IpcMqueue,
 }
 
-/// What `ipc_mqueue_receive()` produced.
+/// What [`receive`] produced.
 pub(crate) enum Received {
     /// A message and the sequence number of its delivery.
     Kmsg { kmsg: Kmsg, seqno: c_uint },
@@ -79,7 +78,7 @@ const fn ptr_at(address: usize) -> *mut c_void {
     with_exposed_provenance_mut(address)
 }
 
-/// `ipc_mqueue_init()` in C.
+/// Initializes `mqueue` empty.
 ///
 /// # Safety
 ///
@@ -93,7 +92,8 @@ pub(crate) unsafe fn init(mqueue: *mut IpcMqueue) {
     }
 }
 
-/// `ipc_mqueue_move()` in C.
+/// Moves the messages of `source` sent to `port` into `dest`, handing each to
+/// a waiting receiver of `dest` when one can take it.
 ///
 /// # Safety
 ///
@@ -150,8 +150,8 @@ pub(crate) unsafe fn move_messages(
     }
 }
 
-/// `ipc_mqueue_changed()` in C: wake every receiver with `state`, the port
-/// dying or moving into a port set.
+/// Wakes every receiver with `state`, the port dying or moving into a port
+/// set.
 ///
 /// # Safety
 ///
@@ -173,7 +173,8 @@ pub(crate) unsafe fn changed(mqueue: *mut IpcMqueue, state: IpcWait) {
     }
 }
 
-/// `ipc_mqueue_send()` in C.
+/// Queues `kmsg` on its destination port, waiting for room unless the options
+/// say otherwise.
 ///
 /// # Safety
 ///
@@ -198,7 +199,6 @@ pub(crate) unsafe fn send(
         // SAFETY: a kernel port's message goes to its server, which consumes
         // it; the port lock is already dropped.
         if let Some(reply) = unsafe { ipc_kobject::server(kmsg) } {
-            // The `ipc_mqueue_send_always()` macro.
             // SAFETY: the reply is a live message the server handed over.
             let _ = unsafe {
                 send(reply.as_ptr(), MACH_SEND_ALWAYS, MACH_MSG_TIMEOUT_NONE)
@@ -240,8 +240,8 @@ pub(crate) unsafe fn send(
     // SAFETY: the queue is live and locked.
     let receivers = unsafe { (*mqueue).threads().cast::<IpcThreadQueue>() };
 
-    // The message queue lock now owns the message and `ip_seqno`, as the C
-    // commented; the message's reference keeps the port alive.
+    // The message queue lock now owns the message and the sequence number; the
+    // message's reference keeps the port alive.
     // SAFETY: the port is live and locked.
     unsafe { port.unlock() };
 
@@ -262,8 +262,8 @@ pub(crate) unsafe fn send(
         unsafe { ipc_thread::ipc_thread_rmqueue_first(receivers, receiver) };
         let receiver = receiver.cast::<Thread>();
 
-        // SAFETY: the receiver is live, and the queue lock serializes
-        // `ip_seqno` now that the port lock is gone.
+        // SAFETY: the receiver is live, and the queue lock serializes the
+        // sequence number now that the port lock is gone.
         if unsafe { kmsg.msgh_size() <= (*receiver).data.msize } {
             // SAFETY: the receiver is live and the queue is locked.
             unsafe {
@@ -312,8 +312,8 @@ unsafe fn wait_send_room(
     loop {
         // SAFETY: the port is live and locked.
         if !unsafe { port.is_active() } {
-            // SAFETY: the port is live and locked; the C's `ip_release()`
-            // and `ip_check_unlock()` consume its reference.
+            // SAFETY: the port is live and locked; dropping the reference and
+            // `check_unlock` consume it.
             unsafe {
                 port.decrement_references();
                 port.check_unlock();
@@ -389,7 +389,7 @@ unsafe fn wait_send_room(
     None
 }
 
-/// `ipc_mqueue_send_always()` of <`ipc/ipc_mqueue.h`>.
+/// [`send`] with the queue limit ignored, for the messages the kernel sends.
 ///
 /// # Safety
 ///
@@ -399,7 +399,8 @@ pub(crate) unsafe fn send_always(kmsg: *mut c_void) -> Result<(), SendError> {
     unsafe { send(kmsg, MACH_SEND_ALWAYS, MACH_MSG_TIMEOUT_NONE) }
 }
 
-/// `ipc_mqueue_copyin()` in C.
+/// Translates the receive name `name` in `space` into its port or set and
+/// locks its queue.
 ///
 /// # Safety
 ///
@@ -478,7 +479,7 @@ pub(crate) unsafe fn copyin(
     };
 
     match held {
-        // The C's `io_reference(object)` runs with the object lock held.
+        // The object's reference is taken with the object lock held.
         // SAFETY: the port is live and locked.
         Held::Port(port) => unsafe { port.increment_references() },
         // SAFETY: the target is live and locked.
@@ -501,7 +502,8 @@ pub(crate) unsafe fn copyin(
     Ok(Copyin { object, mqueue })
 }
 
-/// `ipc_mqueue_receive()` in C.
+/// Receives a message from `mqueue`, waiting for one unless the options say
+/// otherwise.
 ///
 /// # Safety
 ///
@@ -532,9 +534,8 @@ pub(crate) unsafe fn receive(
                 // SAFETY: a queued head is a live message.
                 let kmsg = unsafe { Kmsg::from_raw(first) };
 
-                // SAFETY: the message is live.  Both builds the Rust half
-                // targets have the user and kernel headers the same size, so
-                // the C's `msg_usize()` is this header size.
+                // SAFETY: the message is live.  The user and kernel headers
+                // are the same size, so this is the size the receiver sees.
                 let size = unsafe { kmsg.msgh_size() };
                 if size > max_size {
                     // SAFETY: the queue is locked.
@@ -549,7 +550,7 @@ pub(crate) unsafe fn receive(
                 // queue lock is held.
                 let port =
                     unsafe { IpcPort::from_raw(ptr_at(kmsg.remote_port())) };
-                // SAFETY: the queue lock serializes `ip_seqno`.
+                // SAFETY: the queue lock serializes the sequence number.
                 let seqno = unsafe { port.seqno() };
                 unsafe { port.set_seqno(seqno.wrapping_add(1)) };
 

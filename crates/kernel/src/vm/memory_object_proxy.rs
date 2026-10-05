@@ -4,8 +4,7 @@
 //   Written by Marcus Brinkmann.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Proxy memory objects, which `vm/memory_object_proxy.c` used to define and
-//! `vm/memory_object_proxy.h` declares.
+//! Proxy memory objects.
 //!
 //! A proxy is a kernel port that holds one reference to a real memory object
 //! and restricts what a mapping made through it may access: the mapping takes
@@ -25,13 +24,12 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull, addr_of_mut, with_exposed_provenance_mut};
 
-/// `MACH_NOTIFY_NO_SENDERS` of <mach/notify.h>.
+/// The message id of a no-senders notification.
 const MACH_NOTIFY_NO_SENDERS: c_int = 0o106;
-/// `IKOT_PAGER_PROXY` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a proxy port.
 const IKOT_PAGER_PROXY: c_uint = 27;
 
-/// `struct memory_object_proxy`: one proxy's state, reached only through the
-/// two kernel ports that name it.
+/// One proxy's state, reached only through the two kernel ports that name it.
 struct MemoryObjectProxy {
     /// The port handed to users, whose kobject is this record.
     port: IpcPort,
@@ -47,19 +45,18 @@ struct MemoryObjectProxy {
     len: VmSize,
 }
 
-/// `memory_object_proxy_cache` of `memory_object_proxy.c`: the proxy record's
-/// slab cache.
+/// The slab cache of proxy records.
 static mut MEMORY_OBJECT_PROXY_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `kmem_cache_alloc(&memory_object_proxy_cache, 0)` of the C.
+/// Allocates a proxy record, or `None` when the cache is out of memory.
 fn cache_alloc() -> Option<NonNull<MemoryObjectProxy>> {
-    // SAFETY: the caller runs after `memory_object_proxy_init()`, so the cache
-    // is live, and the cache's lock serializes the call.
+    // SAFETY: the caller runs after `init()`, so the cache is live, and the
+    // cache's lock serializes the call.
     let buf = unsafe { (*addr_of_mut!(MEMORY_OBJECT_PROXY_CACHE)).alloc() }?;
     Some(buf.cast::<MemoryObjectProxy>())
 }
 
-/// `kmem_cache_free(&memory_object_proxy_cache, proxy)` of the C.
+/// Returns `proxy` to the cache.
 ///
 /// # Safety
 ///
@@ -72,7 +69,7 @@ unsafe fn cache_free(proxy: NonNull<MemoryObjectProxy>) {
     };
 }
 
-/// `memory_object_proxy_init()` in C.
+/// Sets up the cache of proxy records.
 pub(crate) fn init() {
     // SAFETY: the call runs once in the bootstrap sequence, after the slab
     // package is up and before any proxy is allocated.
@@ -87,8 +84,7 @@ pub(crate) fn init() {
     }
 }
 
-/// `memory_object_proxy_port_lookup()` in C: the proxy a live port of type
-/// `IKOT_PAGER_PROXY` names.
+/// The proxy a live port of type `IKOT_PAGER_PROXY` names.
 ///
 /// # Safety
 ///
@@ -118,8 +114,7 @@ unsafe fn port_lookup(
     proxy
 }
 
-/// `memory_object_proxy_notify()` in C: process a no-senders notification for
-/// a proxy port.
+/// Processes a no-senders notification for a proxy port.
 ///
 /// # Safety
 ///
@@ -170,8 +165,7 @@ pub(crate) unsafe fn notify(msg: *mut MachMsgHeader) -> bool {
     true
 }
 
-/// The real target a proxy chain names, as
-/// `memory_object_proxy_lookup()` reports it.
+/// The real target a proxy chain names, as [`lookup()`] reports it.
 pub(crate) struct ProxyTarget {
     /// The real memory object, or an invalid port.
     pub(crate) object: *mut c_void,
@@ -183,8 +177,8 @@ pub(crate) struct ProxyTarget {
     pub(crate) len: VmSize,
 }
 
-/// `memory_object_proxy_lookup()` in C: follow the chain of proxies to the
-/// real memory object and its protection window.
+/// Follows the chain of proxies to the real memory object and its protection
+/// window.
 ///
 /// # Safety
 ///
@@ -228,8 +222,7 @@ pub(crate) unsafe fn lookup(port: *mut c_void) -> Result<ProxyTarget, Error> {
     })
 }
 
-/// `memory_object_create_proxy()` in C: create a proxy for
-/// `[start, start + len)` of `objects[0]`.
+/// Creates a proxy for `[start, start + len)` of `objects[0]`.
 ///
 /// # Safety
 ///
@@ -274,8 +267,8 @@ pub(crate) unsafe fn create_proxy(
         return Err(Error::ResourceShortage);
     };
 
-    // SAFETY: `ipc_port_alloc_kernel` is the special-space allocator, and the
-    // port cache is up once proxies are created.
+    // SAFETY: `alloc_special` in the kernel space is the kernel-port
+    // allocator, and the port cache is up once proxies are created.
     let Some(port) = (unsafe { ipc_port::alloc_special(ipc_space::kernel()) })
     else {
         // SAFETY: the record came from the cache and was never published.
@@ -291,8 +284,8 @@ pub(crate) unsafe fn create_proxy(
         );
     };
 
-    // SAFETY: `ipc_port_alloc_kernel` is the special-space allocator, and
-    // the port cache is up once proxies are created.
+    // SAFETY: `alloc_special` in the kernel space is the kernel-port
+    // allocator, and the port cache is up once proxies are created.
     let Some(notify) =
         (unsafe { ipc_port::alloc_special(ipc_space::kernel()) })
     else {

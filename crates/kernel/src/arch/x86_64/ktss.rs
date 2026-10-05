@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kernel task state segment, which `i386/i386/ktss.c` used to define and
-//! `i386/i386/ktss.h` declares.
+//! The kernel task state segment.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::gdt;
@@ -15,33 +14,30 @@ use core::ffi::{c_int, c_ushort};
 use core::mem::size_of;
 use core::ptr;
 
-/// `IOPB_INVAL` of <`i386/io_perm.h>`: an offset outside the permission bitmap,
-/// which disables all permission.
+/// An offset outside the permission bitmap, which disables all permission.
 const IOPB_INVAL: c_ushort = 0x2fff;
 
-/// `ktss` of <i386/ktss.h>: the boot CPU's TSS, which the other CPUs get
-/// copies of through `mp_ktss`.
+/// The boot CPU's TSS, which the other CPUs get copies of through `MP_KTSS`.
 pub(crate) static mut KTSS: TaskTss =
     // SAFETY: every field is an integer, a byte, or a byte array, so the
     // all-zero pattern is a valid `TaskTss`.
     unsafe { core::mem::zeroed() };
 
-/// The C's `static int exception_stack[1024]`, the ring-0 stack the TSS names
-/// until a thread's pcb replaces it.
+/// The ring-0 stack the TSS names until a thread's pcb replaces it.
 static mut EXCEPTION_STACK: [c_int; 1024] = [0; 1024];
 
-/// The C's `static int double_fault_stack[1024]`, the `IST1` stack.
+/// The `IST1` stack, which a double fault switches to.
 static mut DOUBLE_FAULT_STACK: [c_int; 1024] = [0; 1024];
 
-/// The one-past-the-end address of a stack array, as the C's
-/// `exception_stack + 1024` computed it.
+/// The one-past-the-end address of a stack array.
 fn stack_top(stack: *mut [c_int; 1024]) -> VmOffset {
     // SAFETY: the array has 1024 `c_int`s, so the element past its end is
     // the one-past-the-end pointer Rust allows.
     unsafe { stack.cast::<c_int>().add(1024) as VmOffset }
 }
 
-/// `ktss_fill()` of `i386/i386/ktss.c`.
+/// Installs `myktss` in `mygdt` with its stacks and no I/O permission, and
+/// loads it.
 ///
 /// # Safety
 ///
@@ -75,7 +71,7 @@ unsafe fn ktss_fill(myktss: *mut TaskTss, mygdt: *mut RealDescriptor) {
     seg::ltr(seg::KERNEL_TSS as c_ushort);
 }
 
-/// `ktss_init()` of <i386/ktss.h>.
+/// Loads the boot CPU's TSS.
 pub(crate) fn ktss_init() {
     // SAFETY: `ktss` is the boot CPU's TSS and `gdt` its full table.
     unsafe {
@@ -86,7 +82,7 @@ pub(crate) fn ktss_init() {
     }
 }
 
-/// `ap_ktss_init()` of <i386/ktss.h>.
+/// Loads the TSS of the application processor `cpu`.
 pub(crate) fn ap_ktss_init(cpu: c_int) {
     // SAFETY: `mp_desc_init()` stored this CPU's TSS and GDT before any CPU
     // ran `ap_ktss_init()` on them.

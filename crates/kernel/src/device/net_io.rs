@@ -6,13 +6,12 @@
 //   Copyright (c) 1990-1991 The Regents of the University of California.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The whole of `device/net_io.c`: the packet-filter machinery, the kmsg pool
-//! the receive thread fills, the filter lists `struct ifnet` heads, and the
-//! layouts their bodies read.
+//! The network input path: the packet-filter machinery, the kmsg pool the
+//! receive thread fills, the filter lists an interface heads, and the layouts
+//! their bodies read.
 //!
-//! The C file is gone; the `extern "C"` entry <`device/net_io.h`> declares is
-//! [`net_thread`], and the four C `def_simple_lock_data(static, ...)` locks
-//! are [`SimpleLock`] values here.
+//! The locks are [`SimpleLock`] values, and [`net_thread`] is the receive
+//! thread's entry.
 
 use crate::arch::x86_64::per_cpu::cpu_id;
 use crate::arch::x86_64::spl;
@@ -37,21 +36,18 @@ use core::pin::{Pin, pin};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-/// `NET_MAX_FILTER` of <`device/net_status.h>`: the `filter_t[]` a receive port
-/// holds.
+/// The most filter words a receive port holds.
 pub(crate) const NET_MAX_FILTER: usize = 128;
-/// `NET_RCV_MAX` of <`device/net_status.h>`: the packet bytes a network message
-/// carries.
+/// The packet bytes a network message carries.
 pub(crate) const NET_RCV_MAX: u32 = 4095;
-/// `NET_HASH_SIZE` of `device/net_io.c`: the buckets a filter hash has.
+/// The buckets a filter hash has.
 pub(crate) const NET_HASH_SIZE: u32 = 256;
-/// `N_NET_HASH_KEYS` of `device/net_io.c`: the keys one match instruction
-/// carries.
+/// The keys one match instruction carries.
 pub(crate) const N_NET_HASH_KEYS: usize = 4;
-/// `BPF_MEMWORDS` of <device/bpf.h>: the interpreter's scratch words.
+/// The interpreter's scratch words.
 const BPF_MEMWORDS: usize = 16;
 
-/// `struct bpf_insn` of <device/bpf.h>.
+/// `struct bpf_insn`: one BPF instruction.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -69,8 +65,7 @@ const _: () = assert!(offset_of!(BpfInsn, jt) == 2);
 const _: () = assert!(offset_of!(BpfInsn, jf) == 3);
 const _: () = assert!(offset_of!(BpfInsn, k) == 4);
 
-/// `queue_chain_t` of <kern/queue.h>: the link pair [`IfQueue`] still mirrors
-/// from the C `struct ifqueue`, which only drivers touched.
+/// The link pair [`IfQueue`] keeps, which only drivers use.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
@@ -84,7 +79,7 @@ const _: () = assert!(align_of::<QueueChain>() == align_of::<*mut ()>());
 const _: () = assert!(offset_of!(QueueChain, next) == 0);
 const _: () = assert!(offset_of!(QueueChain, prev) == size_of::<*mut ()>());
 
-/// `struct net_rcv_port` of `device/net_io.c`.
+/// A receive port registered on an interface, with its filter.
 ///
 /// A port's `input` link is reused as the dead-port chain's link once the
 /// port is off both interface lists.
@@ -101,8 +96,7 @@ pub struct NetRcvPort {
     pub filter: [u16; NET_MAX_FILTER],
 }
 
-// The size, alignment and offsets are gdb's `ptype /o struct net_rcv_port`
-// over build-64/gnumach.
+// The record keeps its established size, alignment and field offsets.
 const _: () = {
     assert!(size_of::<NetRcvPort>() == 320);
     assert!(align_of::<NetRcvPort>() == 8);
@@ -116,8 +110,7 @@ const _: () = {
     assert!(offset_of!(NetRcvPort, filter) == 64);
 };
 
-/// `struct net_hash_entry` of `device/net_io.c`.  Its `he_next` macro is the
-/// `chain` link.
+/// One entry of a filter hash table; `chain` links it.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct NetHashEntry {
@@ -136,8 +129,8 @@ const _: () = {
     assert!(offset_of!(NetHashEntry, keys) == 28);
 };
 
-/// `struct net_hash_header` of `device/net_io.c`: a [`NetRcvPort`] with a
-/// 256-bucket hash table bolted on, so both can live on the same port lists.
+/// A [`NetRcvPort`] with a 256-bucket hash table bolted on, so both can live
+/// on the same port lists.
 ///
 /// The C table's buckets had no head cell, so the Rust table holds an
 /// intrusive list per bucket instead, each starting as `NetHashBucket::new()`;
@@ -224,105 +217,115 @@ unsafe fn snd_list<'a>(ifp: *mut IfNet) -> Pin<&'a mut NetOutputList> {
     }
 }
 
-/// `BPF_ST` of <device/bpf.h>.
+/// `BPF_ST`: store the accumulator into a scratch word.
 const BPF_ST: u16 = 0x02;
-/// `BPF_LD|BPF_W|BPF_ABS` of <device/bpf.h>.
+/// `BPF_LD|BPF_W|BPF_ABS`: load the packet word at a fixed offset.
 const BPF_LD_W_ABS: u16 = 0x20;
-/// `BPF_LD|BPF_H|BPF_ABS` of <device/bpf.h>.
+/// `BPF_LD|BPF_H|BPF_ABS`: load the packet half-word at a fixed offset.
 const BPF_LD_H_ABS: u16 = 0x28;
-/// `BPF_LD|BPF_B|BPF_ABS` of <device/bpf.h>.
+/// `BPF_LD|BPF_B|BPF_ABS`: load the packet byte at a fixed offset.
 const BPF_LD_B_ABS: u16 = 0x30;
-/// `BPF_LD|BPF_W|BPF_LEN` of <device/bpf.h>.
+/// `BPF_LD|BPF_W|BPF_LEN`: load the packet length.
 const BPF_LD_W_LEN: u16 = 0x80;
-/// `BPF_LDX|BPF_W|BPF_LEN` of <device/bpf.h>.
+/// `BPF_LDX|BPF_W|BPF_LEN`: load the packet length into the index register.
 const BPF_LDX_W_LEN: u16 = 0x81;
-/// `BPF_LD|BPF_W|BPF_IND` of <device/bpf.h>.
+/// `BPF_LD|BPF_W|BPF_IND`: load the packet word at the index register plus an
+/// offset.
 const BPF_LD_W_IND: u16 = 0x40;
-/// `BPF_LD|BPF_H|BPF_IND` of <device/bpf.h>.
+/// `BPF_LD|BPF_H|BPF_IND`: load the packet half-word at the index register
+/// plus an offset.
 const BPF_LD_H_IND: u16 = 0x48;
-/// `BPF_LD|BPF_B|BPF_IND` of <device/bpf.h>.
+/// `BPF_LD|BPF_B|BPF_IND`: load the packet byte at the index register plus an
+/// offset.
 const BPF_LD_B_IND: u16 = 0x50;
-/// `BPF_LDX|BPF_MSH|BPF_B` of <device/bpf.h>.
+/// `BPF_LDX|BPF_MSH|BPF_B`: load four times the low nibble of a packet byte
+/// into the index register.
 const BPF_LDX_MSH_B: u16 = 0xb1;
-/// `BPF_LD|BPF_IMM` of <device/bpf.h>.
+/// `BPF_LD|BPF_IMM`: load a constant.
 const BPF_LD_IMM: u16 = 0x00;
-/// `BPF_LDX|BPF_IMM` of <device/bpf.h>.
+/// `BPF_LDX|BPF_IMM`: load a constant into the index register.
 const BPF_LDX_IMM: u16 = 0x01;
-/// `BPF_LD|BPF_MEM` of <device/bpf.h>.
+/// `BPF_LD|BPF_MEM`: load a scratch word.
 const BPF_LD_MEM: u16 = 0x60;
-/// `BPF_LDX|BPF_MEM` of <device/bpf.h>.
+/// `BPF_LDX|BPF_MEM`: load a scratch word into the index register.
 const BPF_LDX_MEM: u16 = 0x61;
-/// `BPF_STX` of <device/bpf.h>.
+/// `BPF_STX`: store the index register into a scratch word.
 const BPF_STX: u16 = 0x03;
-/// `BPF_JMP|BPF_JA` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JA`: jump unconditionally.
 const BPF_JMP_JA: u16 = 0x05;
-/// `BPF_JMP|BPF_JGT|BPF_K` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JGT|BPF_K`: jump when the accumulator is above a constant.
 const BPF_JMP_JGT_K: u16 = 0x25;
-/// `BPF_JMP|BPF_JGE|BPF_K` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JGE|BPF_K`: jump when the accumulator is at least a constant.
 const BPF_JMP_JGE_K: u16 = 0x35;
-/// `BPF_JMP|BPF_JEQ|BPF_K` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JEQ|BPF_K`: jump when the accumulator equals a constant.
 const BPF_JMP_JEQ_K: u16 = 0x15;
-/// `BPF_JMP|BPF_JSET|BPF_K` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JSET|BPF_K`: jump when the accumulator shares a bit with a
+/// constant.
 const BPF_JMP_JSET_K: u16 = 0x45;
-/// `BPF_JMP|BPF_JGT|BPF_X` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JGT|BPF_X`: jump when the accumulator is above the index
+/// register.
 const BPF_JMP_JGT_X: u16 = 0x2d;
-/// `BPF_JMP|BPF_JGE|BPF_X` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JGE|BPF_X`: jump when the accumulator is at least the index
+/// register.
 const BPF_JMP_JGE_X: u16 = 0x3d;
-/// `BPF_JMP|BPF_JEQ|BPF_X` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JEQ|BPF_X`: jump when the accumulator equals the index
+/// register.
 const BPF_JMP_JEQ_X: u16 = 0x1d;
-/// `BPF_JMP|BPF_JSET|BPF_X` of <device/bpf.h>.
+/// `BPF_JMP|BPF_JSET|BPF_X`: jump when the accumulator shares a bit with the
+/// index register.
 const BPF_JMP_JSET_X: u16 = 0x4d;
-/// `BPF_ALU|BPF_ADD|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_ADD|BPF_X`: add the index register to the accumulator.
 const BPF_ALU_ADD_X: u16 = 0x0c;
-/// `BPF_ALU|BPF_SUB|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_SUB|BPF_X`: subtract the index register from the accumulator.
 const BPF_ALU_SUB_X: u16 = 0x1c;
-/// `BPF_ALU|BPF_MUL|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_MUL|BPF_X`: multiply the accumulator by the index register.
 const BPF_ALU_MUL_X: u16 = 0x2c;
-/// `BPF_ALU|BPF_DIV|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_DIV|BPF_X`: divide the accumulator by the index register.
 const BPF_ALU_DIV_X: u16 = 0x3c;
-/// `BPF_ALU|BPF_MOD|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_MOD|BPF_X`: the accumulator modulo the index register.
 const BPF_ALU_MOD_X: u16 = 0x9c;
-/// `BPF_ALU|BPF_AND|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_AND|BPF_X`: AND the index register into the accumulator.
 const BPF_ALU_AND_X: u16 = 0x5c;
-/// `BPF_ALU|BPF_OR|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_OR|BPF_X`: OR the index register into the accumulator.
 const BPF_ALU_OR_X: u16 = 0x4c;
-/// `BPF_ALU|BPF_XOR|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_XOR|BPF_X`: XOR the index register into the accumulator.
 const BPF_ALU_XOR_X: u16 = 0xac;
-/// `BPF_ALU|BPF_LSH|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_LSH|BPF_X`: shift the accumulator left by the index register.
 const BPF_ALU_LSH_X: u16 = 0x6c;
-/// `BPF_ALU|BPF_RSH|BPF_X` of <device/bpf.h>.
+/// `BPF_ALU|BPF_RSH|BPF_X`: shift the accumulator right by the index register.
 const BPF_ALU_RSH_X: u16 = 0x7c;
-/// `BPF_ALU|BPF_ADD|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_ADD|BPF_K`: add a constant to the accumulator.
 const BPF_ALU_ADD_K: u16 = 0x04;
-/// `BPF_ALU|BPF_SUB|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_SUB|BPF_K`: subtract a constant from the accumulator.
 const BPF_ALU_SUB_K: u16 = 0x14;
-/// `BPF_ALU|BPF_MUL|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_MUL|BPF_K`: multiply the accumulator by a constant.
 const BPF_ALU_MUL_K: u16 = 0x24;
-/// `BPF_ALU|BPF_DIV|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_DIV|BPF_K`: divide the accumulator by a constant.
 const BPF_ALU_DIV_K: u16 = 0x34;
-/// `BPF_ALU|BPF_MOD|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_MOD|BPF_K`: the accumulator modulo a constant.
 const BPF_ALU_MOD_K: u16 = 0x94;
-/// `BPF_ALU|BPF_AND|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_AND|BPF_K`: AND a constant into the accumulator.
 const BPF_ALU_AND_K: u16 = 0x54;
-/// `BPF_ALU|BPF_OR|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_OR|BPF_K`: OR a constant into the accumulator.
 const BPF_ALU_OR_K: u16 = 0x44;
-/// `BPF_ALU|BPF_XOR|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_XOR|BPF_K`: XOR a constant into the accumulator.
 const BPF_ALU_XOR_K: u16 = 0xa4;
-/// `BPF_ALU|BPF_LSH|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_LSH|BPF_K`: shift the accumulator left by a constant.
 const BPF_ALU_LSH_K: u16 = 0x64;
-/// `BPF_ALU|BPF_RSH|BPF_K` of <device/bpf.h>.
+/// `BPF_ALU|BPF_RSH|BPF_K`: shift the accumulator right by a constant.
 const BPF_ALU_RSH_K: u16 = 0x74;
-/// `BPF_ALU|BPF_NEG` of <device/bpf.h>.
+/// `BPF_ALU|BPF_NEG`: negate the accumulator.
 const BPF_ALU_NEG: u16 = 0x84;
-/// `BPF_MISC|BPF_TAX` of <device/bpf.h>.
+/// `BPF_MISC|BPF_TAX`: copy the accumulator to the index register.
 const BPF_MISC_TAX: u16 = 0x07;
-/// `BPF_MISC|BPF_TXA` of <device/bpf.h>.
+/// `BPF_MISC|BPF_TXA`: copy the index register to the accumulator.
 const BPF_MISC_TXA: u16 = 0x87;
-/// `BPF_RET|BPF_K` of <device/bpf.h>.
+/// `BPF_RET|BPF_K`: return a constant.
 const BPF_RET_K: u16 = 0x06;
-/// `BPF_RET|BPF_A` of <device/bpf.h>.
+/// `BPF_RET|BPF_A`: return the accumulator.
 const BPF_RET_A: u16 = 0x16;
-/// `BPF_RET|BPF_MATCH_IMM` of <device/bpf.h>.
+/// `BPF_RET|BPF_MATCH_IMM`: return through the hash match of the immediate
+/// keys.
 const BPF_RET_MATCH_IMM: u16 = 0x1e;
 /// Sum `keys` with the C's wrapping addition, reduced modulo the bucket count.
 pub(crate) fn hash(keys: &[c_uint]) -> u32 {
@@ -333,7 +336,7 @@ pub(crate) fn hash(keys: &[c_uint]) -> u32 {
     hval % NET_HASH_SIZE
 }
 
-/// What a `bpf_match()` search found once the key counts agreed.
+/// What [`find_match`] found once the key counts agreed.
 pub(crate) struct Match {
     /// The bucket the C wrote to `*hash_headpp`.
     pub(crate) bucket: *mut NetHashBucket,
@@ -342,15 +345,13 @@ pub(crate) struct Match {
     pub(crate) entry: *mut NetHashEntry,
 }
 
-/// The C `bpf_match()`: the bucket slot of `header` the keys name, and the
-/// entry in it whose keys equal `keys`.
+/// The bucket slot of `header` the keys name, and the entry in it whose keys
+/// equal `keys`.
 ///
 /// # Safety
 ///
-/// `header` must point at a live `struct net_hash_header` whose `table` is
-/// well formed, and `keys` must be at most [`N_NET_HASH_KEYS`] long.  The C
-/// read `keys[i]` up to `header.n_keys`, so a longer slice is outside its
-/// contract.
+/// `header` must point at a live [`NetHashHeader`] whose `table` is well
+/// formed, and `keys` must be at most [`N_NET_HASH_KEYS`] long.
 pub(crate) unsafe fn find_match(
     header: *mut NetHashHeader,
     keys: &[c_uint],
@@ -393,13 +394,13 @@ fn accept(k: c_int, wirelen: u32) -> c_int {
     (k as u32).min(wirelen) as c_int
 }
 
-/// The C `bpf_do_filter()` interpreter state.
+/// The BPF interpreter's state.
 struct Interp {
     /// `filter[0]`, the first instruction the C could jump back to.
     start: *const BpfInsn,
-    /// The instruction being run, `pc` in the C.
+    /// The instruction being run.
     pc: *const BpfInsn,
-    /// The C's `pc_end`, which can name a byte inside an instruction.
+    /// The end of the program, which can name a byte inside an instruction.
     end: *const BpfInsn,
     packet: *const u8,
     header: *const u8,
@@ -410,20 +411,21 @@ struct Interp {
     mem: [u32; BPF_MEMWORDS],
     /// Whether `infp->rcv_port` is `MACH_PORT_NULL`, the dummy hash filter.
     rcv_port_null: bool,
-    /// `infp` seen as the `struct net_hash_header` a match instruction wants.
+    /// The receive port seen as the [`NetHashHeader`] a match instruction
+    /// wants.
     hash: *mut NetHashHeader,
-    /// The caller's `net_hash_entry_t **hash_headpp`.
+    /// Where a match stores the hash bucket it found.
     hash_headpp: *mut *mut NetHashBucket,
-    /// The caller's `net_hash_entry_t *entpp`.
+    /// Where a match stores the entry it found.
     entpp: *mut *mut NetHashEntry,
 }
 
 impl Interp {
-    /// The C's `data + k` window: an offset below `hlen` is the header's, one
-    /// above it is the packet's.  `size` is the width the C added to `k`:
-    /// four for a word, two for a half, and one for the byte and MSH loads,
-    /// whose C comparisons are the strict `k < hlen` and `k < buflen`.
-    /// A negative `k` fails both comparisons, as it did there.
+    /// The `data + k` window: an offset below `hlen` is the header's, one
+    /// above it is the packet's.  `size` is the width added to `k`: four for
+    /// a word, two for a half, and one for the byte and MSH loads, whose
+    /// comparisons are the strict `k < hlen` and `k < NET_RCV_MAX`.  A
+    /// negative `k` fails both comparisons.
     fn locate(&self, k: c_int, size: u32) -> Option<(*const u8, isize)> {
         let ku = u64::from(k as u32);
         if ku + u64::from(size) <= u64::from(self.hlen) {
@@ -503,12 +505,12 @@ impl Interp {
         }
     }
 
-    /// The C `bpf_do_filter()` instruction loop.
+    /// The instruction loop.
     ///
     /// # Safety
     ///
-    /// The caller must have accepted the program with the C's `bpf_validate()`
-    /// and must keep `packet`, `header` and the match outputs valid.
+    /// The caller must have validated the program and must keep `packet`,
+    /// `header` and the match outputs valid.
     unsafe fn execute(&mut self) -> c_int {
         while self.pc < self.end {
             // SAFETY: `pc` is inside the program, so the instruction is
@@ -832,15 +834,15 @@ fn jump_delta(taken: bool, insn: BpfInsn) -> isize {
     }
 }
 
-/// The C `bpf_do_filter()` body.
+/// Runs the BPF program of `port` over the packet and its header, returning
+/// how much of the packet to accept: 0 rejects it.
 ///
 /// # Safety
 ///
-/// `port` must point at a live `struct net_rcv_port` or `struct
-/// net_hash_header` whose `filter` and `filter_end` delimit a program the
-/// C's `bpf_validate()` accepted; `packet` must be readable for
-/// [`NET_RCV_MAX`] bytes with the three bytes before it readable too;
-/// `header` must be readable for `hlen` bytes; `hash_headpp` and `entpp`
+/// `port` must point at a live [`NetRcvPort`] or [`NetHashHeader`] whose
+/// `filter` and `filter_end` delimit a validated program; `packet` must be
+/// readable for [`NET_RCV_MAX`] bytes with the three bytes before it readable
+/// too; `header` must be readable for `hlen` bytes; `hash_headpp` and `entpp`
 /// must be writable, and `entpp` must be left null before the call.
 pub(crate) unsafe fn do_filter(
     port: *mut NetRcvPort,
@@ -854,10 +856,9 @@ pub(crate) unsafe fn do_filter(
     let filter = unsafe { (*port).filter.as_ptr() };
     let filter_end = unsafe { (*port).filter_end };
     let bytes = (filter_end as usize).saturating_sub(filter as usize);
-    // `net_set_filter()` sets `filter_end` from the filter's byte length,
-    // which need not be a multiple of one instruction; the C's `pc` walks
-    // bytes and stops at the address, so a program of one instruction or
-    // less never runs.
+    // The filter's end comes from its byte length, which need not be a
+    // multiple of one instruction; the walk stops at the address, so a program
+    // of one instruction or less never runs.
     if bytes <= size_of::<BpfInsn>() {
         return 0;
     }
@@ -886,46 +887,48 @@ pub(crate) unsafe fn do_filter(
 
 /* ======== the kmsg pool, the filter lists and the receive thread ======== */
 
-/// `NET_HDW_HDR_MAX` of <`device/net_status.h`>.
+/// The most bytes of a hardware header.
 const NET_HDW_HDR_MAX: usize = 64;
 /// The `unsigned short` words a header filter may address.
 const NET_HDR_WORDS: usize = NET_HDW_HDR_MAX / 2;
-/// `NET_FILTER_STACK_DEPTH` of <`device/net_status.h`>.
+/// The depth of the old filter's stack.
 const NET_FILTER_STACK_DEPTH: usize = 32;
-/// `NET_HI_PRI` of <`device/net_status.h>`: the priority that stops delivery.
+/// The priority that stops delivery.
 const NET_HI_PRI: c_int = 100;
-/// `MACH_SEND_TIMEOUT` of <mach/message.h>.
+/// The send option asking for a timeout.
 const MACH_SEND_TIMEOUT: c_uint = 0x10;
-/// `MACH_MSG_TYPE_PORT_SEND` of <mach/message.h>.
+/// The send-right disposition.
 const MACH_MSG_TYPE_PORT_SEND: c_uint = 17;
-/// `MACH_MSG_TYPE_BYTE` of <mach/message.h>.
+/// The type of a byte in a message body.
 const MACH_MSG_TYPE_BYTE: u32 = 9;
-/// `NET_RCV_MSG_ID` of <`device/net_status.h`>.
+/// The message id of a network receive message.
 const NET_RCV_MSG_ID: c_int = 2999;
 
-/// `NETF_TYPE_MASK` of <`device/net_status.h`>.
+/// The filter-type bits of a filter's first word.
 const NETF_TYPE_MASK: u16 = 0xfc00;
-/// `NETF_BPF` of <`device/net_status.h`>.
+/// The filter type of a BPF program.
 const NETF_BPF: u16 = 0x400;
-/// `NETF_IN` of <`device/net_status.h`>.
+/// The filter applies to incoming packets.
 const NETF_IN: u16 = 0x1;
-/// `NETF_OUT` of <`device/net_status.h`>.
+/// The filter applies to outgoing packets.
 const NETF_OUT: u16 = 0x2;
-/// `NETF_NOPUSH` of <`device/net_status.h`>.
+/// The old filter's push argument that pushes nothing.
 const NETF_NOPUSH: u16 = 0;
-/// `NETF_PUSHLIT` of <`device/net_status.h`>.
+/// The old filter's push argument that pushes the literal after it.
 const NETF_PUSHLIT: u16 = 1;
-/// `NETF_PUSHZERO` of <`device/net_status.h`>.
+/// The old filter's push argument that pushes zero.
 const NETF_PUSHZERO: u16 = 2;
-/// `NETF_PUSHIND` of <`device/net_status.h`>.
+/// The old filter's push argument that pushes the packet word the stack top
+/// indexes.
 const NETF_PUSHIND: u16 = 14;
-/// `NETF_PUSHHDRIND` of <`device/net_status.h`>.
+/// The old filter's push argument that pushes the header word the stack top
+/// indexes.
 const NETF_PUSHHDRIND: u16 = 15;
-/// `NETF_PUSHWORD` of <`device/net_status.h`>.
+/// The base of the old filter's push arguments that push a packet word.
 const NETF_PUSHWORD: u16 = 16;
-/// `NETF_PUSHHDR` of <`device/net_status.h`>.
+/// The base of the old filter's push arguments that push a header word.
 const NETF_PUSHHDR: u16 = 960;
-/// `NETF_PUSHSTK` of <`device/net_status.h`>.
+/// The base of the old filter's push arguments that push a stack word.
 const NETF_PUSHSTK: u16 = 992;
 
 /// The descriptor word of a `mach_msg_type_t` initializer.
@@ -933,15 +936,15 @@ const fn descriptor_word(name: u32, size: u32) -> u32 {
     name | (size << 8) | (1 << 29)
 }
 
-/// `header_type` of `device/net_io.c`: the 64-byte hardware header.
+/// The 64-byte hardware header.
 const HEADER_TYPE: MachMsgType =
     MachMsgType::new(descriptor_word(MACH_MSG_TYPE_BYTE, 8), 64);
-/// `packet_type` of `device/net_io.c`: the variable-length packet body.
+/// The variable-length packet body.
 const PACKET_TYPE: MachMsgType =
     MachMsgType::new(descriptor_word(MACH_MSG_TYPE_BYTE, 8), 0);
 
-/// `struct packet_header` of <`device/net_status.h>`: the length and type
-/// words the BPF filter window skips.
+/// `struct packet_header`: the length and type words the BPF filter window
+/// skips.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -955,7 +958,7 @@ const _: () = assert!(align_of::<PacketHeader>() == 2);
 const _: () = assert!(offset_of!(PacketHeader, length) == 0);
 const _: () = assert!(offset_of!(PacketHeader, type_) == 2);
 
-/// `struct ifqueue` of <`device/if_hdr.h>`: an interface's output queue.
+/// An interface's output queue.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct IfQueue {
@@ -976,8 +979,7 @@ const _: () = {
     assert!(offset_of!(IfQueue, ifq_lock) == 28);
 };
 
-/// `struct ifnet` of <`device/if_hdr.h`>: a network interface's header,
-/// shared with the C drivers through <`device/if_hdr.h`>.
+/// A network interface's header.
 ///
 /// Both port-list heads must start as empty lists when the interface is
 /// created, and the interface stays in place while a port is on either.
@@ -1006,8 +1008,7 @@ pub struct IfNet {
     pub if_rcvdrops: c_int,
 }
 
-// The sizes, alignments and offsets are gdb's `ptype /o struct ifnet` over
-// build-64/gnumach.
+// The record keeps its established sizes, alignments and field offsets.
 const _: () = {
     assert!(size_of::<IfNet>() == 120);
     assert!(align_of::<IfNet>() == 8);
@@ -1033,7 +1034,7 @@ const _: () = {
     assert!(offset_of!(IfNet, if_rcvdrops) == 116);
 };
 
-/// `struct net_status` of <`device/net_status.h>`: the `NET_STATUS` reply.
+/// `struct net_status`: the reply of the `NET_STATUS` flavor.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct NetStatus {
@@ -1051,8 +1052,8 @@ const _: () = assert!(align_of::<NetStatus>() == 4);
 const _: () = assert!(offset_of!(NetStatus, min_packet_size) == 0);
 const _: () = assert!(offset_of!(NetStatus, mapped_size) == 24);
 
-/// `struct net_rcv_msg` of <`device/net_status.h>`: the message a network
-/// receive port gets, laid over the `struct ipc_kmsg` header.
+/// `struct net_rcv_msg`: the message a network receive port gets, laid over
+/// the kernel-message header.
 #[repr(C, align(8))]
 #[allow(missing_docs)]
 pub(crate) struct NetRcvMsg {
@@ -1075,103 +1076,102 @@ const _: () = {
     assert!(offset_of!(NetRcvMsg, sent) == 4208);
 };
 
-/// `net_queue_lock` of `device/net_io.c`: the high and low send queues and
-/// `net_thread_awake`.
+/// Guards the high and low send queues and `NET_THREAD_AWAKE`.
 static NET_QUEUE_LOCK: SimpleLock = SimpleLock::new();
-/// `net_queue_free_lock`: the free kmsg pool.
+/// Guards the free message pool.
 static NET_QUEUE_FREE_LOCK: SimpleLock = SimpleLock::new();
-/// `net_kmsg_total_lock`: the allocation counters.
+/// Guards the allocation counters.
 static NET_KMSG_TOTAL_LOCK: SimpleLock = SimpleLock::new();
-/// `net_hash_header_lock`: picks a free `filter_hash_header[]` slot.
+/// Serializes picking a free hash-header slot.
 static NET_HASH_HEADER_LOCK: SimpleLock = SimpleLock::new();
 
-/// `net_thread_awake`, under [`NET_QUEUE_LOCK`].
+/// Whether the receive thread is awake, under [`NET_QUEUE_LOCK`].
 static NET_THREAD_AWAKE: SyncCell<bool> = SyncCell(UnsafeCell::new(false));
-/// `net_queue_high`, under [`NET_QUEUE_LOCK`].
+/// The high-priority send queue, under [`NET_QUEUE_LOCK`].
 static NET_QUEUE_HIGH: SyncCell<IpcKmsgQueue> =
     SyncCell(UnsafeCell::new(IpcKmsgQueue {
         base: ptr::null_mut(),
     }));
-/// `net_queue_high_size`, under [`NET_QUEUE_LOCK`].
+/// The length of [`NET_QUEUE_HIGH`], under [`NET_QUEUE_LOCK`].
 static NET_QUEUE_HIGH_SIZE: SyncCell<c_int> = SyncCell(UnsafeCell::new(0));
-/// `net_queue_low`, under [`NET_QUEUE_LOCK`].
+/// The low-priority send queue, under [`NET_QUEUE_LOCK`].
 static NET_QUEUE_LOW: SyncCell<IpcKmsgQueue> =
     SyncCell(UnsafeCell::new(IpcKmsgQueue {
         base: ptr::null_mut(),
     }));
-/// `net_queue_low_size`: `net_kmsg_want_more` reads it without the queue
+/// The length of [`NET_QUEUE_LOW`]: [`want_more`] reads it without the queue
 /// lock, so it is an atomic; the queue lock still serializes its updates.
 static NET_QUEUE_LOW_SIZE: AtomicI32 = AtomicI32::new(0);
-/// `net_queue_free`, under [`NET_QUEUE_FREE_LOCK`].
+/// The free message pool, under [`NET_QUEUE_FREE_LOCK`].
 static NET_QUEUE_FREE: SyncCell<IpcKmsgQueue> =
     SyncCell(UnsafeCell::new(IpcKmsgQueue {
         base: ptr::null_mut(),
     }));
-/// `net_queue_free_size`: `net_kmsg_want_more` reads it without the free
+/// The length of [`NET_QUEUE_FREE`]: [`want_more`] reads it without the free
 /// lock, so it is an atomic; the free lock still serializes its updates.
 static NET_QUEUE_FREE_SIZE: AtomicI32 = AtomicI32::new(0);
-/// `net_queue_free_max`, under [`NET_QUEUE_FREE_LOCK`].
+/// The largest the free pool has been, under [`NET_QUEUE_FREE_LOCK`].
 static NET_QUEUE_FREE_MAX: SyncCell<c_int> = SyncCell(UnsafeCell::new(0));
-/// `net_queue_free_min`: how many free buffers to keep.  `net_kmsg_want_more`
-/// reads it without a lock, so it is an atomic.
+/// How many free buffers to keep.  [`want_more`] reads it without a lock, so
+/// it is an atomic.
 static NET_QUEUE_FREE_MIN: AtomicI32 = AtomicI32::new(3);
-/// `net_queue_free_hits`, under [`NET_QUEUE_FREE_LOCK`].
+/// How often a free buffer was there, under [`NET_QUEUE_FREE_LOCK`].
 static NET_QUEUE_FREE_HITS: SyncCell<c_int> = SyncCell(UnsafeCell::new(0));
-/// `net_queue_free_steals`, under [`NET_QUEUE_LOCK`].
+/// How often a buffer was stolen from the low queue, under [`NET_QUEUE_LOCK`].
 static NET_QUEUE_FREE_STEALS: SyncCell<c_int> = SyncCell(UnsafeCell::new(0));
-/// `net_queue_free_misses`: a debug counter the C incremented without a lock.
+/// A debug counter of free-pool misses, incremented without a lock.
 static NET_QUEUE_FREE_MISSES: AtomicI32 = AtomicI32::new(0);
-/// `net_kmsg_send_high_hits`: a debug counter the C incremented unlocked.
+/// A debug counter of high-queue sends, incremented without a lock.
 static NET_KMSG_SEND_HIGH_HITS: AtomicI32 = AtomicI32::new(0);
-/// `net_kmsg_send_low_hits`: a debug counter the C incremented unlocked.
+/// A debug counter of low-queue sends, incremented without a lock.
 static NET_KMSG_SEND_LOW_HITS: AtomicI32 = AtomicI32::new(0);
-/// `net_kmsg_send_high_misses`: a debug counter the C touched unlocked.
+/// A debug counter of high-queue send misses, touched without a lock.
 static NET_KMSG_SEND_HIGH_MISSES: AtomicI32 = AtomicI32::new(0);
-/// `net_kmsg_send_low_misses`: a debug counter the C touched unlocked.
+/// A debug counter of low-queue send misses, touched without a lock.
 static NET_KMSG_SEND_LOW_MISSES: AtomicI32 = AtomicI32::new(0);
 /// The times the network thread has been awakened, a debug counter.
 static NET_THREAD_AWAKEN: AtomicI32 = AtomicI32::new(0);
 /// The times the network AST has been taken, a debug counter.
 static NET_AST_TAKEN: AtomicI32 = AtomicI32::new(0);
-/// `net_kmsg_total`: how many network messages exist.  `net_kmsg_want_more`
-/// reads it without the total lock, so it is an atomic.
+/// How many network messages exist.  [`want_more`] reads it without the total
+/// lock, so it is an atomic.
 static NET_KMSG_TOTAL: AtomicI32 = AtomicI32::new(0);
-/// `net_kmsg_max`: the allocation cap, read by `net_kmsg_want_more` too.
+/// The allocation cap, read by [`want_more`] too.
 static NET_KMSG_MAX: AtomicI32 = AtomicI32::new(0);
-/// `net_kmsg_size`: the allocation size, written once by `net_io_init()`.
+/// The allocation size, written once by [`init`].
 static NET_KMSG_SIZE: AtomicUsize = AtomicUsize::new(0);
-/// `net_filter_queue_reorder`: non-zero to enable queue reordering.  The C
-/// left it a global for debuggers; the symbol is kept.
+/// Non-zero to enable queue reordering, for a debugger to set.
 static NET_FILTER_QUEUE_REORDER: AtomicI32 = AtomicI32::new(0);
 
-/// `net_rcv_cache` of `device/net_io.c`.
+/// The slab cache of [`NetRcvPort`] records.
 static NET_RCV_CACHE: SyncCell<KmemCache> =
     SyncCell(UnsafeCell::new(KmemCache::zeroed()));
-/// `net_hash_entry_cache` of `device/net_io.c`.
+/// The slab cache of [`NetHashEntry`] records.
 static NET_HASH_ENTRY_CACHE: SyncCell<KmemCache> =
     SyncCell(UnsafeCell::new(KmemCache::zeroed()));
 
-/// `net_rcv_cache`'s address, for the cache calls that take `&mut self`.
+/// The address of [`NET_RCV_CACHE`], for the cache calls that take
+/// `&mut self`.
 fn rcv_cache() -> *mut KmemCache {
     NET_RCV_CACHE.0.get()
 }
 
-/// `net_hash_entry_cache`'s address.
+/// The address of [`NET_HASH_ENTRY_CACHE`].
 fn hash_entry_cache() -> *mut KmemCache {
     NET_HASH_ENTRY_CACHE.0.get()
 }
 
-/// `net_queue_high`'s address.
+/// The address of [`NET_QUEUE_HIGH`].
 fn queue_high() -> *mut IpcKmsgQueue {
     NET_QUEUE_HIGH.0.get()
 }
 
-/// `net_queue_low`'s address.
+/// The address of [`NET_QUEUE_LOW`].
 fn queue_low() -> *mut IpcKmsgQueue {
     NET_QUEUE_LOW.0.get()
 }
 
-/// `net_queue_free`'s address.
+/// The address of [`NET_QUEUE_FREE`].
 fn queue_free() -> *mut IpcKmsgQueue {
     NET_QUEUE_FREE.0.get()
 }
@@ -1187,8 +1187,7 @@ const unsafe fn port_hash_header(port: *mut NetRcvPort) -> *mut NetHashHeader {
     port.cast()
 }
 
-/// `net_kmsg(kmsg)` of <`device/net_io.h>`: the receive message over the
-/// kmsg's header.
+/// The receive message over the kmsg's header.
 ///
 /// # Safety
 ///
@@ -1198,14 +1197,13 @@ unsafe fn net_kmsg(kmsg: Kmsg) -> *mut NetRcvMsg {
     unsafe { kmsg.header().cast() }
 }
 
-/// `P2ROUND()` of <kern/macros.h>: round `x` up to a multiple of the power
-/// of two `align`.
+/// Rounds `x` up to a multiple of the power of two `align`.
 const fn p2round(x: usize, align: usize) -> usize {
     (x + (align - 1)) & !(align - 1)
 }
 
-/// The `net_kmsg_want_more()` macro of `device/net_io.c`.  The C comment
-/// says a misread value is not critical, so the loads are `Relaxed`.
+/// Whether the pool should grow.  A misread value is not critical, so the
+/// loads are `Relaxed`.
 fn want_more() -> bool {
     let free = NET_QUEUE_FREE_SIZE.load(Ordering::Relaxed);
     let low = NET_QUEUE_LOW_SIZE.load(Ordering::Relaxed);
@@ -1215,7 +1213,7 @@ fn want_more() -> bool {
     free.wrapping_add(low) < min && total < max
 }
 
-/// `net_kmsg_alloc()` of <`device/net_io.h`>.
+/// Allocates a network message buffer, or null.
 ///
 /// # Safety
 ///
@@ -1227,7 +1225,7 @@ unsafe fn kmsg_alloc() -> *mut c_void {
     slab::kalloc(size).map_or(ptr::null_mut(), |buf| buf.as_ptr().cast())
 }
 
-/// `net_kmsg_free()` of <`device/net_io.h`>.
+/// Frees a network message buffer.
 ///
 /// # Safety
 ///
@@ -1240,13 +1238,13 @@ unsafe fn kmsg_free(kmsg: *mut c_void) {
     unsafe { slab::kfree(buf, NET_KMSG_SIZE.load(Ordering::Relaxed)) };
 }
 
-/// `net_kmsg_get()` of <`device/net_io.h`>.
+/// Takes a message off the free pool, or `None` when it is empty.
 ///
 /// # Safety
 ///
-/// The caller must run in kernel mode with `%gs` based at the running
-/// CPU's `struct percpu`, as [`spl::splimp`] requires, and must hold
-/// neither [`NET_QUEUE_FREE_LOCK`] nor [`NET_QUEUE_LOCK`].
+/// The caller must run in kernel mode with `%gs` based at the running CPU's
+/// per-CPU block, as [`spl::splimp`] requires, and must hold neither
+/// [`NET_QUEUE_FREE_LOCK`] nor [`NET_QUEUE_LOCK`].
 pub(crate) unsafe fn kmsg_get() -> Option<Kmsg> {
     // SAFETY: this thread runs in kernel mode with `%gs` based.
     let s = unsafe { spl::splimp() };
@@ -1302,7 +1300,7 @@ pub(crate) unsafe fn kmsg_get() -> Option<Kmsg> {
     kmsg
 }
 
-/// `net_kmsg_put()` of <`device/net_io.h`>.
+/// Returns a message to the free pool, or frees it when the pool is full.
 ///
 /// # Safety
 ///
@@ -1332,7 +1330,7 @@ pub(crate) unsafe fn kmsg_put(kmsg: *mut c_void) {
     let _ = unsafe { spl::splx(s) };
 }
 
-/// `net_kmsg_collect()` of <`device/net_io.h`>.
+/// Frees the pool's messages beyond its minimum.
 ///
 /// # Safety
 ///
@@ -1370,7 +1368,7 @@ pub(crate) unsafe fn kmsg_collect() {
     let _ = unsafe { spl::splx(s) };
 }
 
-/// `net_kmsg_more()` of `device/net_io.c`.
+/// Allocates messages into the free pool while it should grow.
 ///
 /// # Safety
 ///
@@ -1396,7 +1394,8 @@ unsafe fn kmsg_more() {
     }
 }
 
-/// `net_deliver()` of `device/net_io.c`.
+/// Delivers one queued message, high priority first, returning whether there
+/// was one.
 ///
 /// # Safety
 ///
@@ -1428,7 +1427,7 @@ unsafe fn deliver(nonblocking: bool) -> bool {
         base: ptr::null_mut(),
     };
     // SAFETY: the message is live and holds the interface pointer, the list
-    // is an empty local queue, and only [`NET_QUEUE_LOCK`] is held.
+    // is an empty local queue, and only `NET_QUEUE_LOCK` is held.
     unsafe { filter(kmsg, &raw mut send_list) };
 
     if !nonblocking {
@@ -1515,8 +1514,7 @@ pub(crate) unsafe fn ast() {
     let _ = unsafe { spl::splx(s) };
 }
 
-/// `net_thread_continue()` of `device/net_io.c`, the receive thread body,
-/// which never returns.
+/// The receive thread body, which never returns.
 ///
 /// # Safety
 ///
@@ -1553,13 +1551,14 @@ unsafe fn thread_continue_inner() -> ! {
     }
 }
 
-/// The continuation form of `net_thread_continue()` `thread_block()` takes.
+/// The continuation form of [`thread_continue_inner`] that `thread_block()`
+/// takes.
 unsafe extern "C" fn thread_continue() {
     // SAFETY: the continuation re-enters the loop, which never returns.
     unsafe { thread_continue_inner() };
 }
 
-/// `net_thread()` of `device/net_io.c`.
+/// Becomes the network receive thread.
 ///
 /// # Safety
 ///
@@ -1593,7 +1592,7 @@ pub(crate) unsafe fn thread() -> ! {
     unsafe { thread_continue_inner() }
 }
 
-/// `net_thread()` of <`device/net_io.h`>.
+/// The kernel-thread entry of [`thread`].
 ///
 /// # Safety
 ///
@@ -1602,7 +1601,7 @@ pub(crate) unsafe extern "C" fn net_thread() {
     unsafe { thread() };
 }
 
-/// The `NETF_OP(NETF_*)` value of each operator in <`device/net_status.h`>.
+/// The operator value of each old-filter operator.
 const NETF_OP_NOP: u32 = 0;
 const NETF_OP_EQ: u32 = 1;
 const NETF_OP_LT: u32 = 2;
@@ -1622,11 +1621,12 @@ const NETF_OP_RSH: u32 = 15;
 const NETF_OP_ADD: u32 = 16;
 const NETF_OP_SUB: u32 = 17;
 
-/// `net_do_filter()` of `device/net_io.c`: run the old `filter_t` program.
+/// Runs the old filter program of `infp` over the packet, returning whether it
+/// accepts it.
 ///
 /// # Safety
 ///
-/// `infp` must point at a live receive port whose filter `net_set_filter()`
+/// `infp` must point at a live receive port whose filter the filter setup
 /// accepted, and `data`/`header` must be readable for the words the program
 /// addresses.
 pub(crate) unsafe fn net_do_filter(
@@ -1821,8 +1821,8 @@ unsafe fn filter_arg(
     Some(arg)
 }
 
-/// The C's `REORDER_PRIO()` macro: promote `port` ahead of an equal-priority
-/// predecessor whose count lags by more than the threshold.
+/// Promotes `port` ahead of an equal-priority predecessor whose count lags by
+/// more than the threshold.
 ///
 /// # Safety
 ///
@@ -1859,8 +1859,7 @@ unsafe fn reorder_prio<A>(
         // SAFETY: the predecessor is a live port, as above.
         && 100i32.wrapping_add(unsafe { (*prevfp).rcv_count }) < rcount;
     if equal && behind {
-        // The C's `reorder_queue()` swapped the adjacent pair, which moves
-        // the port before its predecessor.
+        // Swapping the adjacent pair moves the port before its predecessor.
         // SAFETY: the port is linked, and the removal keeps `prevfp`; the
         // caller's list lock guards the list.
         unsafe {
@@ -1873,8 +1872,8 @@ unsafe fn reorder_prio<A>(
     }
 }
 
-/// `net_filter()` of `device/net_io.c`: run `kmsg` through the interface's
-/// filters and queue a copy per matching receive port.
+/// Runs `kmsg` through the interface's filters and queues a copy per matching
+/// receive port.
 ///
 /// # Safety
 ///
@@ -2198,7 +2197,9 @@ unsafe fn deliver_port(
     false
 }
 
-/// `hash_ent_remove()` of `device/net_io.c`.
+/// Unlinks `entp` from `bucket` and moves it to `dead`; when it was the last
+/// entry of `hp` and nothing else uses `hp`, also takes `hp` off the
+/// interface's lists and returns `true`.
 ///
 /// # Safety
 ///
@@ -2251,7 +2252,8 @@ pub(crate) unsafe fn hash_ent_remove(
     unused
 }
 
-/// `net_del_q_info()` of `device/net_io.c`.
+/// Gives back the pool share of a removed receive port with queue limit
+/// `qlimit`.
 ///
 /// # Safety
 ///
@@ -2263,7 +2265,7 @@ unsafe fn del_q_info(qlimit: c_int) {
     NET_KMSG_TOTAL_LOCK.unlock();
 }
 
-/// `net_free_dead_infp()` of `device/net_io.c`.
+/// Frees the dead receive ports in `dead`, releasing their rights.
 ///
 /// # Safety
 ///
@@ -2287,7 +2289,7 @@ pub(crate) unsafe fn free_dead_infp(mut dead: Pin<&mut NetInputList>) {
     }
 }
 
-/// `net_free_dead_entp()` of `device/net_io.c`.
+/// Frees the dead hash entries in `dead`, releasing their rights.
 ///
 /// # Safety
 ///
@@ -2312,7 +2314,7 @@ pub(crate) unsafe fn free_dead_entp(mut dead: Pin<&mut NetHashBucket>) {
     }
 }
 
-/// `net_io_init()` of `device/net_io.c`.
+/// Creates the caches and the free pool, and sizes the message buffers.
 ///
 /// # Safety
 ///

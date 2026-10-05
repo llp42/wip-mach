@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989,1988,1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The statistical timers, which `kern/timer.c` used to define for
-//! `kern/timer.h`.
+//! The statistical timers.
 
 use crate::config::MAX_NCPUS;
 use crate::kern::thread::Thread;
@@ -16,11 +15,10 @@ use core::mem::offset_of;
 use core::ptr;
 use core::sync::atomic::{Ordering, fence};
 
-/// `TIMER_RATE` in <kern/timer.h>: the timer's tick rate, in microseconds per
-/// second.
+/// The timer's tick rate, in microseconds per second.
 pub(crate) const TIMER_RATE: c_uint = 1_000_000;
 
-/// `struct timer` of <kern/timer.h>: the statistical CPU timer.
+/// The statistical CPU timer.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Timer {
@@ -34,7 +32,7 @@ pub struct Timer {
     pub tstamp: c_uint,
 }
 
-/// `struct timer_save` of <kern/timer.h>: a saved timer reading.
+/// A saved timer reading.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -43,16 +41,16 @@ pub struct TimerSave {
     pub high: c_uint,
 }
 
-/// `current_timer[NCPUS]` of kern/timer.c: the timer each CPU charges.
+/// The timer each CPU charges.
 static CURRENT_TIMER: SyncCell<[*mut Timer; MAX_NCPUS]> =
     SyncCell(UnsafeCell::new([ptr::null_mut(); MAX_NCPUS]));
 
-/// `kernel_timer[NCPUS]` of kern/timer.c: the timer each CPU runs on.
+/// The timer each CPU runs on.
 static KERNEL_TIMER: SyncCell<[Timer; MAX_NCPUS]> =
     SyncCell(UnsafeCell::new([Timer::zeroed(); MAX_NCPUS]));
 
 impl Timer {
-    /// The zero image a C `static` of `struct timer` began with.
+    /// The all-zero timer a static begins with.
     const fn zeroed() -> Self {
         Self {
             low_bits: 0,
@@ -62,7 +60,7 @@ impl Timer {
         }
     }
 
-    /// Zero every field, as `timer_init()` of <kern/timer.c> did.
+    /// Zeroes every field.
     pub const fn init(&mut self) {
         self.low_bits = 0;
         self.high_bits = 0;
@@ -70,8 +68,7 @@ impl Timer {
         self.high_bits_check = 0;
     }
 
-    /// Fold whole seconds out of the microsecond count, as `timer_normalize()`
-    /// of <kern/timer.c> did.
+    /// Folds whole seconds out of the microsecond count.
     pub fn normalize(&mut self) {
         let high_increment = self.low_bits / TIMER_RATE;
         self.high_bits_check =
@@ -86,8 +83,8 @@ impl Timer {
         self.high_bits = self.high_bits.wrapping_add(high_increment);
     }
 
-    /// Add `usec` microseconds, carrying into the seconds count once the
-    /// low word fills (`timer_bump()` of <kern/timer.h>).
+    /// Adds `usec` microseconds, carrying into the seconds count once the low
+    /// word fills.
     pub fn bump(&mut self, usec: c_uint) {
         self.low_bits = self.low_bits.wrapping_add(usec);
         if self.low_bits >= TIMER_RATE {
@@ -117,8 +114,7 @@ impl TimerSave {
     }
 }
 
-/// Read a coherent pair of fields from `timer` into `save`, as `timer_grab()`
-/// of <kern/timer.c> did.
+/// Reads a coherent pair of fields from `timer` into `save`.
 fn grab(timer: &Timer, save: &mut TimerSave) {
     loop {
         save.high = timer.high_bits;
@@ -134,8 +130,8 @@ fn grab(timer: &Timer, save: &mut TimerSave) {
     }
 }
 
-/// Take the difference between `save` and the live `timer`, updating `save` to
-/// the reading, as `timer_delta()` of <kern/timer.c> did.
+/// Takes the difference between `save` and the live `timer`, updating `save`
+/// to the reading.
 pub(crate) fn delta(timer: &Timer, save: &mut TimerSave) -> c_uint {
     let mut new_save = TimerSave::default();
     grab(timer, &mut new_save);
@@ -149,7 +145,7 @@ pub(crate) fn delta(timer: &Timer, save: &mut TimerSave) -> c_uint {
     result
 }
 
-/// The `TIMER_TO_TIME_VALUE64` macro of kern/timer.c.
+/// The reading in `save` as a time value.
 fn to_time_value(save: TimerSave) -> TimeValue64 {
     TimeValue64 {
         seconds: i64::from(save.high.wrapping_add(save.low / TIMER_RATE)),
@@ -157,22 +153,19 @@ fn to_time_value(save: TimerSave) -> TimeValue64 {
     }
 }
 
-/// Read `timer` as seconds and nanoseconds, as `timer_read()` of
-/// <kern/timer.c> did.
+/// Reads `timer` as seconds and nanoseconds.
 pub(crate) fn read(timer: &Timer) -> TimeValue64 {
     let mut save = TimerSave::default();
     grab(timer, &mut save);
     to_time_value(save)
 }
 
-/// Read a thread's user and system times, as `thread_read_times()` of
-/// <kern/timer.c> did.
+/// Reads a thread's user and system times.
 pub(crate) fn read_times(thread: &Thread) -> (TimeValue64, TimeValue64) {
     (read(&thread.user_timer), read(&thread.system_timer))
 }
 
-/// Zero every kernel timer and clear every current-timer pointer, as
-/// `init_timers()` of kern/timer.c did.
+/// Zeroes every kernel timer and clears every current-timer pointer.
 ///
 /// # Safety
 ///
@@ -188,9 +181,6 @@ pub(crate) unsafe fn init_timers() {
             current.add(i).write(ptr::null_mut());
         }
     }
-
-    // The C `start_timer()` is an empty macro in <kern/timer.h>, so its call
-    // after the loop expands to nothing.
 }
 
 const _: () = assert!(size_of::<Timer>() == 16);

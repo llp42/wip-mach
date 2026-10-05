@@ -4,8 +4,7 @@
 //   Copyright (c) 1991 IBM Corporation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The clock interrupt, which `i386/i386/hardclock.c` used to define and
-//! `i386/i386/hardclock.h` declares.
+//! The clock interrupt.
 
 use crate::arch::x86_64::clock_platform;
 use crate::arch::x86_64::locore;
@@ -17,11 +16,10 @@ use crate::kern::smp::CpuId;
 use core::ffi::{c_char, c_int, c_uint};
 use core::ptr;
 
-/// `SPL0` of <i386/ipl.h>: the base interrupt level.
+/// The base interrupt level.
 const SPL0: c_int = 0;
 
-/// `hardclock()` of `i386/i386/hardclock.c`: charge one clock tick to the
-/// interrupted context.
+/// Charges one clock tick to the interrupted context.
 ///
 /// # Safety
 ///
@@ -56,8 +54,7 @@ pub(crate) unsafe fn hardclock(
     }
 }
 
-/// `hardclock()` of <i386/hardclock.h>: the `ivect` entry the interrupt
-/// trampoline calls.
+/// The interrupt entry the trampoline calls for the clock.
 ///
 /// # Safety
 ///

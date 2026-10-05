@@ -5,9 +5,8 @@
 //   Copyright (c) 1991,1990,1989,1988,1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! VM scalar and handle types, from `mach/vm_prot.h` and `vm_inherit.h`,
-//! the `struct vm_object` and `struct vm_statistics` records, and the VM
-//! headers' opaque pointers.
+//! VM scalar and handle types: protections and inheritance, the VM object and
+//! statistics records, and the opaque pointers of the VM interfaces.
 
 use crate::arch::types::{VmOffset, VmSize};
 pub(crate) use crate::arch::vm_param::{PAGE_MASK, PAGE_SHIFT, PAGE_SIZE};
@@ -17,7 +16,7 @@ use collections::list::{self, List};
 use core::ffi::{c_int, c_uint, c_void};
 use core::pin::Pin;
 
-/// `vm_prot_t` of <`mach/vm_prot.h>`: a set of bits.
+/// `vm_prot_t`: a set of protection bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct VmProt(c_int);
@@ -33,9 +32,9 @@ impl VmProt {
     pub const EXECUTE: Self = Self(0x4);
     /// `VM_PROT_ALL`: read, write and execute.
     pub const ALL: Self = Self(Self::READ.0 | Self::WRITE.0 | Self::EXECUTE.0);
-    /// `VM_PROT_NO_CHANGE`: a marker `vm_map_protect` refuses to set.
+    /// `VM_PROT_NO_CHANGE`: a marker `VmMap::protect` refuses to set.
     pub const NO_CHANGE: Self = Self(0x08);
-    /// `VM_PROT_NOTIFY`: a marker bit for callers of `vm_map_protect`.
+    /// `VM_PROT_NOTIFY`: a marker bit for callers of `VmMap::protect`.
     pub const NOTIFY: Self = Self(0x10);
 
     /// The `c_int` the C side passes and stores.
@@ -93,7 +92,7 @@ impl core::ops::Not for VmProt {
     }
 }
 
-/// `vm_inherit_t` of <`mach/vm_inherit.h`>.
+/// `vm_inherit_t`: what a child task's map inherits from a range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct VmInherit(c_int);
@@ -119,14 +118,12 @@ impl VmInherit {
     }
 }
 
-/// `pmap_t`: the machine-dependent physical map of a VM map, whose mirror
-/// lives in the arch tree.
+/// The machine-dependent physical map of a VM map, which lives in the arch
+/// tree.
 pub use crate::arch::x86_64::pmap::Pmap;
 
-/// The `unsigned int` run of flags in `struct vm_object`, in the C
-/// declaration order the compiler packs: `paging_in_progress` in bits 0 to
-/// 15, then one bit per boolean flag, `used_for_pageout` at bit 16 through
-/// `cached` at bit 28.
+/// The flag word of [`VmObject`]: the paging-in-progress count in bits 0 to
+/// 15, then one bit per boolean flag, from bit 16 through bit 28.
 const VM_OBJECT_PAGING_IN_PROGRESS_MASK: u32 = 0xffff;
 const VM_OBJECT_USED_FOR_PAGEOUT_BIT: u32 = 1 << 16;
 const VM_OBJECT_PAGER_CREATED_BIT: u32 = 1 << 17;
@@ -142,8 +139,7 @@ const VM_OBJECT_USE_SHARED_COPY_BIT: u32 = 1 << 26;
 const VM_OBJECT_SHADOWED_BIT: u32 = 1 << 27;
 const VM_OBJECT_CACHED_BIT: u32 = 1 << 28;
 
-/// `struct vm_object` of <`vm/vm_object.h>`: the memory object a page belongs
-/// to and an entry maps.
+/// The memory object a page belongs to and an entry maps.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct VmObject {
@@ -230,8 +226,8 @@ impl VmObject {
         }
     }
 
-    /// The zero image a C `static` of `struct vm_object` began with, before
-    /// `vm_object_bootstrap()` filled the template.
+    /// The all-zero object a static begins with, before the bootstrap fills
+    /// the template.
     pub(crate) const fn zeroed() -> Self {
         Self {
             memq: ListqList::new(),
@@ -354,39 +350,38 @@ impl VmObject {
         self.set_flag(VM_OBJECT_CACHED_BIT, on);
     }
 
-    /// `all_wanted |= 1 << event`, the first line of the
-    /// `vm_object_wait()`/`vm_object_assert_wait()` macros.
+    /// Records that a thread waits for `event`.
     pub const fn want(&mut self, event: u32) {
         self.all_wanted |= 1 << event;
     }
 
-    /// The `all_wanted & (1 << event)` test of `vm_object_wakeup()`.
+    /// Whether a thread waits for `event`.
     pub const fn wants(&self, event: u32) -> bool {
         self.all_wanted & (1 << event) != 0
     }
 
-    /// `all_wanted &= ~(1 << event)`, the last line of `vm_object_wakeup()`.
+    /// Clears the waiters of `event`.
     pub const fn clear_want(&mut self, event: u32) {
         self.all_wanted &= !(1 << event);
     }
 
-    /// `vm_object_collectable()` of <`vm/vm_object.h`>.
+    /// Whether the object holds neither references nor pages, so it may be
+    /// collected.
     pub const fn is_collectable(&self) -> bool {
         self.ref_count == 0 && self.resident_page_count == 0
     }
 
-    /// `lock_in_progress`; the C bitfield holds one bit.
+    /// Whether a lock request is running on the object.
     pub const fn is_lock_in_progress(&self) -> bool {
         self.flag(VM_OBJECT_LOCK_IN_PROGRESS_BIT)
     }
 
-    /// `lock_restart`; the C bitfield holds one bit.
+    /// Whether a lock request on the object must restart.
     pub const fn is_lock_restart(&self) -> bool {
         self.flag(VM_OBJECT_LOCK_RESTART_BIT)
     }
 
-    /// `vm_map_glue_object_is_pristine_submap()` in C: the submap placeholder
-    /// has never held a page.
+    /// The submap placeholder has never held a page.
     pub const fn is_pristine_submap(&self) -> bool {
         self.resident_page_count == 0
             && self.copy.is_null()
@@ -394,7 +389,7 @@ impl VmObject {
             && !self.is_pager_created()
     }
 
-    /// `vm_map_glue_object_needs_shadow()` in C.
+    /// Whether a mapping of `size` bytes needs a shadow object first.
     pub const fn needs_shadow(
         &self,
         size: VmSize,
@@ -406,14 +401,15 @@ impl VmObject {
             || (self.is_temporary() && !is_shared && self.size > size)
     }
 
-    /// `vm_map_glue_object_can_release()` in C.
+    /// Whether the object may be freed with its mapping: it has no pager and
+    /// no other user.
     pub const fn can_release(&self) -> bool {
         !self.is_pager_created()
             && self.ref_count == 1
             && self.paging_in_progress() == 0
     }
 
-    /// `vm_map_glue_object_can_coalesce()` in C.
+    /// Whether a neighbouring mapping may be extended into the object.
     pub const fn can_coalesce(&self) -> bool {
         self.ref_count <= 1
             && !self.is_pager_created()
@@ -422,7 +418,7 @@ impl VmObject {
             && self.paging_in_progress() == 0
     }
 
-    /// `vm_map_glue_object_extend_size()` in C.
+    /// Grows the object to at least `size` bytes.
     pub const fn extend_size(&mut self, size: VmSize) {
         if size > self.size {
             self.size = size;
@@ -442,7 +438,7 @@ impl VmObject {
     }
 }
 
-/// `struct vm_statistics` of <`mach/vm_statistics.h`>.
+/// `struct vm_statistics`: the system-wide paging counters.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct VmStatistics {

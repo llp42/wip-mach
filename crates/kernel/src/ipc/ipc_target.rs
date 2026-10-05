@@ -4,18 +4,17 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The common part of IPC ports and port sets, which `ipc/ipc_target.c`
-//! defines and `ipc/ipc_target.h` declares.
+//! The common part of IPC ports and port sets.
 
 use crate::ipc::IpcTarget;
 use crate::ipc::ipc_mqueue;
 use core::ffi::{c_uint, c_void};
 
-/// `ipc_target_init()` in C.
+/// Initializes `target` under `name`.
 ///
 /// # Safety
 ///
-/// `target` must be a fresh `struct ipc_target` this call initializes.
+/// `target` must be a fresh [`IpcTarget`] this call initializes.
 pub(crate) unsafe fn init(target: *mut IpcTarget, name: c_uint) {
     unsafe {
         (*target).name = name;
@@ -23,14 +22,14 @@ pub(crate) unsafe fn init(target: *mut IpcTarget, name: c_uint) {
     }
 }
 
-/// `ipc_target_terminate()` in C.
+/// Tears `target` down; there is nothing to release.
 ///
 /// # Safety
 ///
 /// `target` must be a live target that is being destroyed.
 pub(crate) const unsafe fn terminate(_target: *mut IpcTarget) {}
 
-/// `ipc_target_terminate()` of `ipc/ipc_target.c`.
+/// [`terminate`] over an untyped pointer.
 ///
 /// # Safety
 ///

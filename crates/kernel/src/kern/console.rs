@@ -3,9 +3,9 @@
 
 //! The console formatter behind `kprint!` and `kprintln!`.
 //!
-//! This replaces the output sink of `kern/printf.c` with `core::fmt`: a
-//! [`Console`] writes the formatted bytes through the `cnputc()` core, and
-//! [`CStrArg`] adapts the NUL-terminated strings the C `%s` used to take.
+//! The kernel's formatted output goes through `core::fmt`: a [`Console`]
+//! writes the formatted bytes to the console one at a time, and [`CStrArg`]
+//! adapts NUL-terminated strings.
 
 use crate::device::cons;
 use core::ffi::{CStr, c_char};
@@ -17,8 +17,8 @@ pub(crate) struct Console;
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for &byte in s.as_bytes() {
-            // SAFETY: this is the write `cnputc()` performs; the byte-to-char
-            // conversion is the bit-preserving one the C did.
+            // SAFETY: `cons::putc` writes one byte to the console; the
+            // byte-to-char conversion preserves its bits.
             unsafe { cons::putc(byte as c_char) };
         }
         Ok(())
@@ -41,8 +41,8 @@ macro_rules! kprint {
 }
 pub(crate) use kprint;
 
-/// Format `args` into `buf` as a NUL-terminated C string, truncating at
-/// `buf.len() - 1` bytes as the `snprintf()` callers expected.
+/// Formats `args` into `buf` as a NUL-terminated C string, truncating at
+/// `buf.len() - 1` bytes.
 pub(crate) fn write_cstr(buf: &mut [c_char], args: fmt::Arguments<'_>) {
     use fmt::Write;
 

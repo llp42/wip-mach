@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989,1988,1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The user-exported virtual memory calls, which `vm/vm_user.c` used to
-//! define and `vm/vm_user.h` declares.
+//! The user-exported virtual memory calls.
 
 use crate::arch::types::{RpcPhysAddr, VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_MASK, PAGE_SHIFT, PAGE_SIZE};
@@ -33,19 +32,21 @@ use core::ptr::{
 };
 use core::sync::atomic::Ordering;
 
-/// `IKOT_NONE`, `IKOT_HOST` and `IKOT_HOST_PRIV` of <`kern/ipc_kobject.h`>.
+/// The kernel-object types of a plain port, the host name port and the
+/// privileged host port.
 const IKOT_NONE: c_uint = 0;
 const IKOT_HOST: c_uint = 3;
 const IKOT_HOST_PRIV: c_uint = 4;
 
-/// `VM_WIRE_CURRENT | VM_WIRE_FUTURE` of <`mach/vm_wire.h`>.
+/// `VM_WIRE_CURRENT | VM_WIRE_FUTURE`: wire every current mapping and every
+/// future one.
 const VM_WIRE_ALL: c_int = 3;
 
 /// The 8 MiB cap `vm_wire()` puts on an unprivileged map's wired size.
 const UNPRIVILEGED_WIRE_LIMIT: VmSize = 8 << 20;
 
-/// The `unsigned int` run of `struct vm_cache_statistics` of
-/// <`mach/vm_cache_statistics.h`>.
+/// The `unsigned int` run of `struct vm_cache_statistics`, the record
+/// `vm_cache_statistics()` fills.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct VmCacheStatistics {
@@ -66,8 +67,7 @@ const _: () =
     assert!(size_of::<VmCacheStatistics>() == 11 * size_of::<c_int>());
 const _: () = assert!(align_of::<VmCacheStatistics>() == align_of::<c_int>());
 
-/// `vm_stat` of <`mach/vm_statistics.h>`: the system-wide statistics block the
-/// C kept in `vm/vm_user.c`.
+/// The system-wide paging statistics `vm_statistics()` reports.
 pub static mut VM_STAT: VmStatistics = VmStatistics::zeroed();
 
 /// A table count as an index; the widening is lossless.
@@ -75,8 +75,7 @@ const fn as_index(count: c_uint) -> usize {
     count as usize
 }
 
-/// `vm_statistics()` in C: the kernel's counters, with the live page counts
-/// added.
+/// The kernel's counters, with the live page counts added.
 pub(crate) fn statistics() -> VmStatistics {
     // SAFETY: `vm_stat` is the plain C global; the C read it without a lock.
     let mut stat = unsafe { ptr::read(addr_of!(VM_STAT)) };
@@ -95,7 +94,7 @@ pub(crate) fn statistics() -> VmStatistics {
     stat
 }
 
-/// `vm_cache_statistics()` in C.
+/// The object cache's counters, as `vm_cache_statistics()` reports them.
 pub(crate) fn cache_statistics() -> VmCacheStatistics {
     VmCacheStatistics {
         cache_object_count: vm_resident::VM_OBJECT_EXTERNAL_COUNT
@@ -131,8 +130,8 @@ pub(crate) struct MapRequest<'a> {
     pub(crate) inheritance: VmInherit,
 }
 
-/// `vm_map()` in C: allocate a mapping backed by a memory object, a proxy for
-/// one, or anonymous memory.
+/// Allocates a mapping backed by a memory object, a proxy for one, or
+/// anonymous memory.
 ///
 /// # Safety
 ///
@@ -261,7 +260,7 @@ pub(crate) unsafe fn map(
     Ok(())
 }
 
-/// `vm_wire()` in C: wire the pages of `start..start + size` for `map`.
+/// Wires the pages of `start..start + size` for `map`.
 ///
 /// # Safety
 ///
@@ -334,7 +333,7 @@ pub(crate) unsafe fn wire(
     }
 }
 
-/// `vm_wire_all()` in C: wire every mapping of `map`, now or for the future.
+/// Wires every mapping of `map`, now or for the future.
 ///
 /// # Safety
 ///
@@ -443,14 +442,13 @@ unsafe fn insert_contig_pages(
     }
 }
 
-/// `vm_allocate_contiguous()` in C: allocate a physically contiguous,
-/// zero-filled block and map it.
+/// Allocates a physically contiguous, zero-filled block and maps it.
 ///
 /// # Safety
 ///
 /// `host_priv` must be null or the live host pointer the generated server
 /// converted the request port into; `map` must be null or a live, unlocked
-/// map, and this call must not hold `vm_page_queue_free_lock`.
+/// map, and this call must not hold `VM_PAGE_QUEUE_FREE_LOCK`.
 pub(crate) unsafe fn allocate_contiguous(
     host_priv: Option<NonNull<Host>>,
     map: *mut VmMap,
@@ -506,7 +504,7 @@ pub(crate) unsafe fn allocate_contiguous(
     let alloc_size = 1usize.wrapping_shl(order.wrapping_add(PAGE_SHIFT));
     let npages = vm_page::atop(alloc_size);
 
-    // SAFETY: nothing holds `vm_page_queue_free_lock`, and the caller permits
+    // SAFETY: nothing holds `VM_PAGE_QUEUE_FREE_LOCK`, and the caller permits
     // the allocator to spin.
     let Some(pages) =
         (unsafe { vm_resident::grab_contig(alloc_size, selector) })
@@ -645,8 +643,7 @@ unsafe fn mapped_phys_addr(map: *mut VmMap, address: VmOffset) -> RpcPhysAddr {
     paddr
 }
 
-/// `vm_pages_phys()` in C: the physical address of every page of
-/// `address..address + size`.
+/// The physical address of every page of `address..address + size`.
 ///
 /// # Safety
 ///
@@ -719,8 +716,8 @@ pub(crate) unsafe fn pages_phys(
     Ok(())
 }
 
-/// `vm_set_size_limit()` in C: set the current and maximum virtual size
-/// limits of `map`.  Increasing the maximum takes the privileged host port.
+/// Sets the current and maximum virtual size limits of `map`.  Increasing the
+/// maximum takes the privileged host port.
 ///
 /// # Safety
 ///
@@ -780,15 +777,16 @@ pub(crate) unsafe fn set_size_limit(
     Ok(())
 }
 
-/// `MEMORY_OBJECT_RETURN_NONE` of <`mach/memory_object.h`>.
+/// The lock-request policy that returns no pages to the pager.
 const MEMORY_OBJECT_RETURN_NONE: c_int = 0;
-/// `MEMORY_OBJECT_RETURN_ALL` of <`mach/memory_object.h`>.
+/// The lock-request policy that returns every dirty and precious page to the
+/// pager.
 const MEMORY_OBJECT_RETURN_ALL: c_int = 2;
 
 /// `VM_PROT_ALL | VM_PROT_NOTIFY`: the protection bits `vm_protect()` accepts.
 const VM_PROT_SETTER_MASK: c_int = VmProt::ALL.bits() | VmProt::NOTIFY.bits();
 
-/// `vm_allocate()` in C: allocate zero-filled memory in `map`.
+/// Allocates zero-filled memory in `map`.
 pub(crate) fn allocate(
     map: &mut VmMap,
     addr: &mut VmOffset,
@@ -820,7 +818,7 @@ pub(crate) fn allocate(
     })
 }
 
-/// `vm_deallocate()` in C: drop the pages covering `start..start + size`.
+/// Drops the pages covering `start..start + size`.
 pub(crate) fn deallocate(
     map: &mut VmMap,
     start: VmOffset,
@@ -833,7 +831,7 @@ pub(crate) fn deallocate(
     map.remove(trunc_page(start), round_page(start.wrapping_add(size)))
 }
 
-/// `vm_inherit()` in C: set the inheritance of a range.
+/// Sets the inheritance of a range.
 pub(crate) fn inherit(
     map: &mut VmMap,
     start: VmOffset,
@@ -854,7 +852,7 @@ pub(crate) fn inherit(
     Ok(())
 }
 
-/// `vm_protect()` in C: set the protection of a range.
+/// Sets the protection of a range.
 pub(crate) fn protect(
     map: &mut VmMap,
     start: VmOffset,
@@ -879,8 +877,7 @@ pub(crate) fn protect(
     )
 }
 
-/// `vm_machine_attribute()` in C: hand a machine attribute to the map's
-/// physical map.
+/// Hands a machine attribute to the map's physical map.
 pub(crate) fn machine_attribute(
     map: &VmMap,
     address: VmOffset,
@@ -893,7 +890,7 @@ pub(crate) fn machine_attribute(
     VmMap::machine_attribute(NonNull::from(map), address, size)
 }
 
-/// `vm_read()` in C: copy a range out as a map copy for the IPC layer.
+/// Copies a range out as a map copy for the IPC layer.
 pub(crate) fn read(
     map: &mut VmMap,
     address: VmOffset,
@@ -902,8 +899,7 @@ pub(crate) fn read(
     copyin(map, address, size)
 }
 
-/// `vm_write()` in C: overwrite a range with the copy an IPC message
-/// carried.
+/// Overwrites a range with the copy an IPC message carried.
 pub(crate) fn write(
     map: &mut VmMap,
     address: VmOffset,
@@ -913,12 +909,12 @@ pub(crate) fn write(
         return Ok(());
     };
 
-    // SAFETY: the caller owns the live copy; the C `vm_map_copy_overwrite()`
-    // consumes it on success and leaves it to the caller on failure.
+    // SAFETY: the caller owns the live copy; `copy_overwrite` consumes it on
+    // success and leaves it to the caller on failure.
     unsafe { map.copy_overwrite(address, copy) }
 }
 
-/// `vm_copy()` in C: copy a range to another address in the same map.
+/// Copies a range to another address in the same map.
 pub(crate) fn copy(
     map: &mut VmMap,
     source_address: VmOffset,
@@ -929,9 +925,8 @@ pub(crate) fn copy(
         return Ok(());
     };
 
-    // SAFETY: `copyin` returned a live copy this call owns;
-    // `vm_map_copy_overwrite()` consumes it on success, and the C discards it
-    // on failure.
+    // SAFETY: `copyin` returned a live copy this call owns; `copy_overwrite`
+    // consumes it on success and leaves it here on failure.
     match unsafe { map.copy_overwrite(dest_address, copy) } {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -942,8 +937,7 @@ pub(crate) fn copy(
     }
 }
 
-/// `vm_object_sync()` in C: write a range of `object` back to its memory
-/// manager.
+/// Writes a range of `object` back to its memory manager.
 pub(crate) fn object_sync(
     object: NonNull<VmObject>,
     offset: VmOffset,
@@ -982,7 +976,7 @@ pub(crate) fn object_sync(
     }
 }
 
-/// `vm_msync()` in C: synchronize a range with its memory manager.
+/// Synchronizes a range with its memory manager.
 pub(crate) fn msync(
     map: &mut VmMap,
     address: VmOffset,
@@ -992,8 +986,7 @@ pub(crate) fn msync(
     VmMap::msync(Some(NonNull::from(map)), address, size, sync_flags)
 }
 
-/// `vm_get_size_limit()` in C: report the current and maximum virtual size
-/// limits of `map`.
+/// Reports the current and maximum virtual size limits of `map`.
 pub(crate) fn get_size_limit(map: &VmMap) -> (VmSize, VmSize) {
     map.lock.read();
     let limits = (map.size_cur_limit, map.size_max_limit);
@@ -1001,8 +994,8 @@ pub(crate) fn get_size_limit(map: &VmMap) -> (VmSize, VmSize) {
     limits
 }
 
-/// `vm_map_copyin()`'s zero-length case, which its FFI adapter keeps: a
-/// zero-byte range yields no copy, while the map core rejects it as an
+/// Copies a range in for the IPC layer, keeping the interface's zero-length
+/// case: a zero-byte range yields no copy, while the map core rejects it as an
 /// address overflow.
 fn copyin(
     map: &mut VmMap,

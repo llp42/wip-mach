@@ -5,9 +5,8 @@
 //   Copyright 1988, 1989 by Olivetti Advanced Technology Center, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The screen-slam block moves, which `i386/i386at/kdasm.S` and
-//! `x86_64/kdasm.S` defined as `kd_slmwd()`, `kd_slmscu()` and
-//! `kd_slmscd()`.
+//! The screen-slam block moves: a word fill and the forward and backward word
+//! copies.
 
 use core::arch::asm;
 

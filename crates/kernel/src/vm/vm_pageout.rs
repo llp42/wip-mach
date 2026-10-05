@@ -5,8 +5,7 @@
 //   the Computer Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The pageout daemon, which `vm/vm_pageout.c` used to define and
-//! `vm/vm_pageout.h` declares.
+//! The pageout daemon.
 
 use crate::arch::types::VmOffset;
 use crate::arch::vm_param::PAGE_SIZE;
@@ -41,19 +40,16 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering;
 
-/// `VM_PAGEOUT_TIMEOUT` of `vm/vm_pageout.c`, in milliseconds.
+/// How long a throttled daemon waits before it retries, in milliseconds.
 const VM_PAGEOUT_TIMEOUT: c_int = 50;
 
-/// `vm_pageout_requested`, file-private in the C: the event the daemon sleeps
-/// on when there is nothing to do.
+/// The event the daemon sleeps on when there is nothing to do.
 static VM_PAGEOUT_REQUESTED: SyncCell<c_int> = SyncCell(UnsafeCell::new(0));
 
-/// `vm_pageout_continue`, file-private in the C: the event a throttled daemon
-/// sleeps on.
+/// The event a throttled daemon sleeps on.
 static VM_PAGEOUT_CONTINUE: SyncCell<c_int> = SyncCell(UnsafeCell::new(0));
 
-/// `vm_pageout_setup()` in C: move or copy a busy page into `new_object` for
-/// its memory manager.
+/// Moves or copies a busy page into `new_object` for its memory manager.
 ///
 /// # Safety
 ///
@@ -240,7 +236,7 @@ unsafe fn finish_pageout(
     }
 }
 
-/// `vm_pageout_page()` in C: write a busy page back to its memory object.
+/// Writes a busy page back to its memory object.
 ///
 /// # Safety
 ///
@@ -262,8 +258,8 @@ pub(crate) unsafe fn page(m: NonNull<VmPage>, initial: bool, flush: bool) {
             || (*page_ptr).is_error()
             || (!(*page_ptr).is_dirty() && !(*page_ptr).is_precious())
     } {
-        // SAFETY: the page-queues lock is the live lock and the object lock
-        // is held, as `vm_page_free` requires.
+        // SAFETY: the page-queues lock is the live lock and the object lock is
+        // held, as `vm_resident::free` requires.
         unsafe {
             VM_PAGE_QUEUE_LOCK.lock();
             vm_resident::free(m);
@@ -348,23 +344,20 @@ pub(crate) unsafe fn page(m: NonNull<VmPage>, initial: bool, flush: bool) {
     }
 }
 
-/// `vm_pageout_scan()` in C: balance, shrink the caches and evict.
+/// Balances the free lists, shrinks the caches and evicts pages.
 ///
 /// # Safety
 ///
-/// Must run on the pageout daemon thread with no page lock held;
-/// `should_wait` must be writable.  Returns with
-/// `vm_page_queue_free_lock` held.
+/// Must run on the pageout daemon thread with no page lock held; `should_wait`
+/// must be writable.  Returns with `VM_PAGE_QUEUE_FREE_LOCK` held.
 unsafe fn scan(should_wait: *mut c_int) -> bool {
-    // SAFETY: `vm_page_balance` takes the free lock and returns with it held.
+    // SAFETY: `balance` takes the free lock and returns with it held.
     if unsafe { vm_page::balance() } {
         return true;
     }
     // The lock was taken by `balance`.
     VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
-    // The C's `if (0)`-guarded `consider_thread_collect()` call never ran, so
-    // it is not carried over.
     // SAFETY: the collectors require no page lock.
     unsafe {
         Thread::stack_collect();
@@ -378,12 +371,12 @@ unsafe fn scan(should_wait: *mut c_int) -> bool {
     unsafe { vm_page::evict(should_wait) }
 }
 
-/// `vm_pageout()` in C: become the pageout daemon.
+/// Becomes the pageout daemon.
 ///
 /// # Safety
 ///
-/// Must be called on the kernel thread that becomes the daemon, as the C
-/// `kern/startup.c` did; the call never returns.
+/// Must be called on the kernel thread that becomes the daemon; the call never
+/// returns.
 pub(crate) unsafe fn pageout() -> ! {
     let thread = per_cpu::thread();
     unsafe {
@@ -399,8 +392,7 @@ pub(crate) unsafe fn pageout() -> ! {
         let done = unsafe { scan(&raw mut should_wait) };
 
         if done {
-            // SAFETY: the free lock is held, and `thread_sleep` releases it
-            // as the C's `simple_lock_addr` call did.
+            // SAFETY: the free lock is held, and `thread_sleep` releases it.
             unsafe {
                 thread_sleep(
                     VM_PAGEOUT_REQUESTED.0.get().cast::<c_void>(),
@@ -428,11 +420,11 @@ pub(crate) unsafe fn pageout() -> ! {
     }
 }
 
-/// `vm_pageout_start()` in C: wake the daemon.
+/// Wakes the daemon.
 ///
 /// # Safety
 ///
-/// The caller must hold `vm_page_queue_free_lock`, as the C required.
+/// The caller must hold `VM_PAGE_QUEUE_FREE_LOCK`.
 pub(crate) unsafe fn start() {
     // SAFETY: `per_cpu::thread()` is the running thread, or null early in
     // boot, and the C only wakes a daemon that exists.
@@ -449,11 +441,11 @@ pub(crate) unsafe fn start() {
     }
 }
 
-/// `vm_pageout_resume()` in C: wake a throttled daemon.
+/// Wakes a throttled daemon.
 ///
 /// # Safety
 ///
-/// The caller must hold `vm_page_queue_free_lock`, as the C required.
+/// The caller must hold `VM_PAGE_QUEUE_FREE_LOCK`.
 pub(crate) unsafe fn resume() {
     // SAFETY: the wakeup takes its own locks, and the caller holds the free
     // lock as the C required.
@@ -465,7 +457,8 @@ pub(crate) unsafe fn resume() {
         )
     };
 }
-/// `vm_pageout_setup()` in C.
+/// [`setup`] over raw pointers: the page moved or copied for the memory
+/// manager, or null.
 ///
 /// # Safety
 ///
@@ -489,7 +482,7 @@ pub(crate) unsafe fn vm_pageout_setup(
         .map_or(ptr::null_mut(), NonNull::as_ptr)
 }
 
-/// `vm_pageout_page()` in C.
+/// [`page`] over a raw pointer and integer flags.
 ///
 /// # Safety
 ///
@@ -503,11 +496,11 @@ pub(crate) unsafe fn vm_pageout_page(
     unsafe { page(NonNull::new_unchecked(m), initial != 0, flush != 0) };
 }
 
-/// `vm_pageout_start()` in C.
+/// Wakes the daemon.
 ///
 /// # Safety
 ///
-/// The caller must hold `vm_page_queue_free_lock`, as the C required.
+/// The caller must hold `VM_PAGE_QUEUE_FREE_LOCK`.
 pub(crate) unsafe fn vm_pageout_start() {
     unsafe { start() };
 }

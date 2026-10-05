@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kernel-object ports, which `kern/ipc_kobject.c` used to define and
-//! `kern/ipc_kobject.h` declares.
+//! The kernel-object ports.
 
 use crate::arch::types::VmOffset;
 use crate::ipc::ipc_kmsg::{self, Kmsg};
@@ -20,44 +19,44 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr;
 
-/// `IKOT_THREAD` of <`kern/ipc_kobject.h>`: a thread port.
+/// A thread port.
 pub(crate) const IKOT_THREAD: c_uint = 1;
-/// `IKOT_PAGER` of <`kern/ipc_kobject.h>`: a memory object's pager.
+/// A memory object's pager.
 const IKOT_PAGER: c_uint = 8;
-/// `IKOT_DEVICE` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a device port.
 const IKOT_DEVICE: c_uint = 10;
-/// `IKOT_PAGER_TERMINATING` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a pager port whose object is terminating.
 const IKOT_PAGER_TERMINATING: c_uint = 15;
-/// `IKOT_PAGER_PROXY` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a proxy pager port.
 const IKOT_PAGER_PROXY: c_uint = 27;
 
-/// `MACH_MSGH_BITS_LOCAL_MASK` of <mach/message.h>.
+/// The local-disposition bits of a message header.
 const MACH_MSGH_BITS_LOCAL_MASK: u32 = 0x0000_ff00;
-/// `MACH_MSGH_BITS_REMOTE_MASK` of <mach/message.h>.
+/// The remote-disposition bits of a message header.
 const MACH_MSGH_BITS_REMOTE_MASK: u32 = 0x0000_00ff;
 /// `MACH_MSG_TYPE_PORT_SEND`, the wire alias `MACH_MSG_TYPE_MOVE_SEND`.
 const MACH_MSG_TYPE_PORT_SEND: u32 = 17;
 /// `MACH_MSG_TYPE_PORT_SEND_ONCE`, the wire alias
 /// `MACH_MSG_TYPE_MOVE_SEND_ONCE`.
 const MACH_MSG_TYPE_PORT_SEND_ONCE: u32 = 18;
-/// `MACH_MSG_TYPE_INTEGER_32` of <mach/message.h>.
+/// The type of a 32-bit integer in a message body.
 const MACH_MSG_TYPE_INTEGER_32: u32 = 2;
 
-/// `MACH_NOTIFY_PORT_DELETED` of <mach/notify.h>.
+/// The message id of a port-deleted notification.
 const MACH_NOTIFY_PORT_DELETED: c_int = 65;
-/// `MACH_NOTIFY_MSG_ACCEPTED` of <mach/notify.h>.
+/// The message id of a msg-accepted notification.
 const MACH_NOTIFY_MSG_ACCEPTED: c_int = 66;
-/// `MACH_NOTIFY_PORT_DESTROYED` of <mach/notify.h>.
+/// The message id of a port-destroyed notification.
 const MACH_NOTIFY_PORT_DESTROYED: c_int = 67;
-/// `MACH_NOTIFY_NO_SENDERS` of <mach/notify.h>.
+/// The message id of a no-senders notification.
 const MACH_NOTIFY_NO_SENDERS: c_int = 68;
-/// `MACH_NOTIFY_SEND_ONCE` of <mach/notify.h>.
+/// The message id of a send-once notification.
 const MACH_NOTIFY_SEND_ONCE: c_int = 69;
-/// `MACH_NOTIFY_DEAD_NAME` of <mach/notify.h>.
+/// The message id of a dead-name notification.
 const MACH_NOTIFY_DEAD_NAME: c_int = 70;
 
-/// The `8192`-byte bound `ipc_kobject_server()` gives a reply body, before
-/// the message overhead is subtracted.
+/// The bound [`server`] gives a reply body, before the message overhead is
+/// subtracted.
 const MAX_REPLY_BODY: usize = 8192;
 
 /// The descriptor word of a `mach_msg_type_t` initializer under the 64-bit
@@ -66,12 +65,11 @@ const fn descriptor_word(name: u32, size: u32) -> u32 {
     name | (size << 8) | (1 << 29)
 }
 
-/// The `RetCodeType` of `ipc_kobject_server()`: an inline 32-bit integer.
+/// The type of a reply's return code: an inline 32-bit integer.
 const RETCODE_TYPE: MachMsgType =
     MachMsgType::new(descriptor_word(MACH_MSG_TYPE_INTEGER_32, 32), 1);
 
-/// `ipc_kobject_set()` in C: name a kernel object in a port, taking and
-/// releasing the port lock.
+/// Names a kernel object in a port, taking and releasing the port lock.
 ///
 /// # Safety
 ///
@@ -88,8 +86,7 @@ pub(crate) unsafe fn set(port: *mut c_void, kobject: VmOffset, type_: c_uint) {
     }
 }
 
-/// `ipc_kobject_set_locked()` in C: the same naming with the port lock
-/// already held.
+/// The same naming with the port lock already held.
 ///
 /// # Safety
 ///
@@ -108,8 +105,7 @@ pub(crate) unsafe fn set_locked(
     };
 }
 
-/// `ipc_kobject_destroy()` in C: release the resources a destroyed port
-/// still names.
+/// Releases the resources a destroyed port still names.
 ///
 /// # Safety
 ///
@@ -140,8 +136,7 @@ pub(crate) unsafe fn destroy(port: *mut c_void) {
     }
 }
 
-/// `ipc_kobject_notify()` in C: deliver a notification to a port whose
-/// kernel object wants it.
+/// Delivers a notification to a port whose kernel object wants it.
 ///
 /// # Safety
 ///
@@ -185,8 +180,7 @@ pub(crate) unsafe fn notify(
     }
 }
 
-/// `ipc_kobject_server()` in C: handle a message sent to the kernel and
-/// generate its reply.
+/// Handles a message sent to the kernel and generates its reply.
 ///
 /// # Safety
 ///
@@ -224,8 +218,8 @@ pub(crate) unsafe fn server(request: Kmsg) -> Option<Kmsg> {
     let head = unsafe { request.header() };
     match server_routine(unsafe { (*head).id() }) {
         Some(routine) => {
-            // SAFETY: the MIG routine takes the request and reply headers and
-            // the kernel task is live from `task_init()`.
+            // SAFETY: the MIG routine takes the request and reply headers, and
+            // the kernel task is live from boot.
             unsafe {
                 routine(head.cast(), reply.header().cast());
                 (*kernel_task()).messages_received =
@@ -310,8 +304,7 @@ fn strange_destination() -> ! {
     )
 }
 
-/// The `*_server_routine()` inline functions of the generated `*.server.h`
-/// headers: pick the MIG entry point for `msgh_id`, or `None`.
+/// Picks the generated MIG entry point for `msgh_id`, or `None`.
 fn server_routine(msgh_id: c_int) -> MigRoutine {
     let tables: [(*const MigRoutine, c_int, c_int); 10] = [
         (&raw const mig::mach_server_routines, 2000, 100),

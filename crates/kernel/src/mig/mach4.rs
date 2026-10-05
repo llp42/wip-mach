@@ -36,7 +36,8 @@ const unsafe fn slice<'a, T>(ptr: *mut T, count: c_uint) -> &'a [T] {
     unsafe { core::slice::from_raw_parts(ptr, count as usize) }
 }
 
-/// `memory_object_create_proxy()` of `vm/memory_object_proxy.c`.
+/// Makes a proxy memory object over the ranges of the `object` ports, limited
+/// to `max_protection`.
 ///
 /// # Safety
 ///
@@ -77,7 +78,8 @@ pub unsafe extern "C" fn memory_object_create_proxy(
     }
 }
 
-/// `vm_region_create_proxy()` in C.
+/// Makes a proxy memory object over the region of `task`'s map at `address`,
+/// limited to `max_protection`.
 ///
 /// # Safety
 ///

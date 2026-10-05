@@ -5,11 +5,10 @@
 //   Laboratory at the University of Utah (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The Intel physical-map module, which `i386/intel/pmap.c` used to define and
-//! `i386/intel/pmap.h` declares.
+//! The Intel physical-map module.
 //!
-//! With the `struct pmap`, `struct pv_entry`, `pmap_update_list` and
-//! `pmap_mapwindow_t` mirrors of that header.
+//! With the [`Pmap`], [`PvEntry`], [`PmapUpdateList`] and [`PmapMapwindow`]
+//! records.
 //!
 //! This is the header's PAE build, with the L4 table and the four-level
 //! walk from it down to the page-table entry: the `__x86_64__` layout.
@@ -48,15 +47,14 @@ use core::slice;
 use core::sync::atomic::{AtomicI32, AtomicIsize, AtomicPtr, Ordering, fence};
 use lock::SpinLock;
 
-/// `LINEAR_DS` of <i386/gdt.h>: the flat data selector `gdt_fill()` builds
-/// with base zero, which makes an offset in it a linear address.
+/// The flat data selector the GDT builds with base zero, which makes an offset
+/// in it a linear address.
 const LINEAR_DS: u16 = 0x38;
 
-/// `KERNEL_DS` of <i386/gdt.h>: the kernel data selector, which the TLB
-/// invalidation puts back in `%es`.
+/// The kernel data selector, which the TLB invalidation puts back in `%es`.
 const KERNEL_DS: u16 = 0x10;
 
-/// `INTEL_OFFMASK` of `i386/intel/pmap.h`: the offset within a page.
+/// The offset within a page.
 const INTEL_OFFMASK: VmOffset = 0xfff;
 
 /// `INTEL_PTE_PFN`: the page-frame field of a page table entry, whose width
@@ -65,7 +63,7 @@ pub(crate) const INTEL_PTE_PFN: VmOffset = 0xffff_ffff_ffff_f000;
 
 pub(crate) const INTEL_PTE_VALID: VmOffset = 0x0000_0001;
 pub(crate) const INTEL_PTE_WRITE: VmOffset = 0x0000_0002;
-/// `INTEL_PTE_PS` of i386/intel/pmap.h: a 4 MiB page directory entry.
+/// A large-page directory entry.
 pub(crate) const INTEL_PTE_PS: VmOffset = 0x0000_0080;
 const INTEL_PTE_USER: VmOffset = 0x0000_0004;
 const INTEL_PTE_WTHRU: VmOffset = 0x0000_0008;
@@ -75,160 +73,155 @@ pub(crate) const INTEL_PTE_MOD: VmOffset = 0x0000_0040;
 const INTEL_PTE_GLOBAL: VmOffset = 0x0000_0100;
 const INTEL_PTE_WIRED: VmOffset = 0x0000_0200;
 
-/// `PHYS_MODIFIED` of i386/intel/pmap.c, the low byte of `INTEL_PTE_MOD`.
+/// The low byte of `INTEL_PTE_MOD`.
 const PHYS_MODIFIED: u8 = INTEL_PTE_MOD as u8;
-/// `PHYS_REFERENCED` of i386/intel/pmap.c, the low byte of `INTEL_PTE_REF`.
+/// The low byte of `INTEL_PTE_REF`.
 const PHYS_REFERENCED: u8 = INTEL_PTE_REF as u8;
 
-/// `VM_PROT_READ` of <`mach/vm_prot.h`>, as `pmap_page_protect()` switches on
-/// the raw value.
+/// The read protection, as [`pmap_page_protect`] switches on the raw value.
 const VM_PROT_READ: c_int = 0x1;
 const VM_PROT_WRITE: c_int = 0x2;
 const VM_PROT_EXECUTE: c_int = 0x4;
 const VM_PROT_ALL: c_int = 0x7;
 
-/// `CPU_FEATURE_PGE` of <i386/locore.h>: the global-page bit.
+/// The CPU feature bit of global pages.
 pub(crate) const CPU_FEATURE_PGE: u32 = 13;
-/// `CPU_FEATURE_SEP` of <i386/locore.h>: the `sysenter`/`sysexit` pair.
+/// The CPU feature bit of the SYSENTER/SYSEXIT pair.
 pub(crate) const CPU_FEATURE_SEP: u32 = 11;
 const CPU_FEATURE_PAE: u32 = 6;
 
-/// `CPU_TYPE_I486` of <mach/machine.h>.
+/// The CPU type of an i486.
 const CPU_TYPE_I486: c_int = 17;
 
 const CR4_PAE: usize = 0x0020;
 
-/// `UPDATE_LIST_SIZE` of i386/intel/pmap.c: the invalidation requests one CPU
-/// can queue before the last becomes a whole-address-space flush.
+/// The invalidation requests one CPU can queue before the last becomes a
+/// whole-address-space flush.
 const UPDATE_LIST_SIZE: usize = 4;
 
-/// `PMAP_NMAPWINDOWS` of <i386/pmap.h>: temporary map windows per CPU.
+/// The temporary map windows per CPU.
 const PMAP_NMAPWINDOWS: usize = 2;
 
 /// `MAPWINDOW_SIZE`: the virtual space the map windows take from the kernel
 /// map's tail.
 const MAPWINDOW_SIZE: VmOffset = PMAP_NMAPWINDOWS * MAX_NCPUS * PAGE_SIZE;
 
-/// `ptes_per_vm_page` of i386/intel/pmap.c: one hardware entry per VM page.
+/// One hardware entry per VM page.
 const PTES_PER_VM_PAGE: usize = 1;
 
-/// `NPTES` of <i386/pmap.h>: entries in one page table.
+/// The entries in one page table.
 const NPTES: usize = PAGE_SIZE / size_of::<VmOffset>();
 
-/// `PDPNUM_KERNEL` of <i386/pmap.h>: protected page directories at the kernel
-/// end of the address space.
+/// The protected page directories at the kernel end of the address space.
 const PDPNUM_KERNEL: usize =
     ((VM_MAX_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS) >> PDPSHIFT) + 1;
 
-/// `PDPNUM` of <i386/pmap.h>: the page directories `pmap_create()` allocates,
-/// the same count `pmap_bootstrap()` writes at the kernel end.
+/// The page directories [`pmap_create`] allocates, the same count
+/// [`pmap_bootstrap`] writes at the kernel end.
 const PDPNUM: usize = PDPNUM_KERNEL;
 
-/// `LINEAR_MIN_KERNEL_ADDRESS` of <`i386/vm_param.h`>.
+/// The lowest linear kernel address.
 const LINEAR_MIN_KERNEL_ADDRESS: VmOffset = VM_MIN_KERNEL_ADDRESS;
 
-/// `LINEAR_MAX_KERNEL_ADDRESS` of <`i386/vm_param.h`>.
+/// The highest linear kernel address.
 const LINEAR_MAX_KERNEL_ADDRESS: VmOffset = usize::MAX;
 
-/// `VM_MAX_KERNEL_ADDRESS` of <`i386/vm_param.h`>.
+/// The highest kernel virtual address.
 pub(crate) const VM_MAX_KERNEL_ADDRESS: VmOffset = LINEAR_MAX_KERNEL_ADDRESS
     - LINEAR_MIN_KERNEL_ADDRESS
     + VM_MIN_KERNEL_ADDRESS;
 
-/// `VM_KERNEL_MAP_SIZE` of <`i386/vm_param.h>`: the room reserved for the
-/// kernel map.
+/// The room reserved for the kernel map.
 pub(crate) const VM_KERNEL_MAP_SIZE: VmOffset = 1000 * 1024 * 1024;
 
-/// `VM_MAX_USER_ADDRESS` of <`machine/vm_param.h`>.
+/// The top of a user map.
 const VM_MAX_USER_ADDRESS: VmOffset = 0x8000_0000_0000;
 
-/// `VM_MIN_USER_ADDRESS` of <`machine/vm_param.h`>.
+/// The lowest user address.
 const VM_MIN_USER_ADDRESS: VmOffset = 0;
 
-/// `PDPSHIFT` of <i386/pmap.h>: the page-directory-pointer shift.
+/// The page-directory-pointer shift.
 const PDPSHIFT: u32 = 30;
 
 pub(crate) const PDESHIFT: u32 = 21;
 /// `PDE_MAPPED_SIZE`: the virtual memory one page-directory entry covers.
 const PDE_MAPPED_SIZE: VmOffset = 1 << PDESHIFT;
 
-/// `lin2pdenum()` of <i386/pmap.h>.
+/// The page-directory index of `addr`.
 const fn lin2pdenum(addr: VmOffset) -> usize {
     (addr >> PDESHIFT) & 0x1ff
 }
 
-/// `lin2pdenum_cont()` of <i386/pmap.h>, which includes the directory-pointer
-/// index when the directories are contiguous.
+/// The page-directory index of `addr`, including the directory-pointer index
+/// when the directories are contiguous.
 const fn lin2pdenum_cont(addr: VmOffset) -> usize {
     (addr >> PDESHIFT) & 0x3ff
 }
 
-/// `ptenum()` of <i386/pmap.h>.
+/// The page-table index of `addr`.
 const fn ptenum(addr: VmOffset) -> usize {
     (addr >> 12) & 0x1ff
 }
 
-/// `lin2l4num()` of <i386/pmap.h>.
+/// The level-4 index of `addr`.
 const fn lin2l4num(addr: VmOffset) -> usize {
     (addr >> 39) & 0x1ff
 }
 
-/// `lin2pdpnum()` of <i386/pmap.h>.
+/// The directory-pointer index of `addr`.
 const fn lin2pdpnum(addr: VmOffset) -> usize {
     (addr >> 30) & 0x1ff
 }
 
-/// `pagenum2lin()` of <i386/pmap.h>: the linear address of a page, from its
-/// indices.
+/// The linear address of a page, from its indices.
 const fn pagenum2lin(l4: usize, l3: usize, l2: usize, l1: usize) -> VmOffset {
     ((l4) << 39) + ((l3) << 30) + ((l2) << 21) + ((l1) << 12)
 }
 
-/// `pa_to_pte()` of <i386/pmap.h>.
+/// The page-table entry bits of the physical address `pa`.
 pub(crate) const fn pa_to_pte(pa: VmOffset) -> VmOffset {
     pa & INTEL_PTE_PFN
 }
 
-/// `pte_to_pa()` of <i386/pmap.h>.
+/// The physical address in the entry `pte`.
 const fn pte_to_pa(pte: VmOffset) -> VmOffset {
     pte & INTEL_PTE_PFN
 }
 
-/// `phystokv()` of <`i386/vm_param.h`>.
+/// The kernel virtual address of the physical address `pa`.
 pub(crate) const fn phystokv(pa: VmOffset) -> VmOffset {
     pa.wrapping_add(VM_MIN_KERNEL_ADDRESS)
 }
 
-/// `_kvtophys()` of <`i386/vm_param.h`>.
+/// The physical address of the kernel virtual address `va`, before paging is
+/// up.
 const fn kvtophys_early(va: VmOffset) -> VmOffset {
     va.wrapping_sub(VM_MIN_KERNEL_ADDRESS)
 }
 
-/// `kvtolin()` of <`i386/vm_param.h`>, an identity here because the linear and
-/// kernel virtual bases coincide.
+/// The linear address of the kernel virtual address `va`: an identity here
+/// because the linear and kernel virtual bases coincide.
 const fn kvtolin(va: VmOffset) -> VmOffset {
     va.wrapping_sub(VM_MIN_KERNEL_ADDRESS)
         .wrapping_add(LINEAR_MIN_KERNEL_ADDRESS)
 }
 
-/// `lintokv()` of <`i386/vm_param.h`>.
+/// The kernel virtual address of the linear address `lin`.
 const fn lintokv(lin: VmOffset) -> VmOffset {
     lin.wrapping_sub(LINEAR_MIN_KERNEL_ADDRESS)
         .wrapping_add(VM_MIN_KERNEL_ADDRESS)
 }
 
-/// `ptetokv()` of <i386/pmap.h>.
+/// The kernel virtual address of the table the entry `pte` points at.
 const fn ptetokv(pte: VmOffset) -> *mut VmOffset {
     phystokv(pte_to_pa(pte)) as *mut VmOffset
 }
 
-/// `CPU_HAS_FEATURE()` of <i386/locore.h>, whose table the early CPU
-/// probe fills.
+/// Whether the CPU has `feature`, from the table the early CPU probe fills.
 pub(crate) fn cpu_has_feature(feature: u32) -> bool {
-    // SAFETY: `cpu_features` is the two-word table <i386/locore.h>
-    // declares and the early CPU probe fills before C code runs, and
-    // every caller passes a `CPU_FEATURE_*` constant below 64, so the
-    // index is 0 or 1.
+    // SAFETY: `CPU_FEATURES` is the two-word table the early CPU probe fills
+    // before any caller runs, and every caller passes a `CPU_FEATURE_*`
+    // constant below 64, so the index is 0 or 1.
     let table = core::ptr::addr_of!(locore::CPU_FEATURES);
     let word =
         // SAFETY: the feature index is below the table's two words.
@@ -236,8 +229,7 @@ pub(crate) fn cpu_has_feature(feature: u32) -> bool {
     word & (1u32 << (feature % 32)) != 0
 }
 
-/// `cpu_set` of <i386/pmap.h>: the set of CPUs a pmap is in use on, one bit
-/// each.
+/// The set of CPUs a pmap is in use on, one bit each.
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct CpuSet(AtomicIsize);
@@ -247,7 +239,7 @@ impl CpuSet {
         Self(AtomicIsize::new(0))
     }
 
-    /// The bit a CPU number selects; the C `cpu_set` is at most 32 bits.
+    /// The bit a CPU number selects; the set holds at most 32 CPUs.
     const fn mask(cpu: c_int) -> isize {
         1isize.wrapping_shl(cpu as u32)
     }
@@ -273,7 +265,7 @@ impl CpuSet {
     }
 }
 
-/// `struct pmap_statistics` of <`mach/vm_statistics.h`>.
+/// `struct pmap_statistics`: the resident and wired page counts of a map.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct PmapStatistics {
@@ -285,7 +277,7 @@ const _: () = assert!(size_of::<PmapStatistics>() == 2 * size_of::<c_int>());
 const _: () = assert!(offset_of!(PmapStatistics, resident_count) == 0);
 const _: () = assert!(offset_of!(PmapStatistics, wired_count) == 4);
 
-/// `struct pmap` of <i386/pmap.h>: one physical map.
+/// One physical map.
 ///
 /// The header's `__x86_64__` layout, whose table tree hangs from `l4base`.
 #[repr(C)]
@@ -311,12 +303,12 @@ const _: () = {
     assert!(offset_of!(Pmap, cpus_using) == 24);
 };
 
-// SAFETY: the C mutates a live pmap under its own lock, and the boot code
-// writes `kernel_pmap_store` before another CPU can see it.
+// SAFETY: a live pmap is mutated under its own lock, and the boot code writes
+// `KERNEL_PMAP_STORE` before another CPU can see it.
 unsafe impl Sync for Pmap {}
 
 impl Pmap {
-    /// The zero image a C `static` of `struct pmap` began with.
+    /// The zero image of a static map.
     const fn zeroed() -> Self {
         Self {
             l4base: ptr::null_mut(),
@@ -331,8 +323,7 @@ impl Pmap {
     }
 }
 
-/// `struct pv_entry` of i386/intel/pmap.c: one virtual mapping of a physical
-/// page.
+/// One virtual mapping of a physical page.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct PvEntry {
@@ -349,7 +340,7 @@ const _: () = {
     assert!(offset_of!(PvEntry, va) == 16);
 };
 
-/// `pmap_mapwindow_t` of <i386/pmap.h>: one temporary physical mapping.
+/// One temporary physical mapping.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -365,7 +356,7 @@ const _: () = {
     assert!(offset_of!(PmapMapwindow, vaddr) == 8);
 };
 
-/// `struct pmap_update_item` of i386/intel/pmap.c: one queued invalidation.
+/// One queued invalidation.
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(missing_docs)]
@@ -375,8 +366,7 @@ pub struct PmapUpdateItem {
     pub end: VmOffset,
 }
 
-/// `struct pmap_update_list` of i386/intel/pmap.c: the invalidations queued
-/// for one CPU.
+/// The invalidations queued for one CPU.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct PmapUpdateList {
@@ -414,11 +404,10 @@ impl PmapUpdateList {
     }
 }
 
-/// `kernel_pmap_store` of i386/intel/pmap.c: the kernel's statically
-/// allocated map.
+/// The kernel's statically allocated map.
 static mut KERNEL_PMAP_STORE: Pmap = Pmap::zeroed();
 
-/// `kernel_pmap` of <vm/pmap.h>: the kernel's physical map.
+/// The kernel's physical map.
 static KERNEL_PMAP: AtomicPtr<Pmap> = AtomicPtr::new(ptr::null_mut());
 
 /// `PMAP_NULL`: the C's null map pointer.
@@ -429,34 +418,32 @@ pub(crate) fn kernel_pmap_ptr() -> *mut Pmap {
     KERNEL_PMAP.load(Ordering::Relaxed)
 }
 
-/// `pmap_system_lock` of i386/intel/pmap.c: the pmap-system read/write lock.
+/// The pmap-system read/write lock.
 static mut PMAP_SYSTEM_LOCK: LockData = LockData::zeroed();
 
-/// `pmap_initialized` of i386/intel/pmap.c.
+/// Whether [`pmap_init`] has run.
 static PMAP_INITIALIZED: AtomicI32 = AtomicI32::new(0);
 
-/// `pmap_debug` of i386/intel/pmap.c: the flag that turns on the enter trace.
+/// The flag that turns on the enter trace.
 static PMAP_DEBUG: AtomicI32 = AtomicI32::new(0);
 
-/// `kernel_virtual_start` of i386/intel/pmap.c: the start of the kernel
-/// virtual range `pmap_bootstrap()` sets once.
+/// The start of the kernel virtual range [`pmap_bootstrap`] sets once.
 pub static KERNEL_VIRTUAL_START: AtomicVmOffset = AtomicVmOffset::new(0);
 
-/// `kernel_virtual_end` of i386/intel/pmap.c: the end of that range.
+/// The end of that range.
 pub static KERNEL_VIRTUAL_END: AtomicVmOffset = AtomicVmOffset::new(0);
 
-/// `kernel_page_dir` of <i386/pmap.h>: the kernel's page directory.
+/// The kernel's page directory.
 static KERNEL_PAGE_DIR: AtomicPtr<VmOffset> = AtomicPtr::new(ptr::null_mut());
 
-/// `pv_head_table` of i386/intel/pmap.c: one pv list head per physical page.
+/// One pv list head per physical page.
 static PV_HEAD_TABLE: AtomicPtr<PvEntry> = AtomicPtr::new(ptr::null_mut());
 
-/// `pv_free_list` of i386/intel/pmap.c: the free pv entries, under
-/// [`PV_FREE_LIST_LOCK`] at `SPLVM`.
+/// The free pv entries, under [`PV_FREE_LIST_LOCK`] at `splvm`.
 static PV_FREE_LIST: SyncCell<*mut PvEntry> =
     SyncCell(UnsafeCell::new(ptr::null_mut()));
 
-/// `pv_free_list_lock` of i386/intel/pmap.c.
+/// Guards [`PV_FREE_LIST`].
 static PV_FREE_LIST_LOCK: SimpleLock = SimpleLock::new();
 
 /// One lock per managed page, guarding that page's pv list and attribute
@@ -467,55 +454,53 @@ static mut PV_LOCKS: &[SpinLock<(), MachPlatform>] = &[];
 const _: () =
     assert!(align_of::<SpinLock<(), MachPlatform>>() <= align_of::<PvEntry>());
 
-/// `pmap_phys_attributes` of i386/intel/pmap.c: one attribute byte per
-/// physical page.
+/// One attribute byte per physical page.
 static PMAP_PHYS_ATTRIBUTES: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 
-/// `cpus_active` of <i386/pmap.h>: the CPUs that may use a pmap.
+/// The CPUs that may use a pmap.
 pub static CPUS_ACTIVE: CpuSet = CpuSet::new();
 
-/// `cpus_idle` of <i386/pmap.h>: the CPUs that are idle but will want the
-/// kernel pmap updates when they wake.
+/// The CPUs that are idle but will want the kernel pmap updates when they
+/// wake.
 pub static CPUS_IDLE: CpuSet = CpuSet::new();
 
-/// `cpu_update_needed` of <i386/pmap.h>: the CPUs with queued invalidations.
+/// The CPUs with queued invalidations.
 pub static CPU_UPDATE_NEEDED: [AtomicI32; MAX_NCPUS] =
     [const { AtomicI32::new(0) }; MAX_NCPUS];
 
-/// `cpu_update_list` of i386/intel/pmap.c: the queued invalidations.
+/// The queued invalidations.
 static mut CPU_UPDATE_LIST: [PmapUpdateList; MAX_NCPUS] =
     [const { PmapUpdateList::new() }; MAX_NCPUS];
 
-/// `mapwindows` of i386/intel/pmap.c: the per-CPU temporary mappings.
+/// The per-CPU temporary mappings.
 static mut MAPWINDOWS: [PmapMapwindow; PMAP_NMAPWINDOWS * MAX_NCPUS] =
     [PmapMapwindow {
         entry: ptr::null_mut(),
         vaddr: 0,
     }; PMAP_NMAPWINDOWS * MAX_NCPUS];
 
-/// `pmap_cache` of i386/intel/pmap.c: the `struct pmap` slab cache.
+/// The slab cache of [`Pmap`] records.
 static mut PMAP_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `pt_cache` of i386/intel/pmap.c: the page-table slab cache.
+/// The page-table slab cache.
 static mut PT_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `pd_cache` of i386/intel/pmap.c: the page-directory slab cache.
+/// The page-directory slab cache.
 static mut PD_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `pdpt_cache` of i386/intel/pmap.c: the directory-pointer slab cache.
+/// The directory-pointer slab cache.
 static mut PDPT_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `l4_cache` of i386/intel/pmap.c: the level-4 slab cache.
+/// The level-4 slab cache.
 static mut L4_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `pv_list_cache` of i386/intel/pmap.c: the `struct pv_entry` slab cache.
+/// The slab cache of [`PvEntry`] records.
 static mut PV_LIST_CACHE: KmemCache = KmemCache::zeroed();
 
 /// Invalidate the TLB entry for one page, given its linear address.
 fn invalidate_linear_page(linear: VmOffset) {
-    // SAFETY: The two selectors are the architectural constants of
-    // <i386/gdt.h>, and the kernel's GDT describes them from `gdt_init()` on,
-    // so neither load can fault.
+    // SAFETY: The two selectors are architectural constants the kernel's GDT
+    // describes from `gdt_init()` on, so neither load can fault.
     unsafe {
         asm!(
             "movw {linear_ds:x}, %es",
@@ -529,7 +514,7 @@ fn invalidate_linear_page(linear: VmOffset) {
     }
 }
 
-/// The `get_cr3()` of <`i386/proc_reg.h`>.
+/// Reads CR3.
 fn read_cr3() -> usize {
     let value: usize;
     // SAFETY: reading CR3 is legal at CPL 0.
@@ -543,7 +528,7 @@ fn read_cr3() -> usize {
     value
 }
 
-/// The `set_cr3()` of <`i386/proc_reg.h`>.
+/// Writes CR3.
 fn write_cr3(value: usize) {
     // SAFETY: writing CR3 is legal at CPL 0; the caller supplies a page
     // directory with the mappings the kernel is already using.
@@ -556,7 +541,7 @@ fn write_cr3(value: usize) {
     }
 }
 
-/// The `get_cr4()` of <`i386/proc_reg.h`>.
+/// Reads CR4.
 fn read_cr4() -> usize {
     let value: usize;
     // SAFETY: reading CR4 is legal at CPL 0.
@@ -570,7 +555,7 @@ fn read_cr4() -> usize {
     value
 }
 
-/// The `set_cr4()` of <`i386/proc_reg.h`>.
+/// Writes CR4.
 fn write_cr4(value: usize) {
     // SAFETY: writing CR4 is legal at CPL 0; the caller only adds the PAE bit
     // the page tables were built for.
@@ -583,19 +568,18 @@ fn write_cr4(value: usize) {
     }
 }
 
-/// The `flush_tlb()` of <`i386/proc_reg.h`>, which is `set_cr3(get_cr3())`.
+/// Flushes the TLB by reloading CR3.
 fn flush_tlb() {
     write_cr3(read_cr3());
 }
 
-/// The `set_pmap()` of <i386/intel/pmap.h>.
+/// Loads `pmap`'s page tables into CR3.
 fn set_pmap(pmap: *mut Pmap) {
     // SAFETY: the caller passes a live map whose `l4base` the kernel built.
     unsafe { write_cr3(kvtophys((*pmap).l4base as VmOffset)) };
 }
 
-/// The `PMAP_ACTIVATE_USER()` of <i386/intel/pmap.h>: make `pmap` current on
-/// `cpu` and add the CPU to its active set.
+/// Makes `pmap` current on `cpu` and adds the CPU to its active set.
 ///
 /// # Safety
 ///
@@ -617,8 +601,7 @@ pub unsafe fn activate_user(pmap: *mut Pmap, cpu: c_int) {
     unsafe { (*pmap).lock.unlock() };
 }
 
-/// The `PMAP_DEACTIVATE_USER()` of <i386/intel/pmap.h>: remove `cpu` from
-/// `pmap`'s active set.
+/// Removes `cpu` from `pmap`'s active set.
 ///
 /// # Safety
 ///
@@ -629,8 +612,7 @@ pub unsafe fn deactivate_user(pmap: *mut Pmap, cpu: c_int) {
     }
 }
 
-/// The `PMAP_DEACTIVATE_KERNEL()` of <i386/intel/pmap.h>: remove `cpu` from
-/// the kernel map's active set.
+/// Removes `cpu` from the kernel map's active set.
 ///
 /// # Safety
 ///
@@ -641,8 +623,7 @@ pub(crate) unsafe fn deactivate_kernel(cpu: c_int) {
     unsafe { (*kernel_pmap_ptr()).cpus_using.clear(cpu) };
 }
 
-/// The `PMAP_ACTIVATE_KERNEL()` of <i386/intel/pmap.h>: make the kernel pmap
-/// current on `cpu` and flush its queued updates.
+/// Makes the kernel pmap current on `cpu` and flushes its queued updates.
 ///
 /// # Safety
 ///
@@ -666,28 +647,28 @@ pub(crate) unsafe fn activate_kernel(cpu: c_int) {
     }
 }
 
-/// The `SPLVM()` of i386/intel/pmap.c, minus the assignment the macro makes.
+/// Raises to `splvm`, returning the level to restore.
 fn raise_splvm() -> c_int {
-    // SAFETY: `splvm` is the real routine <i386/spl.h> declares.
+    // SAFETY: raising to `splvm` has no precondition.
     let spl = unsafe { spl::splvm() };
     CPUS_ACTIVE.clear(cpu_id().bits() as c_int);
     spl
 }
 
-/// The `SPLX()` of i386/intel/pmap.c.
+/// Restores the level [`raise_splvm`] returned.
 fn restore_spl(spl: c_int) {
     CPUS_ACTIVE.set(cpu_id().bits() as c_int);
     // SAFETY: `spl` came from `splvm()`, and `splx` accepts any level.
     unsafe { spl::splx(spl) };
 }
 
-/// The pmap-system lock `lock_init()` built.
+/// The pmap-system lock.
 fn system_lock() -> *mut LockData {
     &raw mut PMAP_SYSTEM_LOCK
 }
 
-/// The `PMAP_READ_LOCK()` of i386/intel/pmap.c: take the system lock for
-/// read, then the map's own lock, and return the level to restore.
+/// Takes the system lock for read, then the map's own lock, and returns the
+/// level to restore.
 ///
 /// # Safety
 ///
@@ -703,7 +684,7 @@ unsafe fn read_lock(pmap: *mut Pmap) -> c_int {
     spl
 }
 
-/// The `PMAP_READ_UNLOCK()` of i386/intel/pmap.c.
+/// Drops the locks [`read_lock`] took and restores the level.
 ///
 /// # Safety
 ///
@@ -718,7 +699,7 @@ unsafe fn read_unlock(pmap: *mut Pmap, spl: c_int) {
     restore_spl(spl);
 }
 
-/// The `PMAP_WRITE_LOCK()` of i386/intel/pmap.c.
+/// Takes the system lock for write at `splvm`, returning the level to restore.
 fn write_lock() -> c_int {
     let spl = raise_splvm();
     // SAFETY: the system lock is live from `pmap_bootstrap()` on.
@@ -726,15 +707,15 @@ fn write_lock() -> c_int {
     spl
 }
 
-/// The `PMAP_WRITE_UNLOCK()` of i386/intel/pmap.c.
+/// Drops the system lock [`write_lock`] took and restores the level.
 fn write_unlock(spl: c_int) {
     // SAFETY: the caller holds the system lock for write.
     unsafe { (*system_lock()).done() };
     restore_spl(spl);
 }
 
-/// The `INVALIDATE_TLB()` of i386/intel/pmap.c: one `invlpg` for a single
-/// page, a CR3 reload for anything wider.
+/// Invalidates the TLB of this CPU for `s..e` of `pmap`: one INVLPG for a
+/// single page, a CR3 reload for anything wider.
 ///
 /// # Safety
 ///
@@ -753,13 +734,13 @@ unsafe fn invalidate_tlb(pmap: *mut Pmap, s: VmOffset, e: VmOffset) {
     }
 }
 
-/// The `PMAP_UPDATE_TLBS()` of i386/intel/pmap.c: signal every other CPU
-/// using the map, wait for them to acknowledge, then invalidate locally.
+/// Signals every other CPU using the map, waits for them to acknowledge, then
+/// invalidates locally.
 ///
 /// # Safety
 ///
-/// `pmap` must be live and locked, and the caller must be at `SPLVM` or
-/// above with interrupts blocked, as the C's callers were.
+/// `pmap` must be live and locked, and the caller must be at `splvm` or above
+/// with interrupts blocked.
 unsafe fn update_tlbs(pmap: *mut Pmap, s: VmOffset, e: VmOffset) {
     let cpu_mask = CpuSet::mask(cpu_id().bits() as c_int);
     let users = unsafe { (*pmap).cpus_using.bits() } & !cpu_mask;
@@ -779,7 +760,7 @@ unsafe fn update_tlbs(pmap: *mut Pmap, s: VmOffset, e: VmOffset) {
     }
 }
 
-/// The `pmap_l4base()` of i386/intel/pmap.c.
+/// The level-4 entry of `addr` in `pmap`, or null.
 ///
 /// # Safety
 ///
@@ -792,7 +773,7 @@ unsafe fn l4base_of(pmap: *mut Pmap, addr: VmOffset) -> *mut VmOffset {
     base.wrapping_add(lin2l4num(addr))
 }
 
-/// The `pmap_ptp()` of i386/intel/pmap.c.
+/// The directory-pointer entry of `addr` in `pmap`, or null.
 ///
 /// # Safety
 ///
@@ -810,7 +791,7 @@ unsafe fn ptp_of(pmap: *mut Pmap, addr: VmOffset) -> *mut VmOffset {
     ptetokv(pdp).wrapping_add(lin2pdpnum(addr))
 }
 
-/// The `pmap_pde()` of i386/intel/pmap.c.
+/// The page-directory entry of `addr` in `pmap`, or null.
 ///
 /// # Safety
 ///
@@ -833,8 +814,7 @@ unsafe fn pde_of(pmap: *mut Pmap, addr: VmOffset) -> *mut VmOffset {
     ptetokv(pde).wrapping_add(lin2pdenum(addr))
 }
 
-/// The `pmap_pte()` of i386/intel/pmap.c, whose C callers treated a null
-/// return as "no mapping".
+/// The page-table entry of `addr` in `pmap`, or null for no mapping.
 ///
 /// # Safety
 ///
@@ -856,7 +836,7 @@ unsafe fn pte_of(pmap: *mut Pmap, addr: VmOffset) -> *mut VmOffset {
     ptetokv(pte).wrapping_add(ptenum(addr))
 }
 
-/// `pmap_pte()` of <i386/pmap.h>.
+/// The page-table entry of `addr` in `pmap`, or null for no mapping.
 ///
 /// # Safety
 ///
@@ -890,7 +870,7 @@ unsafe fn cache_free(cache: *mut KmemCache, obj: *mut u8) {
     unsafe { (*cache).free(obj) };
 }
 
-/// `pai_to_pvh()` of i386/intel/pmap.c: the pv list head of a page index.
+/// The pv list head of a page index.
 fn pv_head(pai: usize) -> *mut PvEntry {
     PV_HEAD_TABLE.load(Ordering::Relaxed).wrapping_add(pai)
 }
@@ -914,7 +894,7 @@ fn pv_lock(pai: usize) -> &'static SpinLock<(), MachPlatform> {
     &locks[pai]
 }
 
-/// The `PV_ALLOC()` of i386/intel/pmap.c.
+/// Takes a pv entry from the free list, or null.
 fn pv_alloc() -> *mut PvEntry {
     // SAFETY: the free list is only touched under its own lock.
     unsafe {
@@ -929,7 +909,7 @@ fn pv_alloc() -> *mut PvEntry {
     }
 }
 
-/// The `PV_FREE()` of i386/intel/pmap.c.
+/// Puts a pv entry back on the free list.
 fn pv_free(entry: *mut PvEntry) {
     // SAFETY: the entry came from the pv list of a managed page, and the free
     // list is only touched under its own lock.
@@ -942,8 +922,7 @@ fn pv_free(entry: *mut PvEntry) {
     }
 }
 
-/// The `valid_page()` of i386/intel/pmap.c: whether the physical address is
-/// a managed page.
+/// Whether the physical address is a managed page.
 fn valid_page(addr: VmOffset) -> bool {
     if PMAP_INITIALIZED.load(Ordering::Relaxed) == 0 {
         return false;
@@ -951,8 +930,8 @@ fn valid_page(addr: VmOffset) -> bool {
     vm_page::lookup_pa(addr).is_some()
 }
 
-/// `pmap_pageable()` in i386/intel/pmap.c: advisory, and empty in the C
-/// too, since `pmap_enter()` already learns whether a page is wired.
+/// Advisory, and empty, since [`pmap_enter`] already learns whether a page is
+/// wired.
 pub(crate) const fn pmap_pageable(
     _pmap: *mut Pmap,
     _start: VmOffset,
@@ -966,9 +945,9 @@ fn unmap_page_zero() {
     kprint!(
         "Unmapping the zero page.  Some BIOS functions may not be working any more.\n"
     );
-    // SAFETY: `kernel_pmap` is the kernel's live pmap from `pmap_bootstrap()`
-    // on, and `pmap_pte()` returns null rather than something invalid for an
-    // address with no page-table entry.
+    // SAFETY: `kernel_pmap_ptr()` is the kernel's live pmap from
+    // `pmap_bootstrap()` on, and `pte_of()` returns null rather than something
+    // invalid for an address with no page-table entry.
     let pte = unsafe { pte_of(kernel_pmap_ptr(), 0) };
     let Some(pte) = NonNull::new(pte) else {
         return;
@@ -989,8 +968,7 @@ pub(crate) unsafe fn pmap_unmap_page_zero() {
     unmap_page_zero();
 }
 
-/// The `pmap_map_bd()` of i386/intel/pmap.c: the boot-time back door that
-/// maps memory outside the direct map.
+/// The boot-time back door that maps memory outside the direct map.
 ///
 /// # Safety
 ///
@@ -1043,12 +1021,12 @@ unsafe fn map_bd(
     virt
 }
 
-/// The `pmap_bootstrap_pae()` of i386/intel/pmap.c.
+/// Builds the kernel's level-4 table and directory-pointer tables.
 fn bootstrap_pae() {
     let l4 =
         with_exposed_provenance_mut::<VmOffset>(phystokv(pmap_grab_page()));
-    // SAFETY: `kernel_pmap` points at the static store, and the L4 table was
-    // just grabbed for it.
+    // SAFETY: `kernel_pmap_ptr()` points at the static store, and the L4 table
+    // was just grabbed for it.
     unsafe { (*kernel_pmap_ptr()).l4base = l4 };
     // SAFETY: the freshly grabbed page is the kernel's to clear.
     unsafe { ptr::write_bytes(l4.cast::<u8>(), 0, PAGE_SIZE) };
@@ -1087,8 +1065,8 @@ fn bootstrap_pae() {
     }
 }
 
-/// `pmap_bootstrap()` in i386/intel/pmap.c: build the kernel's page tables
-/// with mapping off, so only physical addresses are reachable.
+/// Builds the kernel's page tables with mapping off, so only physical
+/// addresses are reachable.
 pub(crate) fn pmap_bootstrap() {
     KERNEL_PMAP.store(&raw mut KERNEL_PMAP_STORE, Ordering::Relaxed);
 
@@ -1173,8 +1151,7 @@ pub(crate) fn pmap_bootstrap() {
     }
 }
 
-/// `pmap_get_mapwindow()` of <i386/pmap.h>: map a physical page in the
-/// calling CPU's temporary window.
+/// Maps a physical page in the calling CPU's temporary window.
 ///
 /// # Safety
 ///
@@ -1187,7 +1164,7 @@ pub(crate) fn pmap_bootstrap() {
 pub(crate) unsafe fn pmap_get_mapwindow(
     entry: VmOffset,
 ) -> *mut PmapMapwindow {
-    // SAFETY: `kernel_pmap` is live from `pmap_bootstrap()` on, and a
+    // SAFETY: `kernel_pmap_ptr()` is live from `pmap_bootstrap()` on, and a
     // `CpuId` indexes the `MAX_NCPUS` window runs.
     unsafe {
         let cpu = cpu_id().as_usize();
@@ -1218,7 +1195,7 @@ pub(crate) unsafe fn pmap_get_mapwindow(
     }
 }
 
-/// `pmap_put_mapwindow()` of <i386/pmap.h>: drop a temporary mapping.
+/// Drops a temporary mapping.
 ///
 /// # Safety
 ///
@@ -1235,8 +1212,7 @@ pub(crate) unsafe fn pmap_put_mapwindow(map: *mut PmapMapwindow) {
     }
 }
 
-/// `pmap_virtual_space()` of <vm/pmap.h>: the kernel virtual range left for
-/// the VM system.
+/// The kernel virtual range left for the VM system.
 ///
 /// # Safety
 ///
@@ -1253,8 +1229,7 @@ pub(crate) unsafe fn pmap_virtual_space(
     }
 }
 
-/// `pmap_init()` in i386/intel/pmap.c: allocate the pv tables and the cache
-/// of maps.
+/// Allocates the pv tables and the cache of maps.
 pub(crate) fn pmap_init() {
     let npages = vm_page::table_size();
     let size = round_page(
@@ -1351,7 +1326,7 @@ pub(crate) fn pmap_init() {
     PMAP_INITIALIZED.store(1, Ordering::Relaxed);
 }
 
-/// `pmap_create()` in i386/intel/pmap.c: build a fresh physical map.
+/// Builds a fresh physical map.
 ///
 /// # Safety
 ///
@@ -1383,7 +1358,7 @@ pub(crate) unsafe fn pmap_create(size: VmSize) -> *mut Pmap {
             unsafe { cache_free(&raw mut PMAP_CACHE, p.cast()) };
             return PMAP_NULL;
         }
-        // SAFETY: the new directory is one page, and `kernel_page_dir` maps
+        // SAFETY: the new directory is one page, and `KERNEL_PAGE_DIR` maps
         // the same `PDPNUM` pages from `pmap_bootstrap()` on.
         unsafe {
             ptr::copy_nonoverlapping(
@@ -1446,8 +1421,8 @@ pub(crate) unsafe fn pmap_create(size: VmSize) -> *mut Pmap {
     p
 }
 
-/// `pmap_destroy()` in i386/intel/pmap.c: drop a reference, freeing the page
-/// tables and the map when the last one goes.
+/// Drops a reference, freeing the page tables and the map when the last one
+/// goes.
 ///
 /// # Safety
 ///
@@ -1510,7 +1485,7 @@ pub(crate) unsafe fn pmap_destroy(p: Option<NonNull<Pmap>>) {
                     l2i += 1;
                 }
             }
-            // SAFETY: `pdirbase` came from `pd_cache`.
+            // SAFETY: `pdirbase` came from `PD_CACHE`.
             unsafe { cache_free(&raw mut PD_CACHE, pdirbase.cast()) };
             l3i += 1;
         }
@@ -1525,7 +1500,7 @@ pub(crate) unsafe fn pmap_destroy(p: Option<NonNull<Pmap>>) {
     unsafe { cache_free(&raw mut PMAP_CACHE, p.cast()) };
 }
 
-/// `pmap_reference()` in i386/intel/pmap.c.
+/// Takes a reference on the map.
 ///
 /// # Safety
 ///
@@ -1544,9 +1519,8 @@ pub(crate) unsafe fn pmap_reference(p: Option<NonNull<Pmap>>) {
     restore_spl(spl);
 }
 
-/// The `pmap_remove_range()` of i386/intel/pmap.c: drop a run of hardware
-/// entries, collecting their modify and reference bits and unlinking them
-/// from their pv lists.
+/// Drops a run of hardware entries, collecting their modify and reference bits
+/// and unlinking them from their pv lists.
 ///
 /// # Safety
 ///
@@ -1696,7 +1670,7 @@ unsafe fn unlink_pv(pmap: *mut Pmap, pai: usize, va: VmOffset) {
     }
 }
 
-/// `pmap_remove()` in i386/intel/pmap.c: remove every mapping in a range.
+/// Removes every mapping in a range.
 ///
 /// # Safety
 ///
@@ -1745,8 +1719,7 @@ unsafe fn remove(map: NonNull<Pmap>, mut s: VmOffset, e: VmOffset) {
     unsafe { read_unlock(map, spl) };
 }
 
-/// `pmap_page_protect()` in i386/intel/pmap.c: lower the permission of every
-/// mapping of a physical page.
+/// Lowers the permission of every mapping of a physical page.
 ///
 /// # Safety
 ///
@@ -1873,7 +1846,7 @@ unsafe fn page_protect(phys: VmOffset, prot: c_int) {
     write_unlock(spl);
 }
 
-/// `pmap_protect()` in i386/intel/pmap.c: lower permissions over a range.
+/// Lowers permissions over a range.
 ///
 /// # Safety
 ///
@@ -1948,8 +1921,8 @@ unsafe fn protect(
     restore_spl(spl);
 }
 
-/// The page-table-level getter `pmap_expand_level()` calls: one of
-/// [`l4base_of()`], [`ptp_of()`], [`pde_of()`], or [`pte_of()`].
+/// The page-table-level getter [`expand_level`] calls: one of [`l4base_of()`],
+/// [`ptp_of()`], [`pde_of()`], or [`pte_of()`].
 ///
 /// # Safety
 ///
@@ -1958,8 +1931,8 @@ unsafe fn protect(
 /// physical map.
 type LevelGetter = unsafe fn(*mut Pmap, VmOffset) -> *mut VmOffset;
 
-/// The `pmap_expand_level()` of i386/intel/pmap.c: allocate one level of the
-/// page-table tree, unlocking the pmap around the allocation.
+/// Allocates one level of the page-table tree, unlocking the pmap around the
+/// allocation.
 ///
 /// # Safety
 ///
@@ -2036,8 +2009,7 @@ unsafe fn expand_level(
     }
 }
 
-/// The `pmap_expand()` of i386/intel/pmap.c: grow every level the address
-/// needs.
+/// Grows every level the address needs.
 ///
 /// # Safety
 ///
@@ -2089,7 +2061,7 @@ fn enter_template(
     template
 }
 
-/// `pmap_enter()` in i386/intel/pmap.c: insert one mapping.
+/// Inserts one mapping.
 ///
 /// # Safety
 ///
@@ -2293,8 +2265,7 @@ unsafe fn link_pv(
     Ok(())
 }
 
-/// `pmap_change_wiring()` in i386/intel/pmap.c: set the wired bit on an
-/// existing mapping.
+/// Sets the wired bit on an existing mapping.
 ///
 /// # Safety
 ///
@@ -2355,8 +2326,7 @@ unsafe fn change_wiring(map: *mut Pmap, v: VmOffset, wired: bool) {
     unsafe { read_unlock(map, spl) };
 }
 
-/// `pmap_extract()` in i386/intel/pmap.c: the physical address a mapping
-/// holds, or zero.
+/// The physical address a mapping holds, or zero.
 ///
 /// # Safety
 ///
@@ -2387,8 +2357,7 @@ unsafe fn extract(pmap: *mut Pmap, va: VmOffset) -> VmOffset {
     pa
 }
 
-/// `pmap_collect()` in i386/intel/pmap.c: free the user page tables of a map
-/// whose pages are scarce.
+/// Frees the user page tables of a map whose pages are scarce.
 ///
 /// # Safety
 ///
@@ -2495,8 +2464,7 @@ unsafe fn collect(p: NonNull<Pmap>) {
     unsafe { read_unlock(p, spl) };
 }
 
-/// The `phys_attribute_clear()` of i386/intel/pmap.c: clear modify or
-/// reference bits on every mapping of a page.
+/// Clears modify or reference bits on every mapping of a page.
 ///
 /// # Safety
 ///
@@ -2546,8 +2514,7 @@ unsafe fn attribute_clear(phys: VmOffset, bits: c_int) {
     write_unlock(spl);
 }
 
-/// The `phys_attribute_test()` of i386/intel/pmap.c: whether any mapping of
-/// a page has the bits set.
+/// Whether any mapping of a page has the bits set.
 ///
 /// # Safety
 ///
@@ -2603,7 +2570,7 @@ unsafe fn attribute_test(phys: VmOffset, bits: c_int) -> bool {
     false
 }
 
-/// `pmap_clear_modify()` of <vm/pmap.h>: clear the modify bits of a page.
+/// Clears the modify bits of a page.
 ///
 /// # Safety
 ///
@@ -2613,7 +2580,7 @@ pub(crate) unsafe fn pmap_clear_modify(phys: VmOffset) {
     unsafe { attribute_clear(phys, c_int::from(PHYS_MODIFIED)) };
 }
 
-/// `pmap_is_modified()` of <vm/pmap.h>: whether a page was modified.
+/// Whether a page was modified.
 ///
 /// # Safety
 ///
@@ -2623,8 +2590,7 @@ pub(crate) unsafe fn pmap_is_modified(phys: VmOffset) -> bool {
     unsafe { attribute_test(phys, c_int::from(PHYS_MODIFIED)) }
 }
 
-/// `pmap_clear_reference()` of <vm/pmap.h>: clear the reference bits of a
-/// page.
+/// Clears the reference bits of a page.
 ///
 /// # Safety
 ///
@@ -2634,7 +2600,7 @@ pub(crate) unsafe fn pmap_clear_reference(phys: VmOffset) {
     unsafe { attribute_clear(phys, c_int::from(PHYS_REFERENCED)) };
 }
 
-/// `pmap_is_referenced()` of <vm/pmap.h>: whether a page was referenced.
+/// Whether a page was referenced.
 ///
 /// # Safety
 ///
@@ -2644,7 +2610,7 @@ pub(crate) unsafe fn pmap_is_referenced(phys: VmOffset) -> bool {
     unsafe { attribute_test(phys, c_int::from(PHYS_REFERENCED)) }
 }
 
-/// `__builtin_ffs()`: the one-based index of the lowest set bit, or zero.
+/// The one-based index of the lowest set bit, or zero.
 const fn ffs(value: isize) -> u32 {
     if value == 0 {
         0
@@ -2660,13 +2626,13 @@ fn update_list(cpu: c_int) -> *mut PmapUpdateList {
     unsafe { &raw mut CPU_UPDATE_LIST[cpu as usize] }
 }
 
-/// The `signal_cpus()` of i386/intel/pmap.c: queue an invalidation for every
-/// CPU in `use_list` and interrupt the ones that are awake.
+/// Queues an invalidation for every CPU in `use_list` and interrupts the ones
+/// that are awake.
 ///
 /// # Safety
 ///
 /// `pmap` must be a live, locked map and the range one it was changed in, as
-/// the C's `PMAP_UPDATE_TLBS` required.
+/// [`update_tlbs`] requires.
 pub(crate) unsafe fn signal_cpus(
     use_list: isize,
     pmap: *mut Pmap,
@@ -2721,13 +2687,12 @@ pub(crate) unsafe fn signal_cpus(
     }
 }
 
-/// `process_pmap_updates()` of <i386/pmap.h>: flush the calling CPU's queued
-/// invalidations.
+/// Flushes the calling CPU's queued invalidations.
 ///
 /// # Safety
 ///
-/// Must be called at `SPLVM`, with the caller's pmap live if it is not the
-/// kernel map, as the C required.
+/// Must be called at `splvm`, with the caller's pmap live if it is not the
+/// kernel map.
 pub(crate) unsafe fn process_pmap_updates(my_pmap: *mut Pmap) {
     // The C `pmap` routines take the CPU number as an `int`.
     let my_cpu = cpu_id().bits() as c_int;
@@ -2759,7 +2724,7 @@ pub(crate) unsafe fn process_pmap_updates(my_pmap: *mut Pmap) {
     unsafe { (*update_list_p).lock.unlock() };
 }
 
-/// The `current_pmap()` of i386/intel/pmap.c.
+/// The pmap `thread` runs in.
 ///
 /// # Safety
 ///
@@ -2773,8 +2738,7 @@ unsafe fn current_pmap(thread: *mut Thread) -> *mut Pmap {
     }
 }
 
-/// `pmap_update_interrupt()` of <i386/pmap.h>: the interprocessor handler
-/// that flushes this CPU's TLB for another.
+/// The interprocessor handler that flushes this CPU's TLB for another.
 pub(crate) extern "C" fn pmap_update_interrupt() {
     // The C `pmap` routines take the CPU number as an `int`.
     let my_cpu = cpu_id().bits() as c_int;
@@ -2796,7 +2760,7 @@ pub(crate) extern "C" fn pmap_update_interrupt() {
         }
     }
 
-    // SAFETY: `splvm` is the real routine <i386/spl.h> declares.
+    // SAFETY: raising to `splvm` has no precondition.
     let s = unsafe { spl::splvm() };
     loop {
         CPUS_ACTIVE.clear(my_cpu);
@@ -2808,8 +2772,7 @@ pub(crate) extern "C" fn pmap_update_interrupt() {
         } {
             core::hint::spin_loop();
         }
-        // SAFETY: this runs at `SPLVM` with the interrupt blocked, as the C
-        // did.
+        // SAFETY: this runs at `splvm` with the interrupt blocked.
         unsafe { process_pmap_updates(my_pmap) };
         CPUS_ACTIVE.set(my_cpu);
         if CPU_UPDATE_NEEDED[my_cpu as usize].load(Ordering::Relaxed) == 0 {
@@ -2820,13 +2783,12 @@ pub(crate) extern "C" fn pmap_update_interrupt() {
     unsafe { spl::splx(s) };
 }
 
-/// `pmap_make_temporary_mapping()` of <i386/pmap.h>: empty, because the
-/// initial and linear kernel bases coincide and no temporary mapping is
-/// needed.
+/// Does nothing, because the initial and linear kernel bases coincide and no
+/// temporary mapping is needed.
 pub(crate) const fn pmap_make_temporary_mapping() {}
 
-/// `pmap_set_page_dir()` of <i386/pmap.h>: load the kernel's page tables
-/// into CR3 and turn on the paging features they need.
+/// Loads the kernel's page tables into CR3 and turns on the paging features
+/// they need.
 pub(crate) fn pmap_set_page_dir() {
     // SAFETY: the kernel map holds its L4 table from `pmap_bootstrap()`.
     let physical =
@@ -2838,8 +2800,7 @@ pub(crate) fn pmap_set_page_dir() {
     write_cr4(read_cr4() | CR4_PAE);
 }
 
-/// `pmap_remove_temporary_mapping()` of <i386/pmap.h>: flush the TLB; there
-/// is no temporary low mapping to drop here.
+/// Flushes the TLB; there is no temporary low mapping to drop here.
 pub(crate) fn pmap_remove_temporary_mapping() {
     flush_tlb();
 }

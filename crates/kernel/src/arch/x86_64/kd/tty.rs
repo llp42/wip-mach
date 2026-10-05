@@ -6,8 +6,8 @@
 //   Copyright 1988, 1989 by Intel Corporation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! `struct tty` and the kd device entry points: open/close/read/write, get/set
-//! status, mmap and the line-discipline start.
+//! The console tty and the kd device entry points: open/close/read/write,
+//! get/set status, mmap and the line-discipline start.
 
 use super::{KbEntry, console, esc, kd, kdinit, keyboard};
 use crate::arch::types::VmOffset;
@@ -22,20 +22,20 @@ use crate::device::chario::{
 use crate::device::r#return::{DeviceError, IoResult};
 use core::ffi::{c_int, c_uint, c_void};
 
-/// `B115200` of <`device/tty_status.h`>.
+/// The 115200 baud rate code.
 const B115200: u8 = 17;
 
 /// The default console flags `kdopen()` sets: `TF_ODDP|TF_EVENP|TF_ECHO`
 /// `|TF_CRMOD|TF_XTABS|TF_LITOUT`.
 const KD_TTY_FLAGS: c_int = 0x2 | 0x4 | 0x8 | 0x80 | 0x100 | 0x200;
 
-/// `KDGSTATE` of <i386at/kd.h>.
+/// The kd get-state status flavor.
 const KDGSTATE: c_uint = 0x4004_6b03;
-/// `KDGKBENT` of <i386at/kd.h>.
+/// The kd get-key-map-entry status flavor.
 const KDGKBENT: c_uint = 0xc005_6b01;
-/// `KDSKBENT` of <i386at/kd.h>.
+/// The kd set-key-map-entry status flavor.
 const KDSKBENT: c_uint = 0x8005_6b02;
-/// `KDSETBELL` of <i386at/kd.h>.
+/// The kd set-bell status flavor.
 const KDSETBELL: c_uint = 0x8004_6b04;
 
 /// `kdmmap()` refuses offsets past this.
@@ -43,7 +43,7 @@ const MAP_LIMIT: usize = 128 * 1024;
 /// `kdmmap()`'s failure value, as `(vm_offset_t)-1`.
 const MAP_FAILED: usize = usize::MAX;
 
-/// `kd_tty` of <i386at/kd.c>.
+/// The console tty.
 fn tty() -> &'static mut Tty {
     &mut kd().tty
 }
@@ -72,7 +72,7 @@ pub(crate) fn ttychars_init() {
     unsafe { ttychars(tty()) };
 }
 
-/// `kdopen()` in C.
+/// Opens the console tty, setting it up on the first open.
 ///
 /// # Safety
 ///
@@ -87,7 +87,7 @@ pub(crate) unsafe fn kdopen(
     ior: *mut IoReq,
 ) -> IoResult {
     let tp = tty();
-    // SAFETY: `splhigh()` is the asm entry of <machine/spl.h>.
+    // SAFETY: raising to `splhigh` has no precondition.
     let o_pri = unsafe { spl::splhigh() };
     tp.t_lock.lock();
     if tp.t_state & (TS_ISOPEN | TS_WOPEN) == 0 {
@@ -117,15 +117,15 @@ pub(crate) unsafe fn kdopen(
     ))
 }
 
-/// `kdclose()` in C.
+/// Closes the console tty.
 ///
 /// # Safety
 ///
 /// The device layer calls this for an open console.
 pub(crate) unsafe fn kdclose(_dev: DevT, _flag: c_int) {
     let tp = tty();
-    // SAFETY: `splhigh()` is the asm entry of <machine/spl.h>; the tty lock is
-    // taken at that level, as `simple_lock_irq()` did.
+    // SAFETY: raising to `splhigh` has no precondition; the tty lock is taken
+    // at that level.
     let s = unsafe { spl::splhigh() };
     tp.t_lock.lock();
     // SAFETY: the tty is the driver's own.
@@ -135,7 +135,7 @@ pub(crate) unsafe fn kdclose(_dev: DevT, _flag: c_int) {
     unsafe { spl::splx(s) };
 }
 
-/// `kdread()` in C.
+/// Reads from the console tty through its line discipline.
 ///
 /// # Safety
 ///
@@ -151,7 +151,7 @@ pub(crate) unsafe fn kdread(_dev: DevT, uio: *mut IoReq) -> IoResult {
     unsafe { read(tp, uio) }
 }
 
-/// `kdwrite()` in C.
+/// Writes to the console tty through its line discipline.
 ///
 /// # Safety
 ///
@@ -166,7 +166,7 @@ pub(crate) unsafe fn kdwrite(_dev: DevT, uio: *mut IoReq) -> IoResult {
     unsafe { write(tp, uio) }
 }
 
-/// `kdmmap()` in C.
+/// The page frame of the display memory at `off`, for a mapping.
 ///
 /// # Safety
 ///
@@ -179,7 +179,8 @@ pub(crate) unsafe fn kdmmap(_dev: DevT, off: usize, _prot: c_int) -> usize {
     (base.wrapping_add(off)) >> PAGE_SHIFT
 }
 
-/// `kdportdeath()` in C.
+/// Clears what the dead `port` held on the console tty, returning whether it
+/// held anything.
 ///
 /// # Safety
 ///
@@ -190,7 +191,7 @@ pub(crate) unsafe fn kdportdeath(dev: DevT, port: VmOffset) -> bool {
     unsafe { tty_portdeath(tty(), port as *mut c_void) }
 }
 
-/// `kdgetstat()` in C.
+/// Reports the kd status flavors, and the tty's for the others.
 ///
 /// # Safety
 ///
@@ -221,7 +222,7 @@ pub(crate) unsafe fn kdgetstat(
     }
 }
 
-/// `kdsetstat()` in C.
+/// Applies the kd status flavors, and the tty's for the others.
 ///
 /// # Safety
 ///
@@ -252,7 +253,7 @@ pub(crate) unsafe fn kdsetstat(
     }
 }
 
-/// `kdstart()` in C; the tty layer calls this at `spltty`.
+/// Draws the tty's queued output; the tty layer calls this at `spltty`.
 ///
 /// # Safety
 ///
@@ -291,7 +292,7 @@ unsafe fn kdstart(tp: *mut Tty) {
     }
 }
 
-/// `kdstop()` in C: the console has no output to stop, so this is a no-op.
+/// The console has no output to stop, so this is a no-op.
 ///
 /// # Safety
 ///

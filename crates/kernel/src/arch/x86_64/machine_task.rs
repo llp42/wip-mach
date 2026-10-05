@@ -4,8 +4,7 @@
 //   Copyright (c) 2002, 2007 Free Software Foundation, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The machine task module, which `i386/i386/machine_task.c` used to define,
-//! and the `struct machine_task` mirror of `i386/i386/task.h`.
+//! The machine-specific part of a task: its I/O-permission bitmap.
 
 use crate::arch::types::VmSize;
 use crate::kern::lock::SimpleLock;
@@ -15,8 +14,8 @@ use core::ffi::c_int;
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{self, NonNull};
 
-/// `struct machine_task` of <i386/task.h>: the machine-specific part of a
-/// task, the lock and range of its I/O-permission bitmap.
+/// The machine-specific part of a task, the lock and range of its
+/// I/O-permission bitmap.
 #[repr(C)]
 pub struct MachineTask {
     /// `iopb_lock`: protects `iopb_size` and `iopb`.
@@ -35,16 +34,13 @@ const _: () = {
     assert!(offset_of!(MachineTask, iopb) == 8);
 };
 
-/// `IOPB_MAX` of <`i386/io_perm.h>`: the highest I/O port a task's permission
-/// bitmap can name.
+/// The highest I/O port a task's permission bitmap can name.
 const IOPB_MAX: VmSize = 0xffff;
 
-/// `IOPB_BYTES` of <`i386/io_perm.h>`: one bit per port, rounded up to whole
-/// bytes.
+/// One bit per port, rounded up to whole bytes.
 pub(crate) const IOPB_BYTES: VmSize = (IOPB_MAX + 1).div_ceil(8);
 
-/// `machine_task_iopb_cache` of `i386/i386/machine_task.c`: the cache the
-/// permission bitmaps come from.
+/// The cache the permission bitmaps come from.
 pub(crate) static mut IOPB_CACHE: KmemCache = KmemCache::zeroed();
 
 /// The cache, by raw pointer so that concurrent calls stay sound under Rust's
@@ -54,15 +50,14 @@ fn iopb_cache() -> *mut KmemCache {
 }
 
 impl MachineTask {
-    /// `machine_task_init()` in C.
+    /// Starts the task with no bitmap.
     pub(crate) fn init(&mut self) {
         self.iopb_size = 0;
         self.iopb = ptr::null_mut();
         self.iopb_lock.init();
     }
 
-    /// `machine_task_terminate()` in C: free the bitmap of a task that is
-    /// going away.
+    /// Frees the bitmap of a task that is going away.
     pub(crate) fn terminate(&self) {
         let Some(iopb) = NonNull::new(self.iopb) else {
             return;
@@ -72,8 +67,7 @@ impl MachineTask {
         unsafe { (*iopb_cache()).free(iopb) };
     }
 
-    /// `machine_task_collect()` in C: free the bitmap a task no longer
-    /// enables any port through.
+    /// Frees the bitmap a task no longer enables any port through.
     pub(crate) fn collect(&mut self) {
         self.iopb_lock.lock();
         if self.iopb_size == 0
@@ -88,7 +82,7 @@ impl MachineTask {
     }
 }
 
-/// `machine_task_module_init()` of <i386/task.h>: build the iopb cache.
+/// Builds the iopb cache.
 ///
 /// # Safety
 ///

@@ -56,8 +56,8 @@ const STACK_SIZE: VmSize = 2 * 64 * 1024;
 /// The null port the stack mapping uses as its memory object.
 const IP_NULL: *mut c_void = null_mut();
 
-/// `boot_host_port` and `boot_device_port`: the local names the
-/// compatibility path inserts for the user bootstrap.
+/// The local names the compatibility path inserts for the host and device
+/// ports of the user bootstrap.
 ///
 /// The stores happen before `Thread::resume()` publishes the bootstrap
 /// thread, and `user_bootstrap_compat()` runs only after that publish, so

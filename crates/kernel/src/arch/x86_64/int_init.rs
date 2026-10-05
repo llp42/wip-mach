@@ -4,8 +4,7 @@
 //   Laboratory at the University of Utah (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The interrupt gate setup, which `i386/i386at/int_init.c` used to define and
-//! `i386/i386at/int_init.h` declares.
+//! The interrupt gate setup.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::apic;
@@ -17,14 +16,14 @@ use crate::config::NINTR;
 use core::ffi::c_int;
 use core::ptr;
 
-/// `IOAPIC_INT_BASE` of <i386at/idt.h>: the first IOAPIC vector.
+/// The first IOAPIC vector.
 const IOAPIC_INT_BASE: usize = 0x30;
-/// `CALL_AST_CHECK` of <i386at/idt.h>: the remote AST request vector.
+/// The remote AST request vector.
 pub(crate) const CALL_AST_CHECK: usize = 0xfa;
-/// `CALL_PMAP_UPDATE` of <i386at/idt.h>: the TLB shootdown vector.
+/// The TLB shootdown vector.
 pub(crate) const CALL_PMAP_UPDATE: usize = 0xfb;
 
-/// The installation address of `int_entry_table[i]`, or zero when `i` is
+/// The installation address of `INT_ENTRY_TABLE[i]`, or zero when `i` is
 /// outside the table.
 fn entry_address(i: usize) -> VmOffset {
     INT_ENTRY_TABLE
@@ -34,7 +33,7 @@ fn entry_address(i: usize) -> VmOffset {
         .map_or(0, |stub| stub as VmOffset)
 }
 
-/// `int_fill()` of `i386/i386at/int_init.c`.
+/// Installs the interrupt gates in `myidt`.
 ///
 /// # Safety
 ///
@@ -86,13 +85,13 @@ unsafe fn int_fill(myidt: *mut RealGate) {
     }
 }
 
-/// `int_init()` of <`i386at/int_init.h`>.
+/// Installs the boot CPU's interrupt gates.
 pub(crate) fn int_init() {
     // SAFETY: `idt` is the boot CPU's table, valid for the vectors installed.
     unsafe { int_fill(ptr::addr_of_mut!(idt::IDT).cast::<RealGate>()) };
 }
 
-/// `ap_int_init()` of <`i386at/int_init.h`>.
+/// Installs the interrupt gates of the application processor `cpu`.
 pub(crate) fn ap_int_init(cpu: c_int) {
     // SAFETY: `mp_desc_init()` stored this CPU's table before any CPU ran
     // `ap_int_init()` on it.

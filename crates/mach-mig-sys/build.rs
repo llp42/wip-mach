@@ -217,7 +217,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static:+whole-archive=mach_mig");
 }
 
-/// Preprocess one `.srv`/`.cli` input and run MIG on it, returning the
+/// Preprocess one server or client stub input and run MIG on it, returning the
 /// generated C file and the object path it compiles to.
 fn generate(
     mig: &OsString,

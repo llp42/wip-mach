@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The port calls, which `ipc/mach_port.c` used to define and
-//! `ipc/mach_port.h` belongs to.
+//! The port calls.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
@@ -32,42 +31,36 @@ use core::ptr::{self, NonNull};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-/// `MACH_PORT_NAME_NULL` of <mach/port.h>: the name no entry holds.
+/// The name no entry holds.
 const MACH_PORT_NAME_NULL: c_uint = 0;
-/// `MACH_PORT_RIGHT_RECEIVE` of <mach/port.h>: the right
-/// `ipc_port_translate_receive` asks `ipc_object_translate` for.
+/// The receive right, as [`translate_receive`] asks `ipc_object::translate`
+/// for it.
 const MACH_PORT_RIGHT_RECEIVE: c_uint = 1;
-/// `MACH_PORT_QLIMIT_MAX` of <mach/port.h>: the largest queue limit
-/// `mach_port_set_qlimit()` accepts.
+/// The largest queue limit [`set_qlimit`] accepts.
 const MACH_PORT_QLIMIT_MAX: c_uint = 16;
-/// `MACH_PORT_KTYPE_NONE` of <mach/port.h>.
+/// No kernel-object type.
 const MACH_PORT_KTYPE_NONE: c_uint = 0;
-/// `MACH_PORT_KTYPE_USER_DEVICE` of <mach/port.h>: the only other kobject
-/// type `mach_port_set_ktype()` accepts.
+/// The only other kernel-object type [`set_ktype`] accepts.
 const MACH_PORT_KTYPE_USER_DEVICE: c_uint = 28;
 
-/// `MACH_PORT_TYPE_SEND_RIGHTS` of <mach/port.h>: send and send-once
-/// rights.
+/// The type bits of the send and send-once rights.
 const MACH_PORT_TYPE_SEND_RIGHTS: u32 = (1 << 16) | (1 << 18);
-/// `MACH_PORT_TYPE_RECEIVE` of <mach/port.h>.
+/// The type bit of a receive right.
 const MACH_PORT_TYPE_RECEIVE: u32 = 1 << 17;
-/// `MACH_PORT_TYPE_PORT_SET` of <mach/port.h>.
+/// The type bit of a port set.
 const MACH_PORT_TYPE_PORT_SET: u32 = 1 << 19;
-/// `MACH_PORT_TYPE_DEAD_NAME` of <mach/port.h>.
+/// The type bit of a dead name.
 const MACH_PORT_TYPE_DEAD_NAME: u32 = 1 << 20;
-/// `MACH_PORT_TYPE_DNREQUEST` of <mach/port.h>: a dead-name request is
-/// outstanding.
+/// The type bit reported when a dead-name request is outstanding.
 const MACH_PORT_TYPE_DNREQUEST: u32 = 0x8000_0000;
-/// `MACH_PORT_TYPE_MAREQUEST` of <mach/port.h>: a msg-accepted request is
-/// outstanding.
+/// The type bit reported when a msg-accepted request is outstanding.
 const MACH_PORT_TYPE_MAREQUEST: u32 = 0x4000_0000;
-/// `IE_BITS_MAREQUEST` of <`ipc/ipc_entry.h>`: the msg-accepted bit of an
-/// entry.
+/// The msg-accepted bit of an entry.
 const IE_BITS_MAREQUEST: u32 = 0x0020_0000;
 
-/// `IKOT_NONE` of <`kern/ipc_kobject.h>`: a port bound to no kernel object.
+/// A port bound to no kernel object.
 const IKOT_NONE: c_uint = 0;
-/// `IKOT_USER_DEVICE` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a user device port.
 const IKOT_USER_DEVICE: c_uint = 28;
 
 /// `MACH_MSG_TYPE_MOVE_RECEIVE`: the first port type name.
@@ -79,25 +72,23 @@ const MOVE_SEND_ONCE: c_uint = 18;
 /// accepts.
 const MAKE_SEND_ONCE: c_uint = 21;
 
-/// `MACH_NOTIFY_PORT_DESTROYED` of <mach/notify.h>: `MACH_NOTIFY_FIRST + 5`, a
-/// receive right was deallocated.
+/// The message id of a port-destroyed notification: a receive right was
+/// deallocated.
 const MACH_NOTIFY_PORT_DESTROYED: c_int = 0o100 + 5;
-/// `MACH_NOTIFY_NO_SENDERS` of <mach/notify.h>: `MACH_NOTIFY_FIRST + 6`, a
-/// receive right has no extant send rights.
+/// The message id of a no-senders notification: a receive right has no extant
+/// send rights.
 const MACH_NOTIFY_NO_SENDERS: c_int = 0o100 + 6;
-/// `MACH_NOTIFY_DEAD_NAME` of <mach/notify.h>: `MACH_NOTIFY_FIRST + 010`, a
-/// send or send-once right died, leaving a dead name.
+/// The message id of a dead-name notification: a send or send-once right died,
+/// leaving a dead name.
 const MACH_NOTIFY_DEAD_NAME: c_int = 0o100 + 0o10;
 
-/// `IO_DEAD` of <`ipc/ipc_object.h>`: the dead-object pointer, all bits set.
+/// The dead-object pointer, all bits set.
 const IO_DEAD: *mut c_void = usize::MAX as *mut c_void;
 
-/// `mach_port_deallocate_debug` of <`ipc/ipc_space.h>`: the debug switch the
-/// bogus-name diagnostics check, which `ipc/mach_port.c` defined.
+/// The debug switch the bogus-name diagnostics check.
 pub(crate) static MACH_PORT_DEALLOCATE_DEBUG: AtomicI32 = AtomicI32::new(0);
 
-/// `mach_port_status_t` of <mach/port.h>: the record
-/// `mach_port_get_receive_status()` fills in.
+/// `mach_port_status_t`: the record [`get_receive_status`] fills in.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct MachPortStatus {
@@ -166,32 +157,29 @@ pub(crate) struct SetStatus {
     pub(crate) count: c_uint,
 }
 
-/// `MACH_PORT_NAME_VALID(name)` of <mach/port.h>: a name is valid when it is
-/// neither null nor dead.
+/// A name is valid when it is neither null nor dead.
 const fn port_name_valid(name: c_uint) -> bool {
     name != 0 && name != c_uint::MAX
 }
 
-/// `MACH_PORT_TYPE(right)` of <mach/port.h>: `1 << (right + 16)`.
+/// The type bit of `right`: `1 << (right + 16)`.
 const fn mach_port_type(right: c_uint) -> c_uint {
     // The C shifts by `right + 16`; the target masks the count the same way.
     1u32.wrapping_shl(right.wrapping_add(16))
 }
 
-/// `IO_VALID(io)` of <`ipc/ipc_object.h>`: an object is valid when it is
-/// neither null nor dead.
+/// An object is valid when it is neither null nor dead.
 fn io_valid(object: *mut c_void) -> bool {
     !object.is_null() && !ptr::eq(object, IO_DEAD)
 }
 
-/// An `ipc_entry_num_t` as an index.  `usize` is at least as wide as the
-/// C's `unsigned int` on both targets, so the widening cannot lose anything.
+/// A table count as an index.  `usize` is at least as wide as `c_uint` on both
+/// targets, so the widening cannot lose anything.
 const fn as_index(count: c_uint) -> usize {
     count as usize
 }
 
-/// `IP_TIMESTAMP_ORDER(one, two)` of <`ipc/ipc_port.h>`: whether `one`
-/// happened before `two` across the counter's 32-bit wrap.
+/// Whether `one` happened before `two` across the counter's 32-bit wrap.
 const fn timestamp_order(one: c_uint, two: c_uint) -> bool {
     // The C casts the wrapping difference to a signed int, so only the sign
     // bit matters; this is the same reinterpretation.
@@ -254,8 +242,7 @@ unsafe fn report_bogus_port(space: IpcSpace, name: c_uint, action: &CStr) {
     }
 }
 
-/// The `ipc_right_lookup_write()` call of the routines that report a bogus
-/// name.
+/// The write lookup of the routines that report a bogus name.
 ///
 /// # Safety
 ///
@@ -267,7 +254,7 @@ unsafe fn lookup_write(
     unsafe { ipc_right::lookup_write(space, name) }
 }
 
-/// `mach_port_names_helper()` in C.
+/// Appends the name and type of `entry` to the arrays [`names`] fills.
 ///
 /// # Safety
 ///
@@ -365,8 +352,7 @@ unsafe fn names_buffers(
             return Err(Error::DeadSpace);
         }
 
-        // The C's `bound` is a 32-bit `ipc_entry_num_t`, so `is_size`
-        // truncates the same way.
+        // The table size is 32 bits wide, so the bound truncates the same way.
         // SAFETY: the space is live and read-locked.
         let bound_now = unsafe { (*space.record()).size as c_uint };
         let size_needed =
@@ -436,8 +422,7 @@ unsafe fn names_buffers(
     Ok((size, addr1, addr2, bound))
 }
 
-/// `mach_port_names()` in C: the names and types of a space's rights, as two
-/// map copies.
+/// The names and types of a space's rights, as two map copies.
 ///
 /// # Safety
 ///
@@ -554,7 +539,7 @@ pub(crate) unsafe fn names(
     })
 }
 
-/// `mach_port_type()` in C: the type bits of the named right.
+/// The type bits of the named right.
 ///
 /// # Safety
 ///
@@ -569,8 +554,8 @@ pub(crate) unsafe fn port_type(
 
     let entry = unsafe { lookup_write(space, name) }?;
 
-    // SAFETY: the lookup returned the live entry with the space
-    // write-locked; `ipc_right_info` leaves the space locked on success.
+    // SAFETY: the lookup returned the live entry with the space write-locked;
+    // `ipc_right::info` leaves the space locked on success.
     let (type_, _) = unsafe { ipc_right::info(space, name, entry) };
 
     // SAFETY: the space is live and write-locked.
@@ -579,7 +564,7 @@ pub(crate) unsafe fn port_type(
     Ok(type_)
 }
 
-/// `mach_port_allocate_name()` in C.
+/// Allocates a right of `right` in `space` under `name`.
 ///
 /// # Safety
 ///
@@ -601,8 +586,8 @@ pub(crate) unsafe fn allocate_name(
         Some(PortRight::Receive) => {
             let port = ipc_port::alloc_name(space, name)?;
 
-            // SAFETY: the port is locked and the caller holds no reference,
-            // as the C's `ip_unlock`.
+            // SAFETY: the port is locked and the caller holds no reference, so
+            // unlocking it is all that is left.
             unsafe { port.unlock() };
             Ok(())
         }
@@ -622,7 +607,7 @@ pub(crate) unsafe fn allocate_name(
     }
 }
 
-/// `mach_port_allocate()` in C.
+/// Allocates a right of `right` in `space` under a fresh name.
 ///
 /// # Safety
 ///
@@ -639,8 +624,8 @@ pub(crate) unsafe fn allocate(
         Some(PortRight::Receive) => {
             let (name, port) = ipc_port::alloc(space)?;
 
-            // SAFETY: the port is locked and the caller holds no reference,
-            // as the C's `ip_unlock`.
+            // SAFETY: the port is locked and the caller holds no reference, so
+            // unlocking it is all that is left.
             unsafe { port.unlock() };
             Ok(name)
         }
@@ -658,7 +643,7 @@ pub(crate) unsafe fn allocate(
     }
 }
 
-/// `mach_port_destroy()` in C.
+/// Destroys the right `name` names in `space`.
 ///
 /// # Safety
 ///
@@ -681,13 +666,13 @@ pub(crate) unsafe fn destroy(
         }
     };
 
-    // SAFETY: the lookup returned the live entry with the space
-    // write-locked; `ipc_right_destroy` unlocks the space.
+    // SAFETY: the lookup returned the live entry with the space write-locked;
+    // `ipc_right::destroy` unlocks the space.
     unsafe { ipc_right::destroy(space, name, entry) };
     Ok(())
 }
 
-/// `mach_port_deallocate()` in C.
+/// Releases one user reference to the right `name` names in `space`.
 ///
 /// # Safety
 ///
@@ -710,12 +695,12 @@ pub(crate) unsafe fn deallocate(
         }
     };
 
-    // SAFETY: the lookup returned the live entry with the space
-    // write-locked; `ipc_right_dealloc` unlocks the space.
+    // SAFETY: the lookup returned the live entry with the space write-locked;
+    // `ipc_right::dealloc` unlocks the space.
     unsafe { ipc_right::dealloc(space, name, entry) }
 }
 
-/// `mach_port_get_refs()` in C.
+/// The user-reference count of `right` in the entry `name` names.
 ///
 /// # Safety
 ///
@@ -734,8 +719,8 @@ pub(crate) unsafe fn get_refs(
 
     let entry = unsafe { lookup_write(space, name) }?;
 
-    // SAFETY: the lookup returned the live entry with the space
-    // write-locked; `ipc_right_info` leaves the space locked on success.
+    // SAFETY: the lookup returned the live entry with the space write-locked;
+    // `ipc_right::info` leaves the space locked on success.
     let (type_, urefs) = unsafe { ipc_right::info(space, name, entry) };
 
     // SAFETY: the space is live and write-locked.
@@ -751,7 +736,7 @@ pub(crate) unsafe fn get_refs(
     }
 }
 
-/// `mach_port_mod_refs()` in C.
+/// Adds `delta` to the user references of `right` in the entry `name` names.
 ///
 /// # Safety
 ///
@@ -811,12 +796,12 @@ pub(crate) unsafe fn mod_refs(
         }
     };
 
-    // SAFETY: the lookup returned the live entry with the space
-    // write-locked; `ipc_right_delta` unlocks the space.
+    // SAFETY: the lookup returned the live entry with the space write-locked;
+    // `ipc_right::delta` unlocks the space.
     unsafe { ipc_right::delta(space, name, entry, right, delta) }
 }
 
-/// `mach_port_set_qlimit()` in C.
+/// Sets the queue limit of the receive right `name` names.
 ///
 /// # Safety
 ///
@@ -838,8 +823,8 @@ pub(crate) unsafe fn set_qlimit(
     // SAFETY: `translate_receive` returned the live, locked, active port.
     let port = unsafe { IpcPort::from_raw(port) };
 
-    // SAFETY: the port is live, active, and locked; `ipc_port_set_qlimit`
-    // leaves it locked and the C's `ip_unlock` follows.
+    // SAFETY: the port is live, active, and locked; `ipc_port::set_qlimit`
+    // leaves it locked for the unlock that follows.
     unsafe {
         ipc_port::set_qlimit(port, qlimit);
         port.unlock();
@@ -848,7 +833,7 @@ pub(crate) unsafe fn set_qlimit(
     Ok(())
 }
 
-/// `mach_port_set_mscount()` in C.
+/// Sets the make-send count of the receive right `name` names.
 ///
 /// # Safety
 ///
@@ -867,8 +852,8 @@ pub(crate) unsafe fn set_mscount(
     // SAFETY: `translate_receive` returned the live, locked, active port.
     let port = unsafe { IpcPort::from_raw(port) };
 
-    // SAFETY: the port is live, active, and locked; the C's assignment and
-    // `ip_unlock`.
+    // SAFETY: the port is live, active, and locked; the assignment and the
+    // unlock follow.
     unsafe {
         port.set_mscount(mscount);
         port.unlock();
@@ -877,7 +862,7 @@ pub(crate) unsafe fn set_mscount(
     Ok(())
 }
 
-/// `mach_port_set_seqno()` in C.
+/// Sets the sequence number of the receive right `name` names.
 ///
 /// # Safety
 ///
@@ -896,8 +881,8 @@ pub(crate) unsafe fn set_seqno(
     // SAFETY: `translate_receive` returned the live, locked, active port.
     let port = unsafe { IpcPort::from_raw(port) };
 
-    // SAFETY: the port is live, active, and locked; `ipc_port_set_seqno`
-    // leaves it locked and the C's `ip_unlock` follows.
+    // SAFETY: the port is live, active, and locked; `ipc_port::set_seqno`
+    // leaves it locked for the unlock that follows.
     unsafe {
         ipc_port::set_seqno(port, seqno);
         port.unlock();
@@ -906,7 +891,7 @@ pub(crate) unsafe fn set_seqno(
     Ok(())
 }
 
-/// `mach_port_gst_helper()` in C.
+/// Appends the name of `port` to `names` when it is a member of `pset`.
 ///
 /// # Safety
 ///
@@ -939,8 +924,7 @@ unsafe fn get_set_status_helper(
     }
 }
 
-/// `mach_port_get_set_status()` in C: the members of a port set, as a map
-/// copy.
+/// The members of a port set, as a map copy.
 ///
 /// # Safety
 ///
@@ -1132,7 +1116,8 @@ unsafe fn set_members(
     actual
 }
 
-/// `mach_port_move_member()` in C.
+/// Moves the receive right `member` names into the port set `after` names, or
+/// out of its set.
 ///
 /// # Safety
 ///
@@ -1180,7 +1165,7 @@ pub(crate) unsafe fn move_member(
 
     // SAFETY: the lookup left the space write-locked and active, the receive
     // entry named a live port, and any port-set entry named a live set;
-    // `ipc_pset_move` unlocks the space.
+    // `ipc_pset::move_between` unlocks the space.
     unsafe {
         ipc_pset::move_between(
             space,
@@ -1190,7 +1175,7 @@ pub(crate) unsafe fn move_member(
     }
 }
 
-/// `mach_port_get_receive_status()` in C.
+/// The status of the receive right `name` names.
 ///
 /// # Safety
 ///
@@ -1254,13 +1239,13 @@ pub(crate) unsafe fn get_receive_status(
         mps_nsrequest: c_int::from(unsafe { port.nsrequest() }.is_some()),
     };
 
-    // SAFETY: the port is live, active, and locked; the C's `ip_unlock`.
+    // SAFETY: the port is live, active, and locked; only the unlock is left.
     unsafe { port.unlock() };
 
     Ok(status)
 }
 
-/// `mach_port_set_protected_payload()` in C.
+/// Sets the protected payload of the receive right `name` names.
 ///
 /// # Safety
 ///
@@ -1280,8 +1265,8 @@ pub(crate) unsafe fn set_protected_payload(
     let port = unsafe { IpcPort::from_raw(port) };
 
     // SAFETY: the port is live, active, and locked;
-    // `ipc_port_set_protected_payload` leaves it locked and the C's
-    // `ip_unlock` follows.
+    // `ipc_port::set_protected_payload` leaves it locked for the unlock that
+    // follows.
     unsafe {
         ipc_port::set_protected_payload(port, payload);
         port.unlock();
@@ -1290,7 +1275,7 @@ pub(crate) unsafe fn set_protected_payload(
     Ok(())
 }
 
-/// `mach_port_clear_protected_payload()` in C.
+/// Clears the protected payload of the receive right `name` names.
 ///
 /// # Safety
 ///
@@ -1309,8 +1294,8 @@ pub(crate) unsafe fn clear_protected_payload(
     let port = unsafe { IpcPort::from_raw(port) };
 
     // SAFETY: the port is live, active, and locked;
-    // `ipc_port_clear_protected_payload` leaves it locked and the C's
-    // `ip_unlock` follows.
+    // `ipc_port::clear_protected_payload` leaves it locked for the unlock that
+    // follows.
     unsafe {
         ipc_port::clear_protected_payload(port);
         port.unlock();
@@ -1319,7 +1304,7 @@ pub(crate) unsafe fn clear_protected_payload(
     Ok(())
 }
 
-/// `mach_port_set_ktype()` in C.
+/// Sets the kernel-object type of the receive right `name` names.
 ///
 /// # Safety
 ///
@@ -1364,13 +1349,13 @@ pub(crate) unsafe fn set_ktype(
         Err(Error::InvalidArgument)
     };
 
-    // SAFETY: the port is live, active, and locked; the C's `ip_unlock`.
+    // SAFETY: the port is live, active, and locked; only the unlock is left.
     unsafe { port.unlock() };
 
     result
 }
 
-/// `mach_port_rename()` in C.
+/// Moves the right `oname` names in `space` to `nname`.
 ///
 /// # Safety
 ///
@@ -1391,7 +1376,8 @@ pub(crate) unsafe fn rename(
     unsafe { ipc_object::rename(space, oname, nname) }
 }
 
-/// `mach_port_insert_right()` in C.
+/// Inserts the right `poly`, with the disposition `poly_poly`, into `space`
+/// under `name`.
 ///
 /// # Safety
 ///
@@ -1421,7 +1407,7 @@ pub(crate) unsafe fn insert_right(
     unsafe { ipc_object::copyout_name(space, poly, poly_poly, false, name) }
 }
 
-/// `mach_port_extract_right()` in C.
+/// Extracts the right `name` names from `space`, as `msgt_name` disposes it.
 ///
 /// # Safety
 ///
@@ -1444,7 +1430,7 @@ pub(crate) unsafe fn extract_right(
     Ok((object, copyin_type(msgt_name)))
 }
 
-/// `ipc_port_translate_receive()` of <`ipc/ipc_port.h`> in C.
+/// The receive right `name` names in `space`, locked.
 ///
 /// # Safety
 ///
@@ -1456,7 +1442,8 @@ unsafe fn translate_receive(
     unsafe { ipc_object::translate(space, name, MACH_PORT_RIGHT_RECEIVE) }
 }
 
-/// `mach_port_request_notification()` in C.
+/// Registers `notify` for the notification `id` on the right `name` names,
+/// returning the previously registered one.
 ///
 /// # Safety
 ///

@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The exported message traps, which `ipc/mach_msg.c` and `ipc/mach_msg.h`
-//! define.
+//! The exported message traps.
 //!
 //! The C's `mach_msg_trap()` carried a second, hand-optimized copy of the
 //! send and receive paths: it validated the request's destination and reply
@@ -32,30 +31,28 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, with_exposed_provenance_mut};
 
-/// `MACH_SEND_MSG` of <mach/message.h>.
+/// The option to send a message.
 const MACH_SEND_MSG: c_uint = 0x0000_0001;
-/// `MACH_RCV_MSG` of <mach/message.h>.
+/// The option to receive a message.
 const MACH_RCV_MSG: c_uint = 0x0000_0002;
-/// `MACH_SEND_TIMEOUT` of <mach/message.h>: the caller wants a timeout.
+/// The send option asking for a timeout.
 const MACH_SEND_TIMEOUT: c_uint = 0x0000_0010;
-/// `MACH_SEND_NOTIFY` of <mach/message.h>: ask for a msg-accepted
-/// notification on a full queue.
+/// The send option asking for a msg-accepted notification on a full queue.
 const MACH_SEND_NOTIFY: c_uint = 0x0000_0020;
-/// `MACH_SEND_CANCEL` of <mach/message.h>: not a send, a cancellation.
+/// The send option that cancels a msg-accepted request instead of sending.
 const MACH_SEND_CANCEL: c_uint = 0x0000_0080;
-/// `MACH_RCV_TIMEOUT` of <mach/message.h>: the caller wants a timeout.
+/// The receive option asking for a timeout.
 const MACH_RCV_TIMEOUT: c_uint = 0x0000_0100;
-/// `MACH_RCV_NOTIFY` of <mach/message.h>: the notify name is a reply
-/// destination.
+/// The receive option naming a reply destination in the notify name.
 const MACH_RCV_NOTIFY: c_uint = 0x0000_0200;
-/// `MACH_RCV_LARGE` of <mach/message.h>: return the needed size instead of
-/// discarding an oversized message.
+/// The receive option that reports the needed size instead of discarding an
+/// oversized message.
 const MACH_RCV_LARGE: c_uint = 0x0000_0800;
-/// `MACH_MSG_TIMEOUT_NONE` of <mach/message.h>.
+/// No timeout.
 const MACH_MSG_TIMEOUT_NONE: c_uint = 0;
-/// `MACH_MSG_SIZE_MAX` of <mach/message.h>.
+/// The largest message size, an unbounded receive.
 const MACH_MSG_SIZE_MAX: c_uint = c_uint::MAX;
-/// `MACH_PORT_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NULL: c_uint = 0;
 /// `sizeof(mach_msg_user_header_t)`: the user header's size.
 const MESSAGE_HEADER_SIZE: c_uint = size_of::<MachMsgHeader>() as c_uint;
@@ -85,7 +82,7 @@ unsafe fn write_back_size(user: *mut c_void, size: c_uint) {
 }
 
 /// The tail both receive entries share: the sequence number, the size check
-/// and the copyout of one `ipc_mqueue_receive()` result.
+/// and the copyout of one [`ipc_mqueue::receive`] result.
 ///
 /// # Safety
 ///
@@ -161,7 +158,7 @@ unsafe fn complete_receive(
     unsafe { ipc_kmsg::put(user, kmsg, size) }
 }
 
-/// `mach_msg_send()` in C.
+/// Copies in a user message and queues it on its destination.
 ///
 /// # Safety
 ///
@@ -268,7 +265,7 @@ pub(crate) unsafe fn send(
     Ok(())
 }
 
-/// `mach_msg_receive()` in C.
+/// Receives a message into the user buffer.
 ///
 /// # Safety
 ///
@@ -336,11 +333,11 @@ pub(crate) unsafe fn receive(
     }
 }
 
-/// `mach_msg_receive_continue()` in C.
+/// The continuation a receive resumes through after its wait.
 ///
 /// # Safety
 ///
-/// Called as the continuation `ipc_mqueue_receive()` stored in the current
+/// Called as the continuation [`ipc_mqueue::receive`] stored in the current
 /// thread, with the receive state saved by [`receive()`]; the thread's stack
 /// is the one the wakeup supplied.
 pub(crate) unsafe extern "C" fn mach_msg_receive_continue() {
@@ -381,8 +378,8 @@ pub(crate) unsafe extern "C" fn mach_msg_receive_continue() {
             Some(mach_msg_receive_continue),
         )
     };
-    // SAFETY: the receive released the queue lock; the object reference is
-    // the one the copyin in `mach_msg_receive()` took.
+    // SAFETY: the receive released the queue lock; the object reference is the
+    // one the copyin in `receive()` took.
     unsafe { ipc_object::release(object) };
 
     let completed = unsafe {
@@ -397,7 +394,7 @@ pub(crate) unsafe extern "C" fn mach_msg_receive_continue() {
     }
 }
 
-/// `mach_msg_trap()` in C.
+/// Sends, receives or does both, as the options ask.
 ///
 /// # Safety
 ///
@@ -436,13 +433,13 @@ pub(crate) unsafe fn trap(
     Ok(())
 }
 
-/// `mach_msg_continue()` in C.
+/// The continuation the send-and-receive trap resumes through after its wait.
 ///
 /// # Safety
 ///
-/// Called as the continuation `ipc_mqueue_receive()` stored in the current
-/// thread, with the receive state saved by the send-and-receive trap path;
-/// the thread's stack is the one the wakeup supplied.
+/// Called as the continuation [`ipc_mqueue::receive`] stored in the current
+/// thread, with the receive state saved by the send-and-receive trap path; the
+/// thread's stack is the one the wakeup supplied.
 pub(crate) unsafe extern "C" fn mach_msg_continue() {
     let self_ = per_cpu::thread();
     // SAFETY: the continuation runs in the current thread's context.
@@ -496,7 +493,8 @@ pub(crate) unsafe extern "C" fn mach_msg_continue() {
     }
 }
 
-/// `mach_msg_interrupt()` in C.
+/// Interrupts the message wait `thread` is in, returning whether it was in
+/// one.
 ///
 /// # Safety
 ///
@@ -541,7 +539,7 @@ pub(crate) unsafe fn interrupt(thread: *mut Thread) -> bool {
 
     true
 }
-/// `mach_msg_trap()` of `ipc/mach_msg.c`, the entry `mach_trap_table` holds.
+/// The `mach_msg` trap entry the trap table holds.
 ///
 /// # Safety
 ///

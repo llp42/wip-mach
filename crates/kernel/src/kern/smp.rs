@@ -81,7 +81,7 @@ impl fmt::Display for CpuId {
     }
 }
 
-/// `smp_set_numcpus()` in C.
+/// Sets the number of CPUs the kernel runs on.
 ///
 /// # Panics
 ///
@@ -97,7 +97,7 @@ pub(crate) fn set_ncpus(ncpus: u8) {
     NCPUS.store(ncpus, Ordering::Release);
 }
 
-/// `smp_get_numcpus()` in C.
+/// The number of CPUs the kernel runs on.
 pub(crate) fn ncpus() -> u8 {
     NCPUS.load(Ordering::Acquire)
 }

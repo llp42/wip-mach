@@ -1,6 +1,6 @@
 /*
  * The defines the MIG `.defs`/`.srv`/`.cli` preprocessing sees, mirroring
- * `crates/kernel/src/config.rs` and the gnumach build's config.h.
+ * `crates/kernel/src/config.rs` and the configuration of the reference build.
  */
 #define APIC 1
 #define ATX86_64 1

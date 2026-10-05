@@ -28,8 +28,8 @@ use crate::kern::console::kprint;
 use core::ffi::{c_int, c_uint};
 use core::sync::atomic::Ordering;
 
-/// The `which_button[]` table of `kd_kbd_magic()`: index to event type
-/// (`MOUSE_LEFT`, `MOUSE_MIDDLE`, `MOUSE_RIGHT` of <device/input.h>).
+/// The mouse event of each button index (`MOUSE_LEFT`, `MOUSE_MIDDLE`,
+/// `MOUSE_RIGHT`), for the keyboard-as-mouse sequences.
 const WHICH_BUTTON: [u16; 4] = [0, 1, 2, 3];
 
 const K_F1SC: c_int = 0x3b;
@@ -56,7 +56,7 @@ fn mode() -> c_int {
     kb_mode()
 }
 
-/// `do_modifier()`: the new state for a modifier key.
+/// The new state for a modifier key.
 pub(crate) fn modifier(state_in: c_int, c: u8, up: bool) -> c_int {
     let mut st = state_in;
     match c {
@@ -94,7 +94,7 @@ pub(crate) fn modifier(state_in: c_int, c: u8, up: bool) -> c_int {
     st
 }
 
-/// `kdstate2idx()`: the `key_map` column for a modifier state.
+/// The [`KEY_MAP`] column for a modifier state.
 pub(crate) const fn state2idx(state_in: c_uint, extended: bool) -> usize {
     let st = state_in as c_int;
     let mut state_idx = NORM_STATE;
@@ -169,7 +169,7 @@ pub(crate) fn set_leds2() {
     senddata(state().kd_nextled);
 }
 
-/// `cnsetleds()`: set the LEDs without interrupts.
+/// Sets the LEDs without interrupts.
 pub(crate) fn cn_set_leds(val: u8) {
     senddata(K_CMD_LEDS);
     let _ = getdata(); // assume ACK
@@ -177,7 +177,7 @@ pub(crate) fn cn_set_leds(val: u8) {
     let _ = getdata(); // assume ACK
 }
 
-/// `kdgetkbent()`: read a key map entry.
+/// Reads a key map entry.
 fn map_get(row: usize, col: usize) -> [u8; NUMOUTPUT] {
     // SAFETY: the caller checks the indexes.
     unsafe {
@@ -189,7 +189,7 @@ fn map_get(row: usize, col: usize) -> [u8; NUMOUTPUT] {
     }
 }
 
-/// `kdsetkbent()`: write a key map entry.
+/// Writes a key map entry.
 fn map_set(row: usize, col: usize, value: [u8; NUMOUTPUT]) {
     // SAFETY: the caller checks the indexes.
     unsafe {
@@ -213,7 +213,7 @@ fn motion(dx: c_int, dy: c_int) {
     kd_mouse::mouse_moved(mm);
 }
 
-/// `kd_kbd_magic()`: the keyboard-as-mouse sequences.
+/// Turns the keyboard-as-mouse sequences into mouse events.
 pub(crate) fn kbd_magic(scancode: c_int) -> c_int {
     if state().kd_kbd_mouse == 2 {
         kprint!("sc = {:x}\n", scancode);
@@ -261,7 +261,7 @@ pub(crate) fn kbd_magic(scancode: c_int) -> c_int {
     1
 }
 
-/// `kdcheckmagic()`: the magic key sequences.
+/// Handles the magic key sequences, returning whether `scancode` was one.
 fn checkmagic(scancode: u8) -> bool {
     if scancode == K_SLCKSC {
         let s = state();
@@ -284,7 +284,7 @@ fn checkmagic(scancode: u8) -> bool {
     false
 }
 
-/// `kdintr()` in C.
+/// Reads the keyboard controller and queues what it read.
 fn intr() {
     if !state().kd_initialized {
         return;
@@ -382,11 +382,11 @@ fn intr() {
     }
 }
 
-/// `kdintr()` in C.
+/// The keyboard interrupt handler.
 ///
 /// # Safety
 ///
-/// Entered from the interrupt path at `SPLKD`.
+/// Entered from the interrupt path at `spltty`.
 pub(crate) unsafe extern "C" fn kdintr(_vec: c_int) {
     intr();
 }
@@ -414,7 +414,7 @@ pub(crate) fn mouse_drain() {
     }
 }
 
-/// Read a key map entry into `kb`: the `kdgetkbent()` core.
+/// Reads a key map entry into `kb`.
 pub(crate) fn entry_get(kb: &mut KbEntry) {
     // SAFETY: the caller runs in kernel mode with `%gs` based at the
     // running CPU's per-CPU area.
@@ -426,7 +426,7 @@ pub(crate) fn entry_get(kb: &mut KbEntry) {
     unsafe { spl::splx(o_pri) };
 }
 
-/// Write a key map entry from `kb`: the `kdsetkbent()` core.
+/// Writes a key map entry from `kb`.
 pub(crate) fn entry_set(kb: KbEntry) {
     // SAFETY: the caller runs in kernel mode with `%gs` based at the
     // running CPU's per-CPU area.

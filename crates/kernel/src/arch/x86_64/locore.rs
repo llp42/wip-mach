@@ -4,13 +4,11 @@
 //   Copyright (c) 1991 IBM Corporation
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The whole of `i386/i386/locore.S` and `x86_64/locore.S`: the CPU probe,
-//! the trap and interrupt entries, the return paths and the system-call
-//! entries, plus the forced shutdown.
+//! The low-level entries: the CPU probe, the trap and interrupt entries, the
+//! return paths and the system-call entries, plus the forced shutdown.
 //!
-//! Every label the C jumped to across functions is a private naked function
-//! reached by `sym`; the labels C or Rust name by address keep their exact
-//! names.  The `#ifdef DEBUG` trace blocks are not carried.
+//! Every label jumped to across functions is a private naked function reached
+//! by `sym`; the labels named by address keep their exact names.
 
 use crate::arch::vm_param::KERNEL_STACK_SIZE;
 use crate::arch::vm_param::VM_MAX_USER_ADDRESS;
@@ -116,34 +114,29 @@ const _: () = assert!(size_of::<MachTrap>() == 1 << MACH_TRAP_SHIFT);
 /// The offset of `mach_trap_function` within a [`MachTrap`].
 const MACH_TRAP_FUNCTION: usize = offset_of!(MachTrap, mach_trap_function);
 
-/// The `%r12` tag for a return that must not `swapgs`.
+/// The `%r12` tag for a return that must not swap `%gs`.
 const RETURN_TO_KERN: u32 = 0x7ead_beef;
-/// The `%r12` tag for a return that must `swapgs`.
+/// The `%r12` tag for a return that must swap `%gs`.
 const RETURN_TO_USER: u32 = 0x6666_6666;
 
 unsafe extern "C" {
-    /// `thread_bootstrap_return()` of `i386/i386/locore.S` and
-    /// `x86_64/locore.S`: the same address as
-    /// [`thread_exception_return()`], whose entry emits the label.
+    /// The same address as [`thread_exception_return()`], whose entry emits
+    /// the label.
     pub(crate) fn thread_bootstrap_return();
 
-    /// `return_to_iret` of `i386/i386/locore.S` and `x86_64/locore.S`: the
-    /// return address of `interrupt()` that `hardclock()` compares against.
-    /// [`all_intrs()`] emits the label right after the call.
+    /// The return address of `interrupt()` that `hardclock()` compares
+    /// against.  [`all_intrs()`] emits the label right after the call.
     pub(crate) static return_to_iret: c_char;
 }
 
-/// `cpu_features` of <i386/locore.h>: CPUID leaf 1's EDX in word 0 and
-/// ECX in word 1.
+/// CPUID leaf 1's EDX in word 0 and ECX in word 1.
 pub static mut CPU_FEATURES: [c_uint; 2] = [0; 2];
 
-/// `discover_x86_cpu_type()` of `i386/i386/locore.S` and
-/// `x86_64/locore.S`: the CPU family, 3 to 6, and a fill of
-/// [`cpu_features`].
+/// The CPU family, 3 to 6, and a fill of [`CPU_FEATURES`].
 pub(crate) fn discover_x86_cpu_type() -> c_int {
     let (eax, ecx, edx) = cpuid_leaf1();
-    // SAFETY: `cpu_features` is written only here, during the
-    // single-threaded boot before any reader runs.
+    // SAFETY: `CPU_FEATURES` is written only here, during the single-threaded
+    // boot before any reader runs.
     unsafe {
         let table = core::ptr::addr_of_mut!(CPU_FEATURES).cast::<c_uint>();
         table.write(edx);
@@ -183,8 +176,8 @@ static NULL_IDT: [u8; 8 * 32] = [0; 8 * 32];
 /// The IDTR limit for [`NULL_IDT`]: one byte less than its size.
 const NULL_IDT_LIMIT: u16 = 8 * 32 - 1;
 
-/// `null_idtr` of `i386/i386/locore.S` and `x86_64/locore.S`: a limit
-/// followed by the base address, with no padding.
+/// The empty IDT pseudo-descriptor: a limit followed by the base address, with
+/// no padding.
 ///
 /// The base is a pointer because a `static` cannot hold a
 /// pointer-to-integer cast; the bytes are the same relocation.
@@ -210,8 +203,7 @@ static NULL_IDTR: NullIdtr = NullIdtr {
     base: core::ptr::addr_of!(NULL_IDT).cast::<u8>(),
 };
 
-/// `cpu_shutdown()` of `i386/i386/locore.S` and `x86_64/locore.S`:
-/// disable the IDT and divide by zero, which resets the machine.
+/// Disables the IDT and divides by zero, which resets the machine.
 ///
 /// # Safety
 ///
@@ -227,9 +219,8 @@ pub(crate) unsafe extern "C" fn cpu_shutdown() -> ! {
     )
 }
 
-/// The `trap_check_kernel_exit` chain of `i386/i386/locore.S` and
-/// `x86_64/locore.S`: a GP or NP fault on a user return sequence is
-/// reported against the user's instruction.
+/// Reports a GP or NP fault on a user return sequence against the user's
+/// instruction.
 ///
 /// # Safety
 ///
@@ -265,8 +256,7 @@ unsafe extern "C" fn take_fault() {
     naked_asm!("jmp {alltraps}", alltraps = sym alltraps, options(att_syntax));
 }
 
-/// `fault_iret` of `i386/i386/locore.S` and `x86_64/locore.S`: a GP or NP
-/// fault on the return path's `iret`, where CS or SS is the error.
+/// A GP or NP fault on the return path's IRET, where CS or SS is the error.
 ///
 /// # Safety
 ///
@@ -287,8 +277,7 @@ unsafe extern "C" fn fault_iret() {
     );
 }
 
-/// `t_gen_prot` of `i386/i386/locore.S` and `x86_64/locore.S`: the
-/// general-protection fault entry.
+/// The general-protection fault entry.
 ///
 /// # Safety
 ///
@@ -304,8 +293,7 @@ pub(crate) unsafe extern "C" fn t_gen_prot() {
     );
 }
 
-/// `t_segnp` of `i386/i386/locore.S` and `x86_64/locore.S`: the
-/// segment-not-present fault entry.
+/// The segment-not-present fault entry.
 ///
 /// # Safety
 ///
@@ -321,8 +309,8 @@ pub(crate) unsafe extern "C" fn t_segnp() {
     );
 }
 
-/// `t_debug` of `i386/i386/locore.S` and `x86_64/locore.S`: the debug trap
-/// entry, which continues a system call when single-stepping crossed it.
+/// The debug trap entry, which continues a system call when single-stepping
+/// crossed it.
 ///
 /// # Safety
 ///
@@ -332,8 +320,7 @@ pub(crate) unsafe extern "C" fn t_debug() {
     naked_asm!(
         "testq $2, 8(%rsp)",
         "jnz 0f",
-        // TODO: implement the system-call case, which the C's configured
-        // build leaves as this `ud2`.
+        // TODO: implement the system-call case; it is a UD2 for now.
         "ud2",
         "0:",
         "pushq $0",
@@ -345,8 +332,7 @@ pub(crate) unsafe extern "C" fn t_debug() {
     );
 }
 
-/// `t_page_fault` of `i386/i386/locore.S` and `x86_64/locore.S`: the page
-/// fault entry, which saves `%cr2` in the frame.
+/// The page fault entry, which saves `%cr2` in the frame.
 ///
 /// # Safety
 ///
@@ -381,8 +367,7 @@ pub(crate) unsafe extern "C" fn t_page_fault() {
     );
 }
 
-/// `alltraps` of `i386/i386/locore.S` and `x86_64/locore.S`: the common
-/// trap-frame builder every exception stub jumps to.
+/// The common trap-frame builder every exception stub jumps to.
 ///
 /// # Safety
 ///
@@ -413,8 +398,8 @@ pub(crate) unsafe extern "C" fn alltraps() {
     );
 }
 
-/// `trap_push_segs` of `i386/i386/locore.S` and `x86_64/locore.S`: save the
-/// segment registers, switch to the kernel's, and join `trap_set_segs`.
+/// Saves the segment registers, switches to the kernel's, and joins
+/// `trap_set_segs`.
 ///
 /// # Safety
 ///
@@ -422,8 +407,8 @@ pub(crate) unsafe extern "C" fn alltraps() {
 /// registers already saved.
 #[unsafe(naked)]
 unsafe extern "C" fn trap_push_segs() {
-    // SAFETY: the C label's body; `SET_KERNEL_SEGMENTS` is empty, so only
-    // the `%r12` return tag is set.
+    // SAFETY: the kernel segments need no loading, so only the `%r12` return
+    // tag is set.
     naked_asm!(
         "pushf",
         "cli",
@@ -453,8 +438,7 @@ unsafe extern "C" fn trap_push_segs() {
     );
 }
 
-/// `trap_set_segs` of `i386/i386/locore.S` and `x86_64/locore.S`: clear the
-/// direction flag and pick the user or kernel trap path.
+/// Clears the direction flag and picks the user or kernel trap path.
 ///
 /// # Safety
 ///
@@ -476,8 +460,7 @@ unsafe extern "C" fn trap_set_segs() {
     );
 }
 
-/// `trap_from_user` of `i386/i386/locore.S` and `x86_64/locore.S`: switch
-/// from the PCB stack to the kernel stack and take the trap.
+/// Switches from the PCB stack to the kernel stack and takes the trap.
 ///
 /// # Safety
 ///
@@ -496,8 +479,7 @@ unsafe extern "C" fn trap_from_user() {
     );
 }
 
-/// `_take_trap` of `i386/i386/locore.S` and `x86_64/locore.S`: call
-/// `user_trap()` with the register save area and act on its answer.
+/// Calls `user_trap()` with the register save area and acts on its answer.
 ///
 /// # Safety
 ///
@@ -549,7 +531,7 @@ unsafe extern "C" fn return_from_trap() {
 /// Entered only by jump from [`return_from_trap`].
 #[unsafe(naked)]
 unsafe extern "C" fn return_to_user() {
-    // SAFETY: the C label falls into `_return_from_kernel`.
+    // SAFETY: the path falls into `return_from_kernel`.
     naked_asm!(
         "jmp {return_from_kernel}",
         return_from_kernel = sym return_from_kernel,
@@ -557,8 +539,7 @@ unsafe extern "C" fn return_to_user() {
     );
 }
 
-/// `_return_from_kernel` of `i386/i386/locore.S` and `x86_64/locore.S`: pop
-/// the save area and return to the interrupted context.
+/// Pops the save area and returns to the interrupted context.
 ///
 /// # Safety
 ///
@@ -600,7 +581,7 @@ unsafe extern "C" fn return_from_kernel() {
     );
 }
 
-/// `_kret_iret` of `i386/i386/locore.S` and `x86_64/locore.S`: the `iret`.
+/// The IRET of the return path.
 ///
 /// # Safety
 ///
@@ -611,8 +592,7 @@ unsafe extern "C" fn kret_iret() {
     naked_asm!("iretq", options(att_syntax));
 }
 
-/// `trap_from_kernel` of `i386/i386/locore.S` and `x86_64/locore.S`: call
-/// `kernel_trap()` on the frame and return.
+/// Calls `kernel_trap()` on the frame and returns.
 ///
 /// # Safety
 ///
@@ -631,9 +611,7 @@ unsafe extern "C" fn trap_from_kernel() {
     );
 }
 
-/// `thread_exception_return()` of `i386/i386/locore.S` and
-/// `x86_64/locore.S`: make the current thread return from the kernel as if
-/// from an exception.
+/// Makes the current thread return from the kernel as if from an exception.
 ///
 /// The entry also emits `thread_bootstrap_return`, which the C defined at
 /// this same address; `kern/thread.rs`'s clean-point checks compare the two
@@ -661,9 +639,8 @@ pub(crate) unsafe extern "C" fn thread_exception_return() {
     );
 }
 
-/// `thread_syscall_return()` of `i386/i386/locore.S` and
-/// `x86_64/locore.S`: make the current thread return from the kernel as if
-/// from a system call, with `retval` as its answer.
+/// Makes the current thread return from the kernel as if from a system call,
+/// with `retval` as its answer.
 ///
 /// # Safety
 ///
@@ -689,8 +666,7 @@ pub(crate) unsafe extern "C" fn thread_syscall_return(_retval: c_int) -> ! {
     );
 }
 
-/// `call_continuation()` of `i386/i386/locore.S` and `x86_64/locore.S`:
-/// drop the current kernel stack and call `continuation` on a bare one.
+/// Drops the current kernel stack and calls `continuation` on a bare one.
 ///
 /// # Safety
 ///
@@ -716,8 +692,7 @@ pub(crate) unsafe extern "C" fn call_continuation(
     );
 }
 
-/// `t_dbl_fault` of `x86_64/locore.S`: the double-fault entry, installed
-/// with IST 1.
+/// The double-fault entry, installed with IST 1.
 ///
 /// # Safety
 ///
@@ -756,18 +731,16 @@ pub(crate) unsafe extern "C" fn t_dbl_fault() {
     );
 }
 
-/// `all_intrs` of `i386/i386/locore.S` and `x86_64/locore.S`: the common
-/// interrupt entry, which also emits the `return_to_iret` label
+/// The common interrupt entry, which also emits the `return_to_iret` label
 /// `hardclock()` compares against.
 ///
 /// # Safety
 ///
-/// Entered only by jump from an `INTERRUPT(n)` stub, with the old `%eax`
-/// on the stack and the interrupt number in `%eax`/`%rax`.
+/// Entered only by jump from an interrupt stub, with the old `%eax` on the
+/// stack and the interrupt number in `%eax`/`%rax`.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn all_intrs() {
-    // SAFETY: the C label's body; `PUSH_REGS_ISR` saves the registers
-    // before the return tag is set.
+    // SAFETY: the registers are saved before the return tag is set.
     naked_asm!(
         "pushq %rcx",
         "pushq %rdx",
@@ -853,8 +826,7 @@ pub(crate) unsafe extern "C" fn all_intrs() {
     );
 }
 
-/// `int_from_intstack` of `i386/i386/locore.S` and `x86_64/locore.S`: the
-/// interrupt already ran on an interrupt stack, so it takes no ASTs.
+/// The interrupt already ran on an interrupt stack, so it takes no ASTs.
 ///
 /// # Safety
 ///
@@ -897,8 +869,7 @@ unsafe extern "C" fn int_from_intstack() {
     );
 }
 
-/// `stack_overflowed` of `i386/i386/locore.S` and `x86_64/locore.S`: the
-/// kernel's interrupt stack underran, which is unrecoverable.
+/// The kernel's interrupt stack underran, which is unrecoverable.
 ///
 /// # Safety
 ///
@@ -963,13 +934,12 @@ unsafe extern "C" fn ast_from_interrupt() {
     );
 }
 
-/// `syscall64` of `x86_64/locore.S`: the 64-bit `syscall` instruction's
-/// entry, which saves the thread state in its pcb and invokes the syscall.
+/// The 64-bit SYSCALL entry, which saves the thread state in its pcb and
+/// invokes the system call.
 ///
 /// # Safety
 ///
-/// Entered only by the `syscall` instruction, with the user stack still in
-/// `%rsp`.
+/// Entered only by SYSCALL, with the user stack still in `%rsp`.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn syscall64() -> ! {
     naked_asm!(
@@ -1071,8 +1041,7 @@ pub(crate) unsafe extern "C" fn syscall64() -> ! {
     );
 }
 
-/// `_syscall64_restore_state` of `x86_64/locore.S`: restore the thread's
-/// user state and return through `sysretq`.
+/// Restores the thread's user state and returns through SYSRETQ.
 ///
 /// # Safety
 ///
@@ -1124,8 +1093,7 @@ unsafe extern "C" fn syscall64_restore_state() {
     );
 }
 
-/// `_syscall64_addr_push` of `x86_64/locore.S`: the argument copy's fault
-/// fixup and its bounds check's target.
+/// The argument copy's fault fixup and its bounds check's target.
 ///
 /// # Safety
 ///
@@ -1151,8 +1119,7 @@ unsafe extern "C" fn syscall64_addr_push() {
     );
 }
 
-/// `_syscall64_range` of `x86_64/locore.S`: an out-of-range system call
-/// becomes an invalid-opcode trap.
+/// An out-of-range system call becomes an invalid-opcode trap.
 ///
 /// # Safety
 ///

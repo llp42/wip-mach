@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The IPC initialization routines, which `ipc/ipc_init.c` defines and
-//! `ipc/ipc_init.h` declares.
+//! The IPC initialization routines.
 
 use crate::arch::types::VmSize;
 use crate::ipc::{
@@ -17,18 +16,17 @@ use crate::vm::vm_kern::{self, KERNEL_MAP};
 use crate::vm::vm_map::VmMap;
 use core::ptr::{self, NonNull};
 
-/// `ipc_kernel_map_store` of `ipc/ipc_init.c`: the storage for the kernel's IPC
-/// submap.
+/// The storage for the kernel's IPC submap.
 static mut IPC_KERNEL_MAP_STORE: VmMap =
     // SAFETY: `VmMap` is a plain structure; the map is built in place by
     // `kmem_submap()` before anything reads it.
     unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
 
-/// `ipc_kernel_map` of `ipc/ipc_init.c`: the kernel's IPC submap.
+/// The kernel's IPC submap.
 static mut IPC_KERNEL_MAP: *mut VmMap =
     ptr::addr_of_mut!(IPC_KERNEL_MAP_STORE);
 
-/// `ipc_kernel_map_size` of `ipc/ipc_init.c`: the submap's fixed size.
+/// The submap's fixed size.
 static IPC_KERNEL_MAP_SIZE: VmSize = 8 * 1024 * 1024;
 
 /// The kernel's IPC submap.
@@ -38,7 +36,8 @@ pub(crate) fn ipc_kernel_map() -> *mut VmMap {
     unsafe { IPC_KERNEL_MAP }
 }
 
-/// `ipc_bootstrap()` in C.
+/// Sets up the IPC caches, the kernel's special spaces, the dead-name request
+/// table sizes, notifications and the message-accepted table.
 fn bootstrap() {
     ipc_port::init_static_locks();
     ipc_space::init_cache();
@@ -52,15 +51,15 @@ fn bootstrap() {
 
     ipc_notify::init();
 
-    // SAFETY: `ipc_marequest_init` only builds the message-accepted table;
+    // SAFETY: `ipc_marequest::init` only builds the message-accepted table;
     // the boot caller runs this once.
     unsafe { ipc_marequest::init() };
 }
 
-/// `ipc_init()` in C.
+/// Builds the kernel's IPC submap and the host's special ports.
 fn init() {
-    // SAFETY: `IPC_KERNEL_MAP` and `kernel_map` are the live maps the boot
-    // path has already built, and `ipc_kernel_map_size` is the constant size
+    // SAFETY: `IPC_KERNEL_MAP` and `KERNEL_MAP` are the live maps the boot
+    // path has already built, and `IPC_KERNEL_MAP_SIZE` is the constant size
     // of the submap.
     unsafe {
         vm_kern::kmem_submap(
@@ -76,7 +75,7 @@ fn init() {
     unsafe { crate::kern::ipc_host::init() };
 }
 
-/// `ipc_bootstrap()` of `ipc/ipc_init.c`.
+/// Sets up IPC at boot, before the kernel task exists.
 ///
 /// # Safety
 ///
@@ -85,7 +84,7 @@ pub(crate) unsafe fn ipc_bootstrap() {
     bootstrap();
 }
 
-/// `ipc_init()` of `ipc/ipc_init.c`.
+/// Finishes the IPC setup once the kernel map exists.
 ///
 /// # Safety
 ///

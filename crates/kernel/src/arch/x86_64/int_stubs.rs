@@ -4,9 +4,8 @@
 //   Copyright (c) 1991 IBM Corporation
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The `INTERRUPT(n)` stubs and `int_entry_table` that
-//! `i386/i386/locore.S` and `x86_64/locore.S` used to define; the trap
-//! web they feed is [`locore`](crate::arch::x86_64::locore).
+//! The interrupt stubs and [`INT_ENTRY_TABLE`]; the trap web they feed is
+//! [`locore`].
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::apic::IOAPIC_SPURIOUS_BASE;
@@ -20,8 +19,7 @@ const _: () = assert!(
     size_of::<Option<unsafe extern "C" fn()>>() == size_of::<VmOffset>()
 );
 
-/// The `INTERRUPT(n)` macro of `i386/i386/locore.S` and `x86_64/locore.S`:
-/// each stub enters `all_intrs` with its own vector.
+/// Each stub enters `all_intrs` with its own vector.
 macro_rules! interrupt_stub {
     ($($vector:expr => $name:ident),+ $(,)?) => {
         $(
@@ -118,9 +116,9 @@ interrupt_stub! {
 /// pmap-update and spurious entries.
 const INT_ENTRY_TABLE_LEN: usize = NINTR + 3;
 
-/// `int_entry_table[]` of `i386/i386/locore.S` and `x86_64/locore.S`: the
-/// interrupt entry points `int_fill()` installs, the `NINTR` lines first
-/// and the AST, pmap-update and spurious vectors after them.
+/// The interrupt entry points [`int_init`](crate::arch::x86_64::int_init)
+/// installs, the `NINTR` lines first and the AST, pmap-update and spurious
+/// vectors after them.
 pub(crate) static INT_ENTRY_TABLE: [Option<unsafe extern "C" fn()>;
     INT_ENTRY_TABLE_LEN] = [
     Some(int_0),

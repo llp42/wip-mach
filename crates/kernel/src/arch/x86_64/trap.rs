@@ -38,7 +38,7 @@ use core::ptr::{self, NonNull};
 const T_DIVIDE_ERROR: c_ulong = 0;
 /// The trap number of a debug exception.
 pub(crate) const T_DEBUG: c_ulong = 1;
-/// The trap number of the `int3` breakpoint.
+/// The trap number of a breakpoint instruction.
 const T_INT3: c_ulong = 3;
 /// The trap number of an overflow.
 const T_OVERFLOW: c_ulong = 4;
@@ -84,7 +84,7 @@ const EXC_BREAKPOINT: c_int = 6;
 const EXC_I386_DIV: c_int = 1;
 /// The x86 subcode of a single-step trap.
 const EXC_I386_SGL: c_int = 1;
-/// The x86 subcode of an `int3` breakpoint.
+/// The x86 subcode of a breakpoint instruction.
 const EXC_I386_BPT: c_int = 2;
 /// The x86 subcode of an `into` overflow.
 const EXC_I386_INTO: c_int = 2;

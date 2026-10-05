@@ -3,7 +3,8 @@
 //   Copyright (c) 1993 Carnegie Mellon University
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The non-variadic leaves of `kern/printf.c`: `printnum` and `safe_gets`.
+//! The non-variadic leaves of the kernel's formatted I/O: number printing and
+//! line input.
 
 use crate::kern::console::kprint;
 use core::ffi::{c_char, c_int};
@@ -57,8 +58,8 @@ fn get_line(
     }
 }
 
-/// The `safe_gets()` entry of <kern/printf.h>, which `kern/printf.c` used to
-/// define.
+/// Reads a line from the console into `str`, echoing it, at most `maxlen`
+/// bytes with its NUL.
 ///
 /// # Safety
 ///
@@ -72,7 +73,7 @@ pub(crate) unsafe fn safe_gets(str: *mut c_char, maxlen: c_int) {
     let line =
         unsafe { core::slice::from_raw_parts_mut(str.cast::<u8>(), len) };
     let mut getc = || {
-        // SAFETY: `cngetc()` takes no argument and the console is
+        // SAFETY: `cons::getc` takes the wait flag, and the console is
         // initialized before `safe_gets()` can be called.
         unsafe { crate::device::cons::getc(1) }
     };

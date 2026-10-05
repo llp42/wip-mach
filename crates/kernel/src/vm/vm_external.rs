@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! External (paged-out) page bookkeeping, which `vm/vm_external.c` used to
-//! define and `vm/vm_external.h` declares.
+//! External (paged-out) page bookkeeping.
 
 use crate::arch::types::VmOffset;
 use crate::kern::slab::{CacheInitFlags, KmemCache};
@@ -17,25 +16,22 @@ use core::ptr::{self, NonNull};
 use core::slice;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// `SMALL_SIZE` in `vm/vm_external.c`: the byte size of a small bitmap
-/// (`VM_EXTERNAL_SMALL_SIZE/8`).
+/// The byte size of a small existence bitmap.
 const SMALL_SIZE: usize = 16;
-/// `LARGE_SIZE` in `vm/vm_external.c`: the byte size of a large bitmap
-/// (`VM_EXTERNAL_LARGE_SIZE/8`).
+/// The byte size of a large existence bitmap.
 const LARGE_SIZE: usize = 1024;
 
-/// `VM_EXTERNAL_STATE_EXISTS` of <`vm/vm_external.h`>.
+/// The page is in the memory manager's backing store.
 pub(crate) const VM_EXTERNAL_STATE_EXISTS: c_int = 1;
-/// `VM_EXTERNAL_STATE_UNKNOWN` of <`vm/vm_external.h`>.
+/// Nothing is known about the page.
 const VM_EXTERNAL_STATE_UNKNOWN: c_int = 2;
-/// `VM_EXTERNAL_STATE_ABSENT` of <`vm/vm_external.h`>.
+/// The page is not in the backing store.
 const VM_EXTERNAL_STATE_ABSENT: c_int = 3;
 
-/// `vm_external_unsafe` in `vm/vm_external.c`: when set, every state query
-/// answers `UNKNOWN`.
+/// When set, every state query answers [`ExternalState::Unknown`].
 static VM_EXTERNAL_UNSAFE: AtomicU32 = AtomicU32::new(0);
 
-/// The state a page may be recorded in; `vm_external_state_t` in C.
+/// The state a page may be recorded in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExternalState {
     /// `VM_EXTERNAL_STATE_EXISTS`: written to external storage.
@@ -47,8 +43,7 @@ pub(crate) enum ExternalState {
 }
 
 impl ExternalState {
-    /// The state a C `vm_external_state_t` names, or `None` when the value is
-    /// not one.
+    /// The state `state` encodes, or `None` when it encodes none.
     const fn from_c(state: c_int) -> Option<Self> {
         match state {
             VM_EXTERNAL_STATE_EXISTS => Some(Self::Exists),
@@ -59,8 +54,7 @@ impl ExternalState {
     }
 }
 
-/// `struct vm_external` of <`vm/vm_external.h>`: the header of a bitmap of page
-/// states.
+/// The header of a bitmap of page states.
 #[repr(C)]
 pub struct VmExternal {
     /// Size in bytes of `existence_map`: `SMALL_SIZE` or `LARGE_SIZE`.
@@ -76,24 +70,23 @@ const _: () = {
     assert!(offset_of!(VmExternal, existence_map) == 8);
 };
 
-/// The page number `atop(offset)` names, as the C `_vm_external_state_get()`
-/// holds it: `atop(offset)` is stored in an `unsigned int`, so a long offset
-/// contributes only its low 32 bits.
+/// The bit of the page at `offset`. The page number `atop(offset)` is kept in
+/// 32 bits, so a long offset contributes only its low 32 bits.
 const fn page_bit(offset: VmOffset) -> usize {
     // Deliberate truncation: the C's `unsigned int bit` keeps the low 32 bits
     // of the 64-bit `vm_size_t atop(offset)`.
     (offset >> PAGE_SHIFT) as u32 as usize
 }
 
-/// `vm_external_cache` of `vm/vm_external.c`.
+/// The slab cache of [`VmExternal`] headers.
 static VM_EXTERNAL_CACHE: SyncCell<KmemCache> =
     SyncCell(UnsafeCell::new(KmemCache::zeroed()));
 
-/// `vm_object_small_existence_map_cache` of `vm/vm_external.c`.
+/// The slab cache of small existence bitmaps.
 static SMALL_EXISTENCE_MAP_CACHE: SyncCell<KmemCache> =
     SyncCell(UnsafeCell::new(KmemCache::zeroed()));
 
-/// `vm_object_large_existence_map_cache` of `vm/vm_external.c`.
+/// The slab cache of large existence bitmaps.
 static LARGE_EXISTENCE_MAP_CACHE: SyncCell<KmemCache> =
     SyncCell(UnsafeCell::new(KmemCache::zeroed()));
 
@@ -110,7 +103,8 @@ fn large_existence_map_cache() -> *mut KmemCache {
 }
 
 impl VmExternal {
-    /// `vm_external_create()` in C.
+    /// Allocates a header and a zeroed bitmap sized for an object of `size`
+    /// bytes, or `None` when a cache is out of memory.
     fn create(size: VmOffset) -> Option<NonNull<Self>> {
         // SAFETY: `external_cache()` is initialized by
         // `vm_external_module_initialize()` before any caller.
@@ -148,7 +142,7 @@ impl VmExternal {
         Some(header)
     }
 
-    /// `vm_external_destroy()` in C.
+    /// Returns the bitmap and the header to their caches.
     ///
     /// # Safety
     ///
@@ -201,7 +195,7 @@ impl VmExternal {
         Some(unsafe { slice::from_raw_parts_mut(map.as_ptr(), size) })
     }
 
-    /// `_vm_external_state_get()` in C.
+    /// The state recorded for the page at `offset`.
     fn state_get(&self, offset: VmOffset) -> ExternalState {
         if VM_EXTERNAL_UNSAFE.load(Ordering::Relaxed) != 0 {
             return ExternalState::Unknown;
@@ -219,7 +213,8 @@ impl VmExternal {
         }
     }
 
-    /// `vm_external_state_set()` in C.
+    /// Records `state` for the page at `offset`; only
+    /// [`ExternalState::Exists`] is ever recorded.
     fn state_set(&mut self, offset: VmOffset, state: ExternalState) {
         if state != ExternalState::Exists {
             return;
@@ -235,7 +230,8 @@ impl VmExternal {
     }
 }
 
-/// `vm_external_create()` in C.
+/// Allocates the bookkeeping for an object of `size` bytes, or null when a
+/// cache is out of memory.
 ///
 /// # Safety
 ///
@@ -246,7 +242,7 @@ pub(crate) unsafe fn vm_external_create(size: VmOffset) -> *mut VmExternal {
     VmExternal::create(size).map_or(ptr::null_mut(), NonNull::as_ptr)
 }
 
-/// `vm_external_destroy()` in C.
+/// Frees the bookkeeping `e`, when it is not null.
 ///
 /// # Safety
 ///
@@ -258,8 +254,8 @@ pub(crate) unsafe fn vm_external_destroy(e: *mut VmExternal) {
     }
 }
 
-/// `vm_external_state_get()` of <`vm/vm_external.h>`: the state recorded
-/// for the page, or [`ExternalState::Unknown`] for a null map.
+/// The state recorded for the page, or [`ExternalState::Unknown`] for a null
+/// map.
 ///
 /// # Safety
 ///
@@ -274,7 +270,8 @@ pub(crate) unsafe fn state_get(
     })
 }
 
-/// `vm_external_state_set()` in C.
+/// Records the state `state` encodes for the page at `offset`, when `e` is not
+/// null and `state` encodes a state.
 ///
 /// # Safety
 ///
@@ -295,7 +292,7 @@ pub(crate) unsafe fn vm_external_state_set(
     unsafe { &mut *e.as_ptr() }.state_set(offset, state);
 }
 
-/// `vm_external_module_initialize()` in C.
+/// Sets up the header and bitmap caches.
 ///
 /// # Safety
 ///

@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The host, processor and processor-set ports, which `kern/ipc_host.c` used
-//! to define and <`kern/ipc_host.h`> declares.
+//! The host, processor and processor-set ports.
 
 use crate::arch::types::VmOffset;
 use crate::ipc::{IpcPort, IpcSpace, ipc_port, ipc_space};
@@ -20,7 +19,7 @@ use core::ffi::{c_uint, c_void};
 use core::ptr;
 use core::ptr::NonNull;
 
-/// `IKOT_HOST` of <`kern/ipc_kobject.h>`: the object type of the host port.
+/// The object type of the host port.
 const IKOT_HOST: c_uint = 3;
 /// `IKOT_HOST_PRIV`: the object type of the host privilege port.
 const IKOT_HOST_PRIV: c_uint = 4;
@@ -34,9 +33,9 @@ const IKOT_PSET_NAME: c_uint = 7;
 const IKOT_PROCESSOR_NAME: c_uint = 29;
 /// `IKOT_NONE`: the type of a port bound to no kernel object.
 const IKOT_NONE: c_uint = 0;
-/// `IKO_NULL`: the value that clears a port's `ip_kobject`.
+/// The value that clears a port's kernel object.
 const IKO_NULL: VmOffset = 0;
-/// `MACH_PORT_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NULL: c_uint = 0;
 
 /// Allocate a special port in the kernel's IPC space, halting when the
@@ -52,14 +51,14 @@ fn alloc_kernel_port(function: &'static str) -> NonNull<c_void> {
     unsafe { NonNull::new_unchecked(port.as_ptr()) }
 }
 
-/// `ipc_host_init()` of `kern/ipc_host.c`: the two host ports, the default
-/// set's two ports, and the boot processor's two ports.
+/// Makes the two host ports, the default set's two ports, and the boot
+/// processor's two ports.
 ///
 /// # Safety
 ///
-/// Must run once during boot, after `pset_sys_bootstrap()` has built the
-/// default set and the boot processor, and before anything else can
-/// reach the host, set, or processor ports.
+/// Must run once during boot, after the processor bootstrap has built the
+/// default set and the boot processor, and before anything else can reach the
+/// host, set, or processor ports.
 pub(crate) unsafe fn init() {
     let port = alloc_kernel_port("ipc_host_init");
     // SAFETY: `realhost` is the one host object, and the freshly allocated
@@ -76,10 +75,9 @@ pub(crate) unsafe fn init() {
     }
 
     let pset = processor::default_pset();
-    // SAFETY: the default set is the global `pset_sys_bootstrap()`
-    // initialized during the boot, the boot processor its record, and
-    // their port fields are still null, so no other thread can be looking
-    // at them.
+    // SAFETY: the default set is the global the processor bootstrap
+    // initialized during the boot, the boot processor its record, and their
+    // port fields are still null, so no other thread can be looking at them.
     unsafe {
         pset_init(&mut *pset);
         pset_enable(&mut *pset);
@@ -87,8 +85,7 @@ pub(crate) unsafe fn init() {
     }
 }
 
-/// `mach_host_self()` of `kern/ipc_host.c`: a send right for the caller's own
-/// host port.
+/// A send right for the caller's own host port.
 ///
 /// # Safety
 ///
@@ -102,7 +99,7 @@ pub(crate) unsafe fn mach_host_self() -> c_uint {
         return MACH_PORT_NULL;
     };
 
-    // SAFETY: the host port is live and active from `ipc_host_init()` on.
+    // SAFETY: the host port is live and active from `init` on.
     let sright = unsafe { ipc_port::make_send(port) };
     // SAFETY: the running task is live, and its space is set before any IPC
     // call the task can make; the `current_space()` macro.
@@ -112,18 +109,16 @@ pub(crate) unsafe fn mach_host_self() -> c_uint {
     unsafe { ipc_port::copyout_send(sright.as_ptr(), space) }
 }
 
-/// `mach_host_self()` of <`mach/mach_traps.h>`: the `mach_host_self` trap
-/// entry.
+/// The `mach_host_self` trap entry.
 ///
 /// # Safety
 ///
-/// Runs on the caller's own thread once `ipc_host_init()` has built the host
-/// port.
+/// Runs on the caller's own thread once [`init`] has built the host port.
 pub(crate) unsafe extern "C" fn mach_host_self_entry() -> c_uint {
     unsafe { mach_host_self() }
 }
 
-/// `ipc_processor_init()` of `kern/ipc_host.c`.
+/// Makes the processor's control and name ports.
 pub(crate) fn processor_init(processor: &mut Processor) {
     let port = alloc_kernel_port("ipc_processor_init");
     processor.processor_self = port.as_ptr();
@@ -151,7 +146,7 @@ pub(crate) fn processor_init(processor: &mut Processor) {
     }
 }
 
-/// `ipc_pset_init()` of `kern/ipc_host.c`.
+/// Makes the set's control and name ports.
 pub(crate) fn pset_init(pset: &mut ProcessorSet) {
     let port = alloc_kernel_port("ipc_pset_init");
     pset.pset_self = port.as_ptr();
@@ -160,7 +155,7 @@ pub(crate) fn pset_init(pset: &mut ProcessorSet) {
     pset.pset_name_self = port.as_ptr();
 }
 
-/// `ipc_pset_enable()` of `kern/ipc_host.c`.
+/// Names the set in its ports, so they translate to it.
 pub(crate) fn pset_enable(pset: &mut ProcessorSet) {
     pset.lock.lock();
     if pset.active != 0 {
@@ -178,7 +173,7 @@ pub(crate) fn pset_enable(pset: &mut ProcessorSet) {
     pset.lock.unlock();
 }
 
-/// `ipc_pset_disable()` of `kern/ipc_host.c`.
+/// Clears the set from its ports, so they translate to nothing.
 pub(crate) fn pset_disable(pset: &mut ProcessorSet) {
     // SAFETY: the caller holds the set lock and a reference, as the C
     // required, so the two port fields are live.
@@ -189,7 +184,7 @@ pub(crate) fn pset_disable(pset: &mut ProcessorSet) {
     pset.ref_count = pset.ref_count.wrapping_sub(2);
 }
 
-/// `ipc_pset_terminate()` of `kern/ipc_host.c`.
+/// Destroys the set's ports.
 pub(crate) fn pset_terminate(pset: &mut ProcessorSet) {
     // SAFETY: the set is dead, so nothing else may use the two ports, which
     // are live special-space ports.
@@ -199,12 +194,12 @@ pub(crate) fn pset_terminate(pset: &mut ProcessorSet) {
     }
 }
 
-/// `convert_port_to_host()` of `kern/ipc_host.c`.
+/// The host that `port`, a host or privileged host port, names, or null.
 ///
 /// # Safety
 ///
 /// `port` must be null or a live port pointer that [`IpcPort::valid()`]
-/// accepts (`IP_VALID()` in C).
+/// accepts.
 pub(crate) unsafe fn port_to_host(port: *mut c_void) -> *mut Host {
     let Some(port) = IpcPort::valid(port) else {
         return ptr::null_mut();
@@ -224,12 +219,12 @@ pub(crate) unsafe fn port_to_host(port: *mut c_void) -> *mut Host {
     }
 }
 
-/// `convert_port_to_host_priv()` of `kern/ipc_host.c`.
+/// The host that `port`, a privileged host port, names, or null.
 ///
 /// # Safety
 ///
 /// `port` must be null or a live port pointer that [`IpcPort::valid()`]
-/// accepts (`IP_VALID()` in C).
+/// accepts.
 pub(crate) unsafe fn port_to_host_priv(port: *mut c_void) -> *mut Host {
     let Some(port) = IpcPort::valid(port) else {
         return ptr::null_mut();
@@ -247,12 +242,12 @@ pub(crate) unsafe fn port_to_host_priv(port: *mut c_void) -> *mut Host {
     }
 }
 
-/// `convert_port_to_processor()` of `kern/ipc_host.c`.
+/// The processor that `port`, a processor port, names, or null.
 ///
 /// # Safety
 ///
 /// `port` must be null or a live port pointer that [`IpcPort::valid()`]
-/// accepts (`IP_VALID()` in C).
+/// accepts.
 pub(crate) unsafe fn port_to_processor(port: *mut c_void) -> *mut Processor {
     let Some(port) = IpcPort::valid(port) else {
         return ptr::null_mut();
@@ -271,12 +266,13 @@ pub(crate) unsafe fn port_to_processor(port: *mut c_void) -> *mut Processor {
     }
 }
 
-/// `convert_port_to_processor_name()` of `kern/ipc_host.c`.
+/// The processor that `port`, a processor or processor-name port, names, or
+/// null.
 ///
 /// # Safety
 ///
 /// `port` must be null or a live port pointer that [`IpcPort::valid()`]
-/// accepts (`IP_VALID()` in C).
+/// accepts.
 pub(crate) unsafe fn port_to_processor_name(
     port: *mut c_void,
 ) -> *mut Processor {
@@ -299,24 +295,23 @@ pub(crate) unsafe fn port_to_processor_name(
     }
 }
 
-/// `convert_port_to_pset()` of `kern/ipc_host.c`: the set with one more
-/// reference, or null.
+/// The set that `port`, a set port, names, with one more reference, or null.
 ///
 /// # Safety
 ///
 /// `port` must be null or a live port pointer that [`IpcPort::valid()`]
-/// accepts (`IP_VALID()` in C).
+/// accepts.
 pub(crate) unsafe fn port_to_pset(port: *mut c_void) -> *mut ProcessorSet {
     unsafe { port_to_pset_kind(port, IKOT_PSET) }
 }
 
-/// `convert_port_to_pset_name()` of `kern/ipc_host.c`: the set with one more
+/// The set that `port`, a set or set-name port, names, with one more
 /// reference, or null.
 ///
 /// # Safety
 ///
 /// `port` must be null or a live port pointer that [`IpcPort::valid()`]
-/// accepts (`IP_VALID()` in C).
+/// accepts.
 pub(crate) unsafe fn port_to_pset_name(
     port: *mut c_void,
 ) -> *mut ProcessorSet {
@@ -346,7 +341,7 @@ pub(crate) unsafe fn port_to_pset_name(
 /// # Safety
 ///
 /// `port` must be null or a live port pointer that [`IpcPort::valid()`]
-/// accepts (`IP_VALID()` in C).
+/// accepts.
 unsafe fn port_to_pset_kind(
     port: *mut c_void,
     kotype: c_uint,
@@ -369,8 +364,7 @@ unsafe fn port_to_pset_kind(
     }
 }
 
-/// `convert_host_to_port()` of `kern/ipc_host.c`: a naked send right, or the
-/// invalid pointer unchanged.
+/// A naked send right, or the invalid pointer unchanged.
 ///
 /// # Safety
 ///
@@ -378,14 +372,12 @@ unsafe fn port_to_pset_kind(
 pub(crate) unsafe fn host_to_port(host: *mut Host) -> *mut c_void {
     let port = unsafe { (*host).host_self };
     IpcPort::valid(port).map_or(port, |port| {
-        // SAFETY: the host port is live and active from `ipc_host_init()`
-        // on.
+        // SAFETY: the host port is live and active from `init` on.
         unsafe { ipc_port::make_send(port) }.as_ptr()
     })
 }
 
-/// `convert_processor_to_port()` of `kern/ipc_host.c`: a naked send right for
-/// the processor's control port.
+/// A naked send right for the processor's control port.
 ///
 /// # Safety
 ///
@@ -395,14 +387,12 @@ pub(crate) unsafe fn processor_to_port(
 ) -> *mut c_void {
     let port = unsafe { (*processor).processor_self };
     IpcPort::valid(port).map_or(port, |port| {
-        // SAFETY: the port is live and active from `ipc_processor_init()`
-        // on.
+        // SAFETY: the port is live and active from `processor_init` on.
         unsafe { ipc_port::make_send(port) }.as_ptr()
     })
 }
 
-/// `convert_processor_name_to_port()` of `kern/ipc_host.c`: a naked send right
-/// for the processor's name port.
+/// A naked send right for the processor's name port.
 ///
 /// # Safety
 ///
@@ -415,8 +405,8 @@ pub(crate) unsafe fn processor_name_to_port(
         .map_or(port, |port| unsafe { ipc_port::make_send(port) }.as_ptr())
 }
 
-/// `convert_pset_to_port()` of `kern/ipc_host.c`: consumes the caller's set
-/// reference and returns a naked send right, or null when the set is dead.
+/// Consumes the caller's set reference and returns a naked send right, or null
+/// when the set is dead.
 ///
 /// # Safety
 ///
@@ -439,9 +429,8 @@ pub(crate) unsafe fn pset_to_port(pset: *mut ProcessorSet) -> *mut c_void {
     port
 }
 
-/// `convert_pset_name_to_port()` of `kern/ipc_host.c`: consumes the caller's
-/// set reference and returns its name port as a naked send right, or null
-/// when the set is dead.
+/// Consumes the caller's set reference and returns its name port as a naked
+/// send right, or null when the set is dead.
 ///
 /// # Safety
 ///
@@ -467,13 +456,12 @@ pub(crate) unsafe fn pset_name_to_port(
     port
 }
 
-/// `processor_set_default()` of `kern/ipc_host.c`: the default set with one
-/// more reference.
+/// The default set with one more reference.
 ///
 /// # Safety
 ///
-/// Must be called only after `pset_sys_bootstrap()` has built the default
-/// processor set, i.e. once IPC is up; `host` is only null-checked, never
+/// Must be called only after the processor bootstrap has built the default
+/// processor set, that is once IPC is up; `host` is only null-checked, never
 /// dereferenced.
 pub(crate) unsafe fn set_default(
     host: *mut c_void,

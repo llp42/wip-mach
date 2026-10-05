@@ -40,10 +40,10 @@
 //! - **The teardown.**  Each routine takes its tree by value, so its
 //!   destructor runs inside the timed window; [`CTree`] drops through
 //!   `rdxtree_remove_all` and [`NewTree`] through `RadixTree::drop`.
-//! - **The assertions.**  The reference is built with `NDEBUG` because
-//!   the contender's `debug_assert!`s are compiled out in this profile.
-//!   The contender's alignment check on each stored pointer is part of
-//!   its contract in every profile, so it stays inside the window.
+//! - **The assertions.**  The reference is built with its assertions off
+//!   because the contender's `debug_assert!`s are compiled out in this
+//!   profile.  The contender's alignment check on each stored pointer is part
+//!   of its contract in every profile, so it stays inside the window.
 
 use core::ffi::{c_int, c_void};
 use core::mem::{MaybeUninit, offset_of, size_of};
@@ -80,8 +80,8 @@ pub const fn mix(hash: u64, value: u64) -> u64 {
 
 /// The reference's tree: a height and a root that is a node or a value.
 ///
-/// `bridge.c` asserts every offset and size below, and the key's width
-/// with them, so a mismatch is a build failure rather than a silent one.
+/// The C bridge asserts every offset and size below, and the key's width with
+/// them, so a mismatch is a build failure rather than a silent one.
 #[repr(C)]
 struct Rdxtree {
     height: u32,
@@ -102,9 +102,9 @@ const _: () = {
     assert!(offset_of!(RdxtreeIter, key) == 8);
 };
 
-// The reference's entry points.  The ones its headers declare `static
-// inline` have no symbol of their own and are reached through the
-// `_bench_` wrappers `bridge.c` defines.
+// The reference's entry points.  The ones its headers declare `static inline`
+// have no symbol of their own and are reached through the `_bench_` wrappers
+// the C bridge defines.
 unsafe extern "C" {
     /// Initializes the reference's node cache; once per process.
     fn rdxtree_cache_init();
@@ -121,29 +121,29 @@ unsafe extern "C" {
     fn rdxtree_walk(tree: *mut Rdxtree, iter: *mut RdxtreeIter)
     -> *mut c_void;
 
-    /// `rdxtree_init()`.
+    /// Initializes `tree`.
     fn rdxtree_bench_init(tree: *mut Rdxtree);
-    /// `rdxtree_insert()`: zero on success, non-zero when `key` is taken.
+    /// Stores `ptr` at `key`: zero on success, non-zero when `key` is taken.
     fn rdxtree_bench_insert(
         tree: *mut Rdxtree,
         key: u32,
         ptr: *mut c_void,
     ) -> c_int;
-    /// `rdxtree_insert_alloc()`: zero on success, with the key written
-    /// through `keyp`.
+    /// Stores `ptr` at the lowest free key: zero on success, with the key
+    /// written through `keyp`.
     fn rdxtree_bench_insert_alloc(
         tree: *mut Rdxtree,
         ptr: *mut c_void,
         keyp: *mut u32,
     ) -> c_int;
-    /// `rdxtree_lookup()`, or null when nothing is stored at `key`.
+    /// The value at `key`, or null when nothing is stored there.
     fn rdxtree_bench_lookup(tree: *const Rdxtree, key: u32) -> *mut c_void;
-    /// `rdxtree_lookup_slot()`, or null when nothing is stored at `key`.
+    /// The slot of `key`, or null when nothing is stored there.
     fn rdxtree_bench_lookup_slot(
         tree: *const Rdxtree,
         key: u32,
     ) -> *mut *mut c_void;
-    /// `rdxtree_iter_init()`.
+    /// Starts `iter` at the first entry.
     fn rdxtree_bench_iter_init(iter: *mut RdxtreeIter);
 
     /// How many node blocks the reference's cache holds outstanding.

@@ -75,8 +75,7 @@ pub(crate) const KERN_TIMEDOUT: c_int = 27;
 /// `KERN_INTERRUPTED`.
 pub(crate) const KERN_INTERRUPTED: c_int = 28;
 
-/// `EML_BAD_TASK` of <`kern/syscall_emulation.h`>: the emulation call's
-/// task is null.
+/// The return code of an emulation call whose task is null.
 const EML_BAD_TASK: c_int = 0x8001;
 
 /// `MACH_MSG_SUCCESS`: the message transfer succeeded.
@@ -167,11 +166,9 @@ const D_NO_MEMORY: c_int = 2508;
 /// `D_READ_ONLY`.
 const D_READ_ONLY: c_int = 2509;
 
-/// `MIG_BAD_ID` of <`mach/mig_errors.h`>: no server routine has the
-/// message's id.
+/// No server routine has the message's id.
 pub(crate) const MIG_BAD_ID: c_int = -303;
-/// `MIG_NO_REPLY` of <`mach/mig_errors.h`>: the server routine sends no
-/// reply of its own.
+/// The server routine sends no reply of its own.
 pub(crate) const MIG_NO_REPLY: c_int = -305;
 
 /// The code of a result: zero for `Ok`, which is both `KERN_SUCCESS` and

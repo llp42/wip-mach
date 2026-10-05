@@ -23,8 +23,8 @@ use crate::mig::code::{io_return, kern_return};
 use core::ffi::{c_char, c_int, c_uint, c_ulong, c_ushort, c_void};
 use core::ptr::NonNull;
 
-/// `ds_device_open()` of `device/ds_routines.c`, which the MIG server and
-/// `ds_device_open_new()` call.
+/// Opens the device `name` with `mode`, serving `device_open` and
+/// [`ds_device_open_new`].
 ///
 /// # Safety
 ///
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn ds_device_open(
     })
 }
 
-/// `ds_device_open_new()` of the MIG <device/device.server.h>.
+/// Opens the device `name` with `mode`, serving `device_open_new`.
 ///
 /// # Safety
 ///
@@ -77,11 +77,11 @@ pub unsafe extern "C" fn ds_device_open_new(
     })
 }
 
-/// `ds_device_close()` of `device/ds_routines.c`.
+/// Closes `dev`.
 ///
 /// # Safety
 ///
-/// `dev` is `DEVICE_NULL` or a live `struct device`.
+/// `dev` is null or a live device.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ds_device_close(dev: *mut c_void) -> c_int {
     let Some(dev) = NonNull::new(dev) else {
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn ds_device_close(dev: *mut c_void) -> c_int {
     kern_return(unsafe { ds_routines::ds_device_close(dev) })
 }
 
-/// `ds_device_write()` of `device/ds_routines.c`.
+/// Writes the out-of-line `data` to `dev` at `recnum`.
 ///
 /// # Safety
 ///
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn ds_device_write(
     })
 }
 
-/// `ds_device_write_inband()` of `device/ds_routines.c`.
+/// Writes the in-band `data` to `dev` at `recnum`.
 ///
 /// # Safety
 ///
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn ds_device_write_inband(
     })
 }
 
-/// `ds_device_read()` of `device/ds_routines.c`.
+/// Reads `count` bytes from `dev` at `recnum`, out of line.
 ///
 /// # Safety
 ///
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn ds_device_read(
     })
 }
 
-/// `ds_device_read_inband()` of `device/ds_routines.c`.
+/// Reads `count` bytes from `dev` at `recnum`, in band.
 ///
 /// # Safety
 ///
@@ -231,7 +231,7 @@ pub unsafe extern "C" fn ds_device_read_inband(
     })
 }
 
-/// `ds_device_set_status()` of `device/ds_routines.c`.
+/// Applies the status flavor `flavor` to `dev`.
 ///
 /// # Safety
 ///
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn ds_device_set_status(
     })
 }
 
-/// `ds_device_get_status()` of `device/ds_routines.c`.
+/// Reports the status flavor `flavor` of `dev`.
 ///
 /// # Safety
 ///
@@ -273,7 +273,7 @@ pub unsafe extern "C" fn ds_device_get_status(
     })
 }
 
-/// `ds_device_set_filter()` of `device/ds_routines.c`.
+/// Installs the packet `filter` on `dev` for `receive_port`, at `priority`.
 ///
 /// # Safety
 ///
@@ -301,7 +301,8 @@ pub unsafe extern "C" fn ds_device_set_filter(
     })
 }
 
-/// `ds_device_map()` of `device/ds_routines.c`.
+/// Makes a pager that maps `size` bytes of `dev` at `offset` with
+/// `protection`.
 ///
 /// # Safety
 ///
@@ -323,7 +324,7 @@ pub unsafe extern "C" fn ds_device_map(
     })
 }
 
-/// `ds_device_intr_register()` of `device/ds_routines.c`.
+/// Registers `receive_port` to receive the interrupt `id` of `dev`.
 ///
 /// # Safety
 ///
@@ -344,7 +345,8 @@ pub unsafe extern "C" fn ds_device_intr_register(
     })
 }
 
-/// `ds_device_intr_ack()` of `device/ds_routines.c`.
+/// Acknowledges the interrupt `receive_port` was notified of, enabling its
+/// line again.
 ///
 /// # Safety
 ///

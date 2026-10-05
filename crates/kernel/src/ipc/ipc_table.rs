@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The IPC table sizing and allocation, which `ipc/ipc_table.c` used to define
-//! and `ipc/ipc_table.h` declares.
+//! The IPC table sizing and allocation.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
@@ -18,7 +17,7 @@ use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-/// `struct ipc_table_size` of <`ipc/ipc_table.h>`: one table size.
+/// One table size.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct IpcTableSize {
@@ -29,21 +28,18 @@ const _: () = assert!(size_of::<IpcTableSize>() == 4);
 const _: () = assert!(align_of::<IpcTableSize>() == 4);
 const _: () = assert!(offset_of!(IpcTableSize, its_size) == 0);
 
-/// `ipc_table_dnrequests_size` in `ipc/ipc_table.c`: how many sizes
-/// [`ipc_table_init()`] allocates for.
+/// How many sizes [`ipc_table_init()`] allocates for.
 const IPC_TABLE_DNREQUESTS_SIZE: usize = 64;
 
-/// The byte size of `struct ipc_port_request`, which every table size counts.
+/// The byte size of an [`IpcPortRequest`], which every table size counts.
 pub(crate) const IPC_PORT_REQUEST_SIZE: VmSize = size_of::<IpcPortRequest>();
 
-/// `ipc_table_dnrequests` of `ipc/ipc_table.c`: the dead-name request table
-/// sizes, which `ipc_port_dngrow()` walks.
+/// The dead-name request table sizes, which `ipc_port::dngrow` walks.
 pub static IPC_TABLE_DNREQUESTS: AtomicPtr<IpcTableSize> =
     AtomicPtr::new(ptr::null_mut());
 
-/// Fill `its` with the sizes of the tables the C `ipc_table_fill()` describes:
-/// powers of two up to the page size, then page-sized increments that double
-/// up to eight pages.
+/// Fills `its` with table sizes: powers of two up to the page size, then
+/// page-sized increments that double up to eight pages.
 ///
 /// # Panics
 ///
@@ -96,7 +92,7 @@ fn fill(its: &mut [IpcTableSize], min: c_uint, elemsize: VmSize) {
     }
 }
 
-/// `ipc_table_init()` in C.
+/// Allocates and fills the dead-name request table sizes.
 ///
 /// # Safety
 ///
@@ -131,7 +127,7 @@ pub(crate) unsafe fn ipc_table_init() {
     }
 }
 
-/// `ipc_table_alloc()` in C.
+/// Allocates a table of `size` bytes, or returns 0.
 ///
 /// # Safety
 ///
@@ -142,7 +138,7 @@ pub(crate) unsafe fn ipc_table_alloc(size: VmSize) -> VmOffset {
     kalloc(size).map_or(0, |buf| buf.as_ptr().addr())
 }
 
-/// `ipc_table_free()` in C.
+/// Frees the table of `size` bytes at `table`, when it is not 0.
 ///
 /// # Safety
 ///

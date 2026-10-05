@@ -3,12 +3,10 @@
 //   Copyright (c) 1993-1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The device pager, which `device/dev_pager.c` used to define and
-//! <`device/dev_pager.h`> used to declare.
+//! The device pager.
 //!
-//! The C record's `client_count`, `pager_name` and `size` fields were
-//! written and never read, so the Rust record does not carry them; its
-//! reference count is an atomic where the C held a per-record lock.
+//! A record carries only what the pager reads back, and its reference count is
+//! an atomic.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SHIFT;
@@ -34,21 +32,19 @@ use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicI32, Ordering};
 use lock::SpinLock;
 
-/// `DEV_HASH_COUNT` of `device/dev_pager.c`: the number of buckets in both
-/// tables.
+/// The number of buckets in both tables.
 const DEV_HASH_COUNT: usize = 127;
 
-/// `MEMORY_OBJECT_COPY_NONE` of <`mach/memory_object.h`>.
+/// The copy strategy of a device's memory: none.
 const MEMORY_OBJECT_COPY_NONE: c_int = 0;
 
-/// `device_pager_debug` of `device/dev_pager.c`: the switch the C checked
-/// before its two trace prints, kept for a debugger to set.
+/// The switch that turns on the pager's trace prints, for a debugger to set.
 pub static DEVICE_PAGER_DEBUG: AtomicI32 = AtomicI32::new(0);
 
 const _: () = assert!(size_of::<AtomicI32>() == size_of::<c_int>());
 const _: () = assert!(align_of::<AtomicI32>() == align_of::<c_int>());
 
-/// One device pager record, the C `struct dev_pager`.
+/// One device pager record.
 struct DevPager {
     ref_count: AtomicI32,
     pager: IpcPort,
@@ -58,40 +54,37 @@ struct DevPager {
     prot: c_int,
 }
 
-/// `dev_pager_cache` of `device/dev_pager.c`: the `struct dev_pager` slab
-/// cache.
+/// The slab cache of [`DevPager`] records.
 static mut DEV_PAGER_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `dev_pager_hashtable` of `device/dev_pager.c`: one bucket per
-/// `dev_hash()` result, keyed by the pager port.
+/// One bucket per [`dev_hash`] result, keyed by the pager port.
 static mut DEV_PAGER_HASHTABLE: [PagerBucket; DEV_HASH_COUNT] =
     [const { PagerBucket::new() }; DEV_HASH_COUNT];
 
-/// `dev_pager_hash_lock`: serializes the port-name table.
+/// Serializes the port-name table.
 static DEV_PAGER_HASH_LOCK: SpinLock<(), MachPlatform> = SpinLock::new(());
 
-/// `dev_pager_hash_cache`: the `struct dev_pager_entry` slab cache.
+/// The slab cache of [`DevPagerEntry`] records.
 static mut DEV_PAGER_HASH_CACHE: KmemCache = KmemCache::zeroed();
 
-/// One entry of `dev_pager_hashtable`, the C `struct dev_pager_entry`.
+/// One entry of [`DEV_PAGER_HASHTABLE`].
 pub(crate) struct DevPagerEntry {
     links: list::Link,
     name: Option<IpcPort>,
     pager: NonNull<DevPager>,
 }
 
-/// `dev_device_hashtable` of `device/dev_pager.c`: one bucket per
-/// `dev_hash()` result, keyed by device and offset.
+/// One bucket per [`dev_hash`] result, keyed by device and offset.
 static mut DEV_DEVICE_HASHTABLE: [DeviceBucket; DEV_HASH_COUNT] =
     [const { DeviceBucket::new() }; DEV_HASH_COUNT];
 
-/// `dev_device_hash_lock`: serializes the device-and-offset table.
+/// Serializes the device-and-offset table.
 static DEV_DEVICE_HASH_LOCK: SpinLock<(), MachPlatform> = SpinLock::new(());
 
-/// `dev_device_hash_cache`: the `struct dev_device_entry` slab cache.
+/// The slab cache of [`DevDeviceEntry`] records.
 static mut DEV_DEVICE_HASH_CACHE: KmemCache = KmemCache::zeroed();
 
-/// One entry of `dev_device_hashtable`, the C `struct dev_device_entry`.
+/// One entry of [`DEV_DEVICE_HASHTABLE`].
 pub(crate) struct DevDeviceEntry {
     links: list::Link,
     device: *mut MachDevice,
@@ -116,9 +109,8 @@ type PagerBucket = List<'static, DevPagerEntryAdapter>;
 /// A bucket of the device-and-offset table, unordered like [`PagerBucket`].
 type DeviceBucket = List<'static, DevDeviceEntryAdapter>;
 
-/// `dev_hash()` of `device/dev_pager.c`: the C masked the low 24 bits of the
-/// whole value, a pointer or a pointer plus offset, and reduced it modulo the
-/// bucket count.
+/// The bucket of `value`, a pointer or a pointer plus offset: its low 24 bits,
+/// modulo the bucket count.
 const fn dev_hash(value: usize) -> usize {
     (value & 0x00ff_ffff) % DEV_HASH_COUNT
 }
@@ -233,7 +225,7 @@ unsafe fn deallocate(rec: NonNull<DevPager>) {
     }
 }
 
-/// `dev_pager_hash_insert()` of `device/dev_pager.c`.
+/// Enters `rec` in the port-name table under `name`.
 ///
 /// # Safety
 ///
@@ -265,7 +257,7 @@ unsafe fn pager_hash_insert(name: Option<IpcPort>, rec: NonNull<DevPager>) {
     unsafe { head.as_mut().push_front_ptr(entry) };
 }
 
-/// `dev_pager_hash_delete()` of `device/dev_pager.c`.
+/// Removes the entry for `name` from the port-name table.
 ///
 /// # Safety
 ///
@@ -294,8 +286,8 @@ unsafe fn pager_hash_delete(name: Option<IpcPort>) {
     }
 }
 
-/// `dev_pager_hash_lookup()` of `device/dev_pager.c`: the record an entry
-/// names, with a reference taken on it.
+/// The record the port-name table holds for `name`, with a reference taken on
+/// it.
 ///
 /// # Safety
 ///
@@ -312,7 +304,7 @@ unsafe fn pager_hash_lookup(
     Some(unsafe { reference((*entry.as_ptr()).pager) })
 }
 
-/// `dev_device_hash_insert()` of `device/dev_pager.c`.
+/// Enters `rec` in the device-and-offset table.
 ///
 /// # Safety
 ///
@@ -352,7 +344,8 @@ unsafe fn device_hash_insert(
     unsafe { head.as_mut().push_front_ptr(entry) };
 }
 
-/// `dev_device_hash_delete()` of `device/dev_pager.c`.
+/// Removes the entry for `device` and `offset` from the device-and-offset
+/// table.
 ///
 /// # Safety
 ///
@@ -381,8 +374,7 @@ unsafe fn device_hash_delete(device: *mut MachDevice, offset: VmOffset) {
     }
 }
 
-/// `dev_device_hash_lookup()` of `device/dev_pager.c`: the record an entry
-/// names, with a reference taken on it.
+/// The record the device-and-offset table holds, with a reference taken on it.
 ///
 /// # Safety
 ///
@@ -400,8 +392,8 @@ unsafe fn device_hash_lookup(
     Some(unsafe { reference((*entry.as_ptr()).pager) })
 }
 
-/// `device_map_page()` of `device/dev_pager.c`, the callback
-/// `vm_object_page_map()` calls.
+/// The physical address of the page at `offset` of the device the record `dsp`
+/// maps, the callback `vm_object::page_map` calls.
 ///
 /// # Safety
 ///
@@ -428,14 +420,13 @@ pub(crate) unsafe fn device_map_page(
         if pagenum == VmOffset::MAX {
             return VM_PAGE_FICTITIOUS_ADDR;
         }
-        // `pmap_phys_address(frame)` of <i386/intel/pmap.h> is the
-        // `intel_ptob()` shift of the frame cast to `phys_addr_t`; the
-        // shift drops what does not fit, as the C's did.
+        // The frame-to-address shift drops what does not fit.
         pagenum.wrapping_shl(PAGE_SHIFT)
     }
 }
 
-/// `device_pager_setup()` of `device/dev_pager.c`.
+/// The pager port for `offset` of `device` with protection `prot`, made on
+/// first use and shared after.
 ///
 /// # Errors
 ///
@@ -484,8 +475,8 @@ pub(crate) unsafe fn setup(
         return Err(DeviceError::ResourceShortage);
     };
     let rec = buf.as_ptr().cast::<DevPager>();
-    // SAFETY: the kernel space is live and the port cache is initialized,
-    // as the C's `ipc_port_alloc_kernel()` required.
+    // SAFETY: the kernel space is live and the port cache is initialized, as
+    // port allocation requires.
     let Some(pager) =
         (unsafe { ipc_port::alloc_special(ipc_space::kernel()) })
     else {
@@ -519,7 +510,8 @@ pub(crate) unsafe fn setup(
     Ok(pager)
 }
 
-/// `device_pager_data_request()` of `device/dev_pager.c`.
+/// Supplies the pages of `offset..offset + length` to the kernel: maps the
+/// device memory into the object.
 ///
 /// # Safety
 ///
@@ -592,7 +584,7 @@ pub(crate) unsafe fn data_request(
     }
 }
 
-/// `device_pager_init_pager()` of `device/dev_pager.c`.
+/// Records the kernel's ports for the pager and readies its object.
 ///
 /// # Safety
 ///
@@ -638,7 +630,7 @@ pub(crate) unsafe fn init_pager(
     }
 }
 
-/// `device_pager_terminate()` of `device/dev_pager.c`.
+/// Drops the pager's records and ports once the kernel is done with it.
 ///
 /// # Safety
 ///
@@ -685,7 +677,7 @@ pub(crate) unsafe fn terminate(
     }
 }
 
-/// `device_pager_init()` of `device/dev_pager.c`.
+/// Creates the pager caches and the two tables.
 ///
 /// # Safety
 ///

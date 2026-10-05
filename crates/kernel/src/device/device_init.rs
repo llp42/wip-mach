@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The device service's creation, which `device/device_init.c` used to define
-//! and <`device/device_init.h`> declares.
+//! The device service's creation.
 
 use crate::device::chario;
 use crate::device::ds_routines::{io_done_thread, mach_device_init};
@@ -14,8 +13,8 @@ use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-/// `master_device_port` of `device/device_init.c`: the port the device service
-/// answers on, published by the boot before any device open can race it.
+/// The port the device service answers on, published by the boot before any
+/// device open can race it.
 static MASTER_DEVICE_PORT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 /// The master device port, or null before [`device_service_create`] runs.
@@ -25,12 +24,13 @@ pub(crate) fn master_device_port() -> *mut c_void {
     MASTER_DEVICE_PORT.load(Ordering::Acquire)
 }
 
-/// `device_service_create()` in C.
+/// Creates the master device port, initializes the device packages, and starts
+/// the I/O-done and network threads.
 ///
 /// # Safety
 ///
-/// Called once, by `kern/startup.c`'s boot sequence after the kernel's IPC
-/// space exists, and never concurrently with a device open.
+/// Called once, by the boot sequence after the kernel's IPC space exists, and
+/// never concurrently with a device open.
 ///
 /// # Panics
 ///

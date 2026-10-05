@@ -3,12 +3,7 @@
 //   Copyright (C) 2023 Free Software Foundation
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kernel's copy of a user message, which `ipc/copy_user.c` used to
-//! define and `ipc/copy_user.h` declared.
-//!
-//! Both configured builds leave `USER32` undefined, so the file's only live
-//! definition was the LP64 kernel's `copyinmsg()`; the i386 kernel takes that
-//! same entry point from `src/arch/x86_64/user_access.rs`.
+//! The kernel's copy of a user message.
 
 use crate::arch::x86_64::user_access;
 use crate::ipc::MachMsgHeader;
@@ -19,7 +14,7 @@ use core::mem::size_of;
 /// 32-bit port name.
 const PORT_NAME_MASK: usize = 0xFFFF_FFFF;
 
-/// A `copyinmsg()` that did not copy the message.
+/// A message copy-in that did not copy the message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CopyError {
     /// `copyin()` faulted on the user buffer.
@@ -28,8 +23,8 @@ pub(crate) enum CopyError {
     TooSmall,
 }
 
-/// `copyinmsg()` of `ipc/copy_user.c`: copies the whole user message into the
-/// kernel buffer and narrows the header fields the kernel widened.
+/// Copies the whole user message into the kernel buffer and narrows the header
+/// fields the kernel widened.
 ///
 /// # Safety
 ///

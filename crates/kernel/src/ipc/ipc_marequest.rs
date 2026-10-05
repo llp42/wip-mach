@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The msg-accepted request routines, which `ipc/ipc_marequest.c` used to
-//! define and `ipc/ipc_marequest.h` declares.
+//! The msg-accepted request routines.
 
 use crate::ipc::error::SendError;
 use crate::ipc::ipc_notify;
@@ -24,32 +23,31 @@ use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
-/// `IPC_MAREQUEST_SIZE` of <`ipc/ipc_marequest.h`>.
+/// The number of request hash buckets, before [`init`] rounds it up to a power
+/// of two.
 const IPC_MAREQUEST_SIZE: c_uint = 16;
-/// `MACH_PORT_NAME_NULL` of <mach/port.h>: the name no entry holds.
+/// The name no entry holds.
 const MACH_PORT_NAME_NULL: c_uint = 0;
 
-/// `ipc_marequest_cache` of `ipc/ipc_marequest.c`: the request slab cache.
+/// The slab cache of request records.
 static mut IPC_MAREQUEST_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `ipc_marequest_size` of `ipc/ipc_marequest.c`: the number of hash buckets.
+/// The number of hash buckets.
 static MAREQUEST_SIZE: AtomicU32 = AtomicU32::new(0);
-/// `ipc_marequest_mask` of `ipc/ipc_marequest.c`: the bucket-index mask.
+/// The bucket-index mask.
 static MAREQUEST_MASK: AtomicU32 = AtomicU32::new(0);
-/// `ipc_marequest_table` of `ipc/ipc_marequest.c`: the bucket array.
+/// The bucket array.
 static MAREQUEST_TABLE: AtomicPtr<IpcMarequestBucket> =
     AtomicPtr::new(ptr::null_mut());
 
-/// `IMAR_HASH()` of `ipc/ipc_marequest.c`.
+/// The bucket index of `(space, name)`.
 ///
-/// The loads are `Relaxed`: `ipc_marequest_init()` writes the state before
-/// any request can exist, so no ordering is needed, only an atomic for the
-/// shared `static`.
+/// The loads are `Relaxed`: [`init`] writes the state before any request can
+/// exist, so no ordering is needed, only an atomic for the shared `static`.
 fn hash(space: IpcSpace, name: c_uint) -> usize {
     let mask = MAREQUEST_MASK.load(Ordering::Relaxed);
-    // The C truncated the kernel address to `ipc_marequest_index_t` before
-    // shifting, `MACH_PORT_INDEX` is the name, and `MACH_PORT_NGEN` is zero
-    // in this configuration.
+    // The space address is truncated to 32 bits before the shift, and the name
+    // stands for its own index: the generation is zero in this configuration.
     let key = ((space.as_ptr().addr() as u32) >> 4).wrapping_add(name) & mask;
     // Both targets address at least 32 bits, so the widening cannot lose
     // anything.
@@ -60,7 +58,7 @@ fn hash(space: IpcSpace, name: c_uint) -> usize {
 ///
 /// # Safety
 ///
-/// `ipc_marequest_init()` must have run.
+/// [`init`] must have run.
 unsafe fn bucket(space: IpcSpace, name: c_uint) -> *mut IpcMarequestBucket {
     unsafe {
         MAREQUEST_TABLE
@@ -69,16 +67,16 @@ unsafe fn bucket(space: IpcSpace, name: c_uint) -> *mut IpcMarequestBucket {
     }
 }
 
-/// `imar_alloc()` of `ipc/ipc_marequest.c`.
+/// Allocates a request record from the cache.
 fn alloc() -> Option<*mut IpcMarequest> {
     // SAFETY: `ipc_bootstrap()` initialized the cache before any request.
     let buf = unsafe { (*ptr::addr_of_mut!(IPC_MAREQUEST_CACHE)).alloc()? };
-    // SAFETY: the cache's buffers are `struct ipc_marequest` sized, as its
-    // init recorded from the C size.
+    // SAFETY: the cache's buffers are `IpcMarequest` sized, as its init
+    // recorded.
     Some(buf.as_ptr().cast())
 }
 
-/// `imar_free()` of `ipc/ipc_marequest.c`.
+/// Returns `marequest` to the cache.
 ///
 /// # Safety
 ///
@@ -90,9 +88,9 @@ unsafe fn free(marequest: *mut IpcMarequest) {
     }
 }
 
-/// The unlink walk both `ipc_marequest_cancel()` and `rename()` use: find
-/// `(space, name)` in `bucket` and return the node with its predecessor's
-/// link still pointing at it.
+/// The unlink walk both [`cancel`] and [`rename`] use: finds `(space, name)`
+/// in `bucket` and returns the node with its predecessor's link still pointing
+/// at it.
 ///
 /// # Safety
 ///
@@ -119,7 +117,7 @@ unsafe fn find_locked(
     }
 }
 
-/// `ipc_marequest_init()` in C.
+/// Allocates the request table and the record cache.
 ///
 /// # Safety
 ///
@@ -180,7 +178,8 @@ pub(crate) unsafe fn init() {
     }
 }
 
-/// `ipc_marequest_create()` in C.
+/// Records a msg-accepted request for the send right to `port` in `space`,
+/// naming `notify` as the port to tell.
 ///
 /// # Safety
 ///
@@ -294,7 +293,7 @@ pub(crate) unsafe fn create(
     Ok(marequest)
 }
 
-/// `ipc_marequest_cancel()` in C.
+/// Cancels the request for `name` in `space`.
 ///
 /// # Safety
 ///
@@ -318,7 +317,7 @@ pub(crate) unsafe fn cancel(space: IpcSpace, name: c_uint) {
     }
 }
 
-/// `ipc_marequest_rename()` in C.
+/// Moves the request for `old` in `space` to `new`.
 ///
 /// # Safety
 ///
@@ -351,7 +350,7 @@ pub(crate) unsafe fn rename(space: IpcSpace, old: c_uint, new: c_uint) {
     }
 }
 
-/// `ipc_marequest_destroy()` in C.
+/// Sends the msg-accepted notification of `marequest` and frees it.
 ///
 /// # Safety
 ///
@@ -409,7 +408,8 @@ pub(crate) unsafe fn destroy(marequest: *mut IpcMarequest) {
     unsafe { ipc_notify::msg_accepted(soright, name) };
 }
 
-/// `ipc_marequest_info()` in C.
+/// The bucket occupancy of the request table: fills up to `count` buckets of
+/// `info` and stores the bucket count in `maxp`.
 ///
 /// # Safety
 ///

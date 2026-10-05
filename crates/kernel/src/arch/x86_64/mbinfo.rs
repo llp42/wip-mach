@@ -3,7 +3,7 @@
 //   Copyright (c) 2024 Free Software Foundation, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! `/dev/mbinfo`: `mbinfo.c`'s raw multiboot information device.
+//! `/dev/mbinfo`: the raw multiboot information device.
 
 use crate::arch::x86_64::io_req::{DevT, IoReq};
 use crate::arch::x86_64::multiboot::MultibootRawInfo;
@@ -31,12 +31,12 @@ pub(crate) unsafe fn mbinfo_register_boot_data(mbi: *const MultibootRawInfo) {
     unsafe { *MB_INFO.0.get() = info };
 }
 
-/// `mbinforead()` in C.
+/// Copies the multiboot information into the read request `ior`.
 ///
 /// # Safety
 ///
-/// Called from the `/dev/mbinfo` device switch in `conf.c`; `ior` must be the
-/// request the device layer passed.
+/// Called from the `/dev/mbinfo` device switch; `ior` must be the request the
+/// device layer passed.
 pub(crate) unsafe fn mbinforead(_dev: DevT, ior: *mut IoReq) -> IoResult {
     // SAFETY: the device layer owns the request for this call.
     let ior = unsafe { &mut *ior };

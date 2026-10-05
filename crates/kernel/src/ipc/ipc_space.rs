@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The capability-space routines, which `ipc/ipc_space.c` used to define and
-//! `ipc/ipc_space.h` declares.
+//! The capability-space routines.
 
 use crate::ipc::ipc_entry;
 use crate::ipc::ipc_right;
@@ -21,22 +20,19 @@ use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-/// `MACH_PORT_NAME_NULL` of <mach/port.h>: the name no entry holds.
+/// The name no entry holds.
 const MACH_PORT_NAME_NULL: c_uint = 0;
 
-/// `ipc_space_cache` of `ipc/ipc_space.c`: the `struct ipc_space` slab cache.
+/// The slab cache of IPC space records.
 static mut IPC_SPACE_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `ipc_space_kernel` of `ipc/ipc_space.c`: the space holding the kernel's
-/// naked receive rights.
+/// The space holding the kernel's naked receive rights.
 static KERNEL_SPACE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-/// `ipc_space_reply` of `ipc/ipc_space.c`: the space holding the kernel's reply
-/// ports.
+/// The space holding the kernel's reply ports.
 static REPLY_SPACE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-/// `zero_entry` of `ipc/ipc_space.c`: the placeholder for the reserved zeroth
-/// entry.
+/// The placeholder for the reserved zeroth entry.
 static mut ZERO_ENTRY: IpcEntry = IpcEntry {
     name: 0,
     bits: 0,
@@ -45,7 +41,7 @@ static mut ZERO_ENTRY: IpcEntry = IpcEntry {
 };
 
 impl IpcSpace {
-    /// `is_write_lock()` of <`ipc/ipc_space.h`>.
+    /// Takes the space's write lock.
     ///
     /// # Safety
     ///
@@ -54,7 +50,7 @@ impl IpcSpace {
         unsafe { (*self.record()).lock.write() };
     }
 
-    /// `is_read_lock()` of <`ipc/ipc_space.h`>.
+    /// Takes the space's read lock.
     ///
     /// # Safety
     ///
@@ -63,8 +59,7 @@ impl IpcSpace {
         unsafe { (*self.record()).lock.read() };
     }
 
-    /// `is_write_unlock()` and `is_read_unlock()` of <`ipc/ipc_space.h`>, both
-    /// the C's `lock_done()`.
+    /// Releases the space's read or write lock.
     ///
     /// # Safety
     ///
@@ -82,8 +77,7 @@ impl IpcSpace {
         unsafe { (*self.record()).active != 0 }
     }
 
-    /// `ipc_reverse_lookup()` of <`ipc/ipc_space.h>`: the entry the reverse map
-    /// holds for `object`, or `None`.
+    /// The entry the reverse map holds for `object`, or `None`.
     ///
     /// # Safety
     ///
@@ -97,8 +91,7 @@ impl IpcSpace {
         Some(found.as_ptr())
     }
 
-    /// `ipc_reverse_insert()` of <`ipc/ipc_space.h>`: record `entry` as
-    /// `object`'s reverse mapping.
+    /// Records `entry` as `object`'s reverse mapping.
     ///
     /// # Safety
     ///
@@ -122,8 +115,7 @@ impl IpcSpace {
         }
     }
 
-    /// `ipc_reverse_remove()` of <`ipc/ipc_space.h>`: drop `object` from the
-    /// reverse map.
+    /// Drops `object` from the reverse map.
     ///
     /// # Safety
     ///
@@ -137,13 +129,12 @@ impl IpcSpace {
     }
 }
 
-/// The C `KEY()` macro of <`ipc/ipc_space.h>`: the reverse map's key for an
-/// object.
+/// The reverse map's key for `object`.
 fn reverse_key(object: *mut c_void) -> u64 {
     (object.addr().wrapping_sub(VM_MIN_KERNEL_ADDRESS) >> 3) as u64
 }
 
-/// `is_alloc()` of <`ipc/ipc_space.h`>.
+/// Allocates a space record from the cache.
 fn alloc() -> Option<IpcSpace> {
     // SAFETY: `ipc_bootstrap()` initialized the cache before any space could
     // exist.
@@ -153,7 +144,7 @@ fn alloc() -> Option<IpcSpace> {
     Some(unsafe { IpcSpace::from_raw(buf.as_ptr().cast()) })
 }
 
-/// `is_free()` of <`ipc/ipc_space.h`>.
+/// Returns `space` to the cache.
 ///
 /// # Safety
 ///
@@ -165,8 +156,7 @@ unsafe fn free(space: IpcSpace) {
     }
 }
 
-/// `ipc_space_reference_macro()` of <`ipc/ipc_space.h`> and the function
-/// `ipc_space_reference()` was.
+/// Takes a reference on `space`.
 ///
 /// # Safety
 ///
@@ -180,8 +170,7 @@ pub(crate) unsafe fn reference(space: IpcSpace) {
     }
 }
 
-/// `ipc_space_release_macro()` of <`ipc/ipc_space.h`> and the function
-/// `ipc_space_release()` was.
+/// Drops a reference on `space`, freeing it on the last one.
 ///
 /// # Safety
 ///
@@ -203,7 +192,7 @@ pub(crate) unsafe fn release(space: IpcSpace) {
     }
 }
 
-/// `ipc_space_create()` in C.
+/// Creates an empty space with one reference.
 pub(crate) fn create() -> Result<IpcSpace, Error> {
     let Some(space) = alloc() else {
         return Err(Error::ResourceShortage);
@@ -239,7 +228,7 @@ pub(crate) fn create() -> Result<IpcSpace, Error> {
     Ok(space)
 }
 
-/// `ipc_space_create_special()` in C.
+/// Creates a special space: one that holds the kernel's rights and no entries.
 pub(crate) fn create_special() -> Result<IpcSpace, Error> {
     let Some(space) = alloc() else {
         return Err(Error::ResourceShortage);
@@ -258,8 +247,7 @@ pub(crate) fn create_special() -> Result<IpcSpace, Error> {
     Ok(space)
 }
 
-/// The two `ipc_space_create_special()` calls of `ipc_bootstrap()`, whose
-/// results the C ignored.
+/// Creates the kernel space and the reply space at boot.
 pub(crate) fn create_specials() {
     if let Ok(space) = create_special() {
         KERNEL_SPACE.store(space.as_ptr(), Ordering::Relaxed);
@@ -284,7 +272,7 @@ pub(crate) fn reply() -> IpcSpace {
     unsafe { IpcSpace::from_raw(REPLY_SPACE.load(Ordering::Relaxed)) }
 }
 
-/// `ipc_space_destroy()` in C.
+/// Destroys every right in `space` and marks it inactive.
 ///
 /// # Safety
 ///
@@ -316,8 +304,8 @@ pub(crate) unsafe fn destroy(space: IpcSpace) {
                 continue;
             }
 
-            // The generation is zero in this configuration, so the C's
-            // `MACH_PORT_MAKEB()` is the entry's name.
+            // The generation is zero in this configuration, so the name is the
+            // entry's own.
             if (*entry).bits() & IE_BITS_TYPE_MASK != 0 {
                 ipc_right::clean((*entry).name(), entry);
             }

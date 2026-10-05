@@ -17,7 +17,7 @@ use crate::mig::code::kern_return;
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::{self, NonNull};
 
-/// `mach_port_names()` of `ipc/mach_port.c`.
+/// Reports the names in `task`'s space and the rights each holds.
 ///
 /// # Safety
 ///
@@ -53,7 +53,7 @@ pub unsafe extern "C" fn mach_port_names(
     }
 }
 
-/// `mach_port_type()` of `ipc/mach_port.c`.
+/// Reports the rights `name` holds in `task`'s space.
 ///
 /// # Safety
 ///
@@ -74,7 +74,7 @@ pub unsafe extern "C" fn mach_port_type(
     }
 }
 
-/// `mach_port_rename()` of `ipc/mach_port.c`.
+/// Renames `old_name` in `task`'s space to `new_name`.
 ///
 /// # Safety
 ///
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn mach_port_rename(
     })
 }
 
-/// `mach_port_allocate_name()` of `ipc/mach_port.c`.
+/// Allocates a `right` in `task`'s space under the chosen `name`.
 ///
 /// # Safety
 ///
@@ -106,7 +106,7 @@ pub unsafe extern "C" fn mach_port_allocate_name(
     })
 }
 
-/// `mach_port_allocate()` of `ipc/mach_port.c`.
+/// Allocates a `right` in `task`'s space, reporting its name.
 ///
 /// # Safety
 ///
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn mach_port_allocate(
     }
 }
 
-/// `mach_port_insert_right()` of `ipc/mach_port.c`.
+/// Inserts the right `poly` into `task`'s space under `name`.
 ///
 /// # Safety
 ///
@@ -146,7 +146,8 @@ pub unsafe extern "C" fn mach_port_insert_right(
     })
 }
 
-/// `mach_port_extract_right()` of `ipc/mach_port.c`.
+/// Extracts the right `name` holds from `task`'s space, as `msgt_name`
+/// transforms it.
 ///
 /// # Safety
 ///
@@ -175,7 +176,7 @@ pub unsafe extern "C" fn mach_port_extract_right(
     }
 }
 
-/// `mach_port_destroy()` of `ipc/mach_port.c`.
+/// Destroys every right `name` holds in `task`'s space.
 ///
 /// # Safety
 ///
@@ -188,7 +189,7 @@ pub unsafe extern "C" fn mach_port_destroy(
     kern_return(unsafe { mach_port::destroy(IpcSpace::new(task), name) })
 }
 
-/// `mach_port_deallocate()` of `ipc/mach_port.c`.
+/// Drops one user reference on `name` in `task`'s space.
 ///
 /// # Safety
 ///
@@ -201,7 +202,7 @@ pub unsafe extern "C" fn mach_port_deallocate(
     kern_return(unsafe { mach_port::deallocate(IpcSpace::new(task), name) })
 }
 
-/// `mach_port_get_refs()` of `ipc/mach_port.c`.
+/// Reports the user references on the `right` of `name` in `task`'s space.
 ///
 /// # Safety
 ///
@@ -223,7 +224,7 @@ pub unsafe extern "C" fn mach_port_get_refs(
     }
 }
 
-/// `mach_port_mod_refs()` of `ipc/mach_port.c`.
+/// Adds `delta` user references to the `right` of `name` in `task`'s space.
 ///
 /// # Safety
 ///
@@ -240,7 +241,7 @@ pub unsafe extern "C" fn mach_port_mod_refs(
     })
 }
 
-/// `mach_port_set_qlimit()` of `ipc/mach_port.c`.
+/// Sets the queue limit of the receive right `name`.
 ///
 /// # Safety
 ///
@@ -256,7 +257,7 @@ pub unsafe extern "C" fn mach_port_set_qlimit(
     })
 }
 
-/// `mach_port_set_mscount()` of `ipc/mach_port.c`.
+/// Sets the make-send count of the receive right `name`.
 ///
 /// # Safety
 ///
@@ -272,7 +273,7 @@ pub unsafe extern "C" fn mach_port_set_mscount(
     })
 }
 
-/// `mach_port_get_set_status()` of `ipc/mach_port.c`.
+/// Reports the members of the port set `name`.
 ///
 /// # Safety
 ///
@@ -302,7 +303,8 @@ pub unsafe extern "C" fn mach_port_get_set_status(
     }
 }
 
-/// `mach_port_move_member()` of `ipc/mach_port.c`.
+/// Moves the receive right `member` into the port set `after`, or out of any
+/// set when `after` is null.
 ///
 /// # Safety
 ///
@@ -318,7 +320,8 @@ pub unsafe extern "C" fn mach_port_move_member(
     })
 }
 
-/// `mach_port_request_notification()` of `ipc/mach_port.c`.
+/// Requests the notification `id` for `name`, sent to `notify`, reporting the
+/// previous request.
 ///
 /// # Safety
 ///
@@ -355,7 +358,7 @@ pub unsafe extern "C" fn mach_port_request_notification(
     }
 }
 
-/// `mach_port_get_receive_status()` of `ipc/mach_port.c`.
+/// Reports the status of the receive right `name`.
 ///
 /// # Safety
 ///
@@ -380,7 +383,7 @@ pub unsafe extern "C" fn mach_port_get_receive_status(
     }
 }
 
-/// `mach_port_set_seqno()` of `ipc/mach_port.c`.
+/// Sets the sequence number of the receive right `name`.
 ///
 /// # Safety
 ///
@@ -396,7 +399,7 @@ pub unsafe extern "C" fn mach_port_set_seqno(
     })
 }
 
-/// `mach_port_set_protected_payload()` of `ipc/mach_port.c`.
+/// Sets the protected payload of the receive right `name`.
 ///
 /// # Safety
 ///
@@ -412,7 +415,7 @@ pub unsafe extern "C" fn mach_port_set_protected_payload(
     })
 }
 
-/// `mach_port_clear_protected_payload()` of `ipc/mach_port.c`.
+/// Clears the protected payload of the receive right `name`.
 ///
 /// # Safety
 ///
@@ -427,12 +430,13 @@ pub unsafe extern "C" fn mach_port_clear_protected_payload(
     })
 }
 
-/// `mach_port_set_ktype()` of `ipc/mach_port.c`.
+/// Marks the receive right `name` as a kernel object of type `ktype`, for the
+/// privileged `host`.
 ///
 /// # Safety
 ///
-/// `host` must be `HOST_NULL` or a live host, and `task` must be null or a
-/// live `ipc_space`.
+/// `host` must be null or a live host, and `task` must be null or a live IPC
+/// space.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mach_port_set_ktype(
     host: *mut c_void,

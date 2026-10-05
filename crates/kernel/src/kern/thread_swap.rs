@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989,1988,1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The thread swapper, which `kern/thread_swap.c` used to define and
-//! `kern/thread_swap.h` declares.
+//! The thread swapper.
 
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
@@ -23,11 +22,10 @@ use core::ffi::{c_int, c_void};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 
-/// `swapper_lock_data` of `kern/thread_swap.c`: guards `swapin_queue`.
+/// Guards `SWAPIN_QUEUE`.
 static SWAPPER_LOCK: SimpleLock = SimpleLock::new();
 
-/// `swapin_queue` of `kern/thread_swap.c`: the threads waiting for a stack, and
-/// the event the swapin thread sleeps on.
+/// The threads waiting for a stack, and the event the swapin thread sleeps on.
 static SWAPIN_QUEUE: SyncCell<ThreadQueue> =
     SyncCell(UnsafeCell::new(ThreadQueue::new()));
 
@@ -47,7 +45,7 @@ fn swapin_event() -> *mut c_void {
     SWAPIN_QUEUE.0.get().cast()
 }
 
-/// `swapper_init()` in C.
+/// Initializes the swapper lock and queue.
 ///
 /// # Safety
 ///
@@ -57,7 +55,7 @@ pub(crate) unsafe fn swapper_init() {
     SWAPPER_LOCK.init();
 }
 
-/// `thread_swapin()` in C.
+/// Queues `thread`, which lost its stack, for the swapin thread.
 ///
 /// # Safety
 ///
@@ -89,8 +87,7 @@ pub(crate) unsafe fn thread_swapin(thread: *mut Thread) {
     }
 }
 
-/// `thread_doswapin()` of `kern/thread_swap.c`: give the thread a stack and
-/// make it runnable again.
+/// Gives the thread a stack and makes it runnable again.
 ///
 /// # Safety
 ///
@@ -114,7 +111,7 @@ pub(crate) unsafe fn doswapin(thread: *mut Thread) {
     }
 }
 
-/// `swapin_thread_continue()` of `kern/thread_swap.c`, which C kept private.
+/// The swapin thread's loop: gives each queued thread a stack.
 ///
 /// # Safety
 ///
@@ -165,7 +162,7 @@ unsafe extern "C" fn swapin_thread_continuation() {
     unsafe { swapin_thread_continue() }
 }
 
-/// `swapin_thread()` in C.
+/// Becomes the swapin thread.
 ///
 /// # Safety
 ///

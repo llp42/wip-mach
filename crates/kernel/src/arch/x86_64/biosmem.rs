@@ -3,9 +3,7 @@
 //   Copyright (c) 2010-2014 Richard Braun.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The bootstrap physical-memory map and allocator, which
-//! `i386/i386at/biosmem.c` used to define and `i386/i386at/biosmem.h`
-//! declares.
+//! The bootstrap physical-memory map and allocator.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
@@ -26,53 +24,53 @@ use core::mem::size_of;
 use core::ptr::with_exposed_provenance;
 use core::sync::atomic::Ordering;
 
-/// `BIOSMEM_MAX_BOOT_DATA` of `biosmem.c`.
+/// The most boot data ranges.
 const BIOSMEM_MAX_BOOT_DATA: usize = 64;
 
-/// `BIOSMEM_MAX_MAP_SIZE` of `biosmem.c`: resolving overlapping ranges can
-/// grow the map to twice this size.
+/// The most memory map entries; resolving overlapping ranges can grow the map
+/// to twice this size.
 const BIOSMEM_MAX_MAP_SIZE: usize = 128;
 
-/// `BIOSMEM_BASE` of <i386at/biosmem.h>: the end of the first 64 KiB, which
-/// the BIOS data and hardware workarounds reserve.
+/// The end of the first 64 KiB, which the BIOS data and hardware workarounds
+/// reserve.
 const BIOSMEM_BASE: VmOffset = 0x0001_0000;
 
-/// `BIOSMEM_END` of <i386at/biosmem.h>: the end of low memory.
+/// The end of low memory.
 const BIOSMEM_END: VmOffset = 0x0010_0000;
 
-/// `VM_PAGE_DMA_LIMIT` of <`i386/vm_param.h`>.
+/// The end of the DMA segment.
 pub(crate) const VM_PAGE_DMA_LIMIT: VmOffset = 0x0100_0000;
 
-/// `VM_PAGE_DMA32_LIMIT` of <`i386/vm_param.h`>.
+/// The end of the DMA32 segment.
 pub(crate) const VM_PAGE_DMA32_LIMIT: VmOffset = 0x1_0000_0000;
 
-/// `VM_PAGE_DIRECTMAP_LIMIT` of <`i386/vm_param.h>`: the physical memory the
-/// direct map covers, up to where the kernel map's room begins.
+/// The physical memory the direct map covers, up to where the kernel map's
+/// room begins.
 pub(crate) const VM_PAGE_DIRECTMAP_LIMIT: VmOffset =
     VM_MAX_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS - VM_KERNEL_MAP_SIZE + 1;
 
-/// `VM_PAGE_HIGHMEM_LIMIT` of <`i386/vm_param.h`>.
+/// The end of the highmem segment.
 pub(crate) const VM_PAGE_HIGHMEM_LIMIT: VmOffset = 0x0010_0000_0000_0000;
 
-/// `MAX_PHYS_END` of <`i386/vm_param.h>`: the largest tested memory size.
+/// The largest tested memory size.
 const MAX_PHYS_END: u64 = 27 * 1024 * 1024 * 1024;
 
-/// `biosmem_panic_inval_boot_data` of `biosmem.c`.
+/// The panic message of an invalid boot data range.
 const INVAL_BOOT_DATA: &str = "biosmem: invalid boot data";
-/// `biosmem_panic_too_many_boot_data` of `biosmem.c`.
+/// The panic message of a full boot data table.
 const TOO_MANY_BOOT_DATA: &str = "biosmem: too many boot data ranges";
-/// `biosmem_panic_too_big_msg` of `biosmem.c`.
+/// The panic message of a full memory map.
 const TOO_BIG_MSG: &str = "biosmem: too many memory map entries";
-/// `biosmem_panic_setup_msg` of `biosmem.c`.
+/// The panic message of an allocator that cannot be set up.
 const SETUP_MSG: &str = "biosmem: unable to set up the early memory allocator";
-/// `biosmem_panic_noseg_msg` of `biosmem.c`.
+/// The panic message of a map without a segment.
 const NOSEG_MSG: &str = "biosmem: unable to find any memory segment";
-/// `biosmem_panic_inval_msg` of `biosmem.c`.
+/// The panic message of an empty allocation.
 const INVAL_MSG: &str = "biosmem: attempt to allocate 0 page";
-/// `biosmem_panic_nomem_msg` of `biosmem.c`.
+/// The panic message of an exhausted allocator.
 const NOMEM_MSG: &str = "biosmem: unable to allocate memory";
 
-/// A `biosmem_map_entry.type` value, the C's `BIOSMEM_TYPE_*`.
+/// The type of a memory map entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 struct MemType(u32);
@@ -85,13 +83,12 @@ impl MemType {
     const UNUSABLE: Self = Self(5);
     const DISABLED: Self = Self(6);
 
-    /// `BIOSMEM_NEEDS_NARROW()` of `biosmem.c`: the types whose ranges the
-    /// C narrowed to page boundaries.
+    /// Whether ranges of this type are narrowed to page boundaries.
     const fn needs_narrow(self) -> bool {
         matches!(self, Self::AVAILABLE | Self::NVS | Self::DISABLED)
     }
 
-    /// `biosmem_type_desc()` of `biosmem.c`.
+    /// The type's name, for [`map_show`].
     const fn desc(self) -> &'static CStr {
         match self {
             Self::AVAILABLE => c"available",
@@ -104,7 +101,7 @@ impl MemType {
     }
 }
 
-/// `struct biosmem_boot_data` of `biosmem.c`: a reserved physical range.
+/// A reserved physical range.
 ///
 /// The bounds need not be page-aligned, since one page may hold more than
 /// one range.
@@ -115,7 +112,7 @@ struct BiosmemBootData {
     temporary: bool,
 }
 
-/// `struct biosmem_map_entry` of `biosmem.c`.
+/// One range of the memory map, with its type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BiosmemMapEntry {
     base_addr: u64,
@@ -123,8 +120,7 @@ struct BiosmemMapEntry {
     type_: MemType,
 }
 
-/// `struct biosmem_segment` of `biosmem.c`: one contiguous block of
-/// physical memory.
+/// One contiguous block of physical memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BiosmemSegment {
     start: VmOffset,
@@ -177,22 +173,22 @@ fn state() -> *mut State {
     STATE.0.get()
 }
 
-/// `panic()` of `biosmem.c`.
+/// Halts the kernel with `message`, naming `func`.
 fn die(func: &'static str, message: &'static str) -> ! {
     kpanic!(func, "{}", message)
 }
 
-/// `phystokv()` of <`i386/vm_param.h`>.
+/// The kernel virtual address of the physical address `pa`.
 const fn phystokv(pa: VmOffset) -> VmOffset {
     pa.wrapping_add(VM_MIN_KERNEL_ADDRESS)
 }
 
-/// `vm_page_round()` of <`vm/vm_page.h`>, on the `uint64_t` map addresses.
+/// Rounds the map address `addr` up to a page.
 const fn round_page64(addr: u64) -> u64 {
     addr.wrapping_add(PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1)
 }
 
-/// `vm_page_trunc()` of <`vm/vm_page.h`>, on the `uint64_t` map addresses.
+/// Truncates the map address `addr` down to a page.
 const fn trunc_page64(addr: u64) -> u64 {
     addr & !(PAGE_SIZE as u64 - 1)
 }
@@ -202,7 +198,8 @@ const fn hex64(value: VmOffset) -> u64 {
     value as u64
 }
 
-/// `biosmem_register_boot_data()` in C.
+/// Reserves `start..end` as boot data, which the allocator keeps away from;
+/// `temporary` data is released once the kernel is set up.
 ///
 /// # Safety
 ///
@@ -265,17 +262,15 @@ fn register_boot_data(
     s.nr_boot_data += 1;
 }
 
-/// `biosmem_unregister_boot_data()` in C.
+/// Removes the boot data range `start..end`.
 fn unregister_boot_data(s: &mut State, start: VmOffset, end: VmOffset) {
     if start >= end {
         die("biosmem_unregister_boot_data", INVAL_BOOT_DATA);
     }
 
     let nr = s.nr_boot_data as usize;
-    // The C loop condition tested `biosmem_nr_boot_data` rather than
-    // `i < biosmem_nr_boot_data`; the bound keeps the search inside the
-    // array, which is what the `i == biosmem_nr_boot_data` test below
-    // assumed.
+    // The bound keeps the search inside the array, which the not-found test
+    // below assumes.
     let mut i = 0;
     while i < nr {
         let data = s.boot_data[i];
@@ -293,7 +288,7 @@ fn unregister_boot_data(s: &mut State, start: VmOffset, end: VmOffset) {
     s.boot_data.copy_within(i + 1..nr, i);
 }
 
-/// `biosmem_map_adjust_alignment()` in C.
+/// Narrows the entry to page boundaries when its type needs it.
 const fn map_adjust_alignment(entry: &mut BiosmemMapEntry) {
     let end = entry.base_addr.wrapping_add(entry.length);
 
@@ -303,7 +298,7 @@ const fn map_adjust_alignment(entry: &mut BiosmemMapEntry) {
     }
 }
 
-/// `biosmem_map_build()` in C.
+/// Builds the map from the loader's memory map.
 const fn map_build(s: &mut State, mbi: &MultibootRawInfo) {
     let addr = phystokv(mbi.mmap_addr as VmOffset);
     let mb_end = addr.wrapping_add(mbi.mmap_length as VmOffset);
@@ -334,7 +329,7 @@ const fn map_build(s: &mut State, mbi: &MultibootRawInfo) {
     s.map_size = count as u32;
 }
 
-/// `biosmem_map_build_simple()` in C.
+/// Builds a two-entry map from the loader's lower and upper memory sizes.
 fn map_build_simple(s: &mut State, mbi: &MultibootRawInfo) {
     let mut entry = BiosmemMapEntry {
         base_addr: 0,
@@ -355,12 +350,12 @@ fn map_build_simple(s: &mut State, mbi: &MultibootRawInfo) {
     s.map_size = 2;
 }
 
-/// `biosmem_map_entry_is_invalid()` in C.
+/// Whether the entry's length wrapped.
 const fn map_entry_is_invalid(entry: &BiosmemMapEntry) -> bool {
     entry.base_addr.wrapping_add(entry.length) <= entry.base_addr
 }
 
-/// `biosmem_map_filter()` in C: drop the entries whose length wrapped.
+/// Drops the entries whose length wrapped.
 fn map_filter(s: &mut State) {
     let mut i = 0;
     while i < s.map_size as usize {
@@ -375,7 +370,7 @@ fn map_filter(s: &mut State) {
     }
 }
 
-/// `biosmem_map_sort()` in C: a simple insertion sort by base address.
+/// Sorts the map by base address, with a simple insertion sort.
 fn map_sort(s: &mut State) {
     let size = s.map_size as usize;
 
@@ -392,8 +387,8 @@ fn map_sort(s: &mut State) {
     }
 }
 
-/// `biosmem_map_adjust()` in C: resolve overlapping ranges, giving priority
-/// to the numerically higher types.
+/// Resolves overlapping ranges, giving priority to the numerically higher
+/// types.
 fn map_adjust(s: &mut State) {
     map_filter(s);
 
@@ -493,8 +488,8 @@ fn map_adjust(s: &mut State) {
     map_sort(s);
 }
 
-/// `biosmem_map_find_avail()` in C: the lowest available address and the
-/// highest following unusable one in a range.
+/// The lowest available address and the highest following unusable one in a
+/// range.
 fn map_find_avail(
     s: &State,
     phys_start: VmOffset,
@@ -538,7 +533,7 @@ fn map_find_avail(
     Some((start, end))
 }
 
-/// `biosmem_set_segment()` in C.
+/// Sets the bounds of the segment `seg_index`.
 fn set_segment(
     s: &mut State,
     seg_index: c_uint,
@@ -553,7 +548,7 @@ fn set_segment(
     segment.end = end;
 }
 
-/// `biosmem_segment_end()` in C.
+/// The end of the segment `seg_index`.
 fn segment_end(s: &State, seg_index: c_uint) -> VmOffset {
     s.segments.get(seg_index as usize).map_or_else(
         || die("biosmem_segment_end", "biosmem: invalid segment index"),
@@ -561,7 +556,7 @@ fn segment_end(s: &State, seg_index: c_uint) -> VmOffset {
     )
 }
 
-/// `biosmem_segment_size()` in C.
+/// The size of the segment `seg_index`.
 fn segment_size(s: &State, seg_index: c_uint) -> VmOffset {
     s.segments.get(seg_index as usize).map_or_else(
         || die("biosmem_segment_size", "biosmem: invalid segment index"),
@@ -569,8 +564,8 @@ fn segment_size(s: &State, seg_index: c_uint) -> VmOffset {
     )
 }
 
-/// `biosmem_find_avail_clip()` in C: clip `avail` around one boot-data
-/// range, returning `None` when the range leaves no space.
+/// Clips `avail` around one boot-data range, returning `None` when the range
+/// leaves no space.
 fn find_avail_clip(
     avail: (VmOffset, VmOffset),
     data_start: VmOffset,
@@ -598,7 +593,8 @@ fn find_avail_clip(
     }
 }
 
-/// `biosmem_find_avail()` in C.
+/// The page-aligned part of `start..end` clear of every boot data range, or
+/// `None` when nothing is left.
 fn find_avail(
     s: &State,
     start: VmOffset,
@@ -621,8 +617,7 @@ fn find_avail(
     Some(avail)
 }
 
-/// `biosmem_setup_allocator()` in C: the largest unused area in upper
-/// memory becomes the bootstrap heap.
+/// Makes the largest unused area in upper memory the bootstrap heap.
 fn setup_allocator(s: &mut State, mbi: &MultibootRawInfo) {
     let upper = mbi.mem_upper.wrapping_add(1024).wrapping_shl(PAGE_SHIFT);
     let mut end = (upper & !(PAGE_SIZE as u32 - 1)) as VmOffset;
@@ -660,7 +655,8 @@ fn setup_allocator(s: &mut State, mbi: &MultibootRawInfo) {
     register_boot_data(s, max_heap_start, max_heap_end, false);
 }
 
-/// `biosmem_bootstrap_common()` in C.
+/// Resolves the map, claims the AP boot page, and sets the DMA, DMA32,
+/// direct-map and highmem segments up.
 fn bootstrap_common(s: &mut State) {
     map_adjust(s);
 
@@ -703,7 +699,8 @@ fn bootstrap_common(s: &mut State) {
     set_segment(s, vm_page::SEG_HIGHMEM, phys_start, phys_end);
 }
 
-/// `biosmem_bootstrap()` in C.
+/// Builds the memory map and segments from the loader's information at `mbi`,
+/// and sets up the bootstrap allocator.
 ///
 /// # Safety
 ///
@@ -727,7 +724,8 @@ fn bootstrap(s: &mut State, mbi: &MultibootRawInfo) {
     setup_allocator(s, mbi);
 }
 
-/// `biosmem_bootalloc()` in C.
+/// Allocates `nr_pages` pages from the bootstrap heap, halting when it is
+/// exhausted.
 pub(crate) fn bootalloc(nr_pages: c_uint) -> VmOffset {
     // SAFETY: the caller runs between `biosmem_bootstrap()` and
     // `biosmem_setup()`, on one CPU.
@@ -760,8 +758,7 @@ pub(crate) fn bootalloc(nr_pages: c_uint) -> VmOffset {
     }
 }
 
-/// `biosmem_directmap_end()` in C: the end of the segment the direct map
-/// covers.
+/// The end of the segment the direct map covers.
 pub(crate) fn directmap_end() -> VmOffset {
     // SAFETY: the segment table is written once during bootstrap; the page
     // map's startup and the fault path only read it.
@@ -777,14 +774,14 @@ pub(crate) fn directmap_end() -> VmOffset {
     segment_end(s, vm_page::SEG_DMA)
 }
 
-/// `vm_page_seg_name()` of <`vm/vm_page.h`>, with the C's fatal default.
+/// The name of the segment `seg_index`, halting on an unknown one.
 fn seg_name(seg_index: c_uint) -> &'static CStr {
     vm_page::seg_name(seg_index).unwrap_or_else(|| {
         die("biosmem_load_segment", "biosmem: invalid segment index")
     })
 }
 
-/// `biosmem_map_show()` in C.
+/// Prints the memory map.
 fn map_show(s: &State) {
     kprint!("biosmem: physical memory map:\n");
 
@@ -798,7 +795,8 @@ fn map_show(s: &State) {
     }
 }
 
-/// `biosmem_load_segment()` in C.
+/// Loads the segment `seg_index` into the page allocator, clipped to
+/// `max_phys_end`.
 fn load_segment(s: &State, seg_index: c_uint, max_phys_end: VmOffset) {
     let segment = s.segments.get(seg_index as usize).map_or_else(
         || die("biosmem_load_segment", "biosmem: invalid segment index"),
@@ -851,7 +849,7 @@ fn load_segment(s: &State, seg_index: c_uint, max_phys_end: VmOffset) {
     }
 }
 
-/// `biosmem_setup()` in C.
+/// Prints the map and loads every segment into the page allocator.
 ///
 /// # Safety
 ///
@@ -870,7 +868,7 @@ pub(crate) unsafe fn biosmem_setup() {
     }
 }
 
-/// `biosmem_unregister_temporary_boot_data()` in C.
+/// Removes the temporary boot data ranges.
 fn unregister_temporary_boot_data(s: &mut State) {
     let mut i = 0;
     while i < s.nr_boot_data as usize {
@@ -886,7 +884,7 @@ fn unregister_temporary_boot_data(s: &mut State) {
     }
 }
 
-/// `biosmem_free_usable_range()` in C.
+/// Gives the pages of `start..end` to the page allocator.
 fn free_usable_range(start: VmOffset, end: VmOffset) {
     let mut start = start;
 
@@ -903,7 +901,7 @@ fn free_usable_range(start: VmOffset, end: VmOffset) {
     }
 }
 
-/// `biosmem_free_usable_entry()` in C.
+/// Gives the part of `start..end` clear of boot data to the page allocator.
 fn free_usable_entry(s: &State, start: VmOffset, end: VmOffset) {
     let mut start = start;
 
@@ -913,7 +911,8 @@ fn free_usable_entry(s: &State, start: VmOffset, end: VmOffset) {
     }
 }
 
-/// `biosmem_free_usable()` in C.
+/// Gives the available memory the segments did not load, and the temporary
+/// boot data, to the page allocator.
 ///
 /// # Safety
 ///
@@ -963,7 +962,7 @@ pub(crate) unsafe fn biosmem_free_usable() {
     }
 }
 
-/// `biosmem_addr_available()` in C.
+/// Whether `addr` lies in available memory of the map.
 pub(crate) fn addr_available(addr: VmOffset) -> bool {
     if addr < BIOSMEM_BASE {
         return false;

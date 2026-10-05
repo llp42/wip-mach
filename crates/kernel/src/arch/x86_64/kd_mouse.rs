@@ -5,7 +5,7 @@
 //   Copyright 1988, 1989 by Olivetti Advanced Technology Center, Inc.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The mouse driver, which `i386/i386at/kd_mouse.c` used to define.
+//! The mouse driver.
 
 use super::io_req::{
     D_NOWAIT, DEV_GET_SIZE, DEV_GET_SIZE_COUNT, DEV_GET_SIZE_DEVICE_SIZE,
@@ -29,10 +29,10 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// `interrupt_handler_fn` of <i386/ipl.h>.
+/// The signature of an interrupt handler.
 type InterruptHandler = unsafe extern "C" fn(c_int);
 
-/// `MOUSEBUFSIZE` in <`i386at/kd_mouse.h`>.
+/// The bytes of the largest mouse packet.
 const MOUSEBUFSIZE: usize = 5;
 
 /// Button directions: `MOUSE_DOWN` is the C's 0, and the direction a
@@ -41,7 +41,7 @@ const MOUSE_UP: u8 = 1;
 const MOUSE_DOWN: u8 = 0;
 const MOUSE_ALL_UP: u8 = 0x7;
 
-/// `IBM_MOUSE_IRQ` in <`i386at/kd_mouse.c`>.
+/// The interrupt line of the PS/2 mouse.
 const IBM_MOUSE_IRQ: c_int = 12;
 
 /// Mouse protocols, from the high bits of the minor number.
@@ -51,7 +51,7 @@ const IBM_MOUSE: c_int = 2;
 const LOGITECH_TRACKMAN: c_int = 4;
 const MICROSOFT_MOUSE7: c_int = 5;
 
-/// Event types of <device/input.h>.
+/// The mouse event types.
 const MOUSE_LEFT: KevType = 1;
 const MOUSE_MIDDLE: KevType = 2;
 const MOUSE_RIGHT: KevType = 3;
@@ -167,8 +167,7 @@ const unsafe fn read_queue(s: &mut State) -> Pin<&mut IoReqQueue> {
     unsafe { Pin::new_unchecked(&mut s.read_queue) }
 }
 
-/// `printf_once("mouse: queue full\n")` in C: prints the first time a full
-/// queue drops an event, then never again.
+/// Prints the first time a full queue drops an event, then never again.
 fn printf_once() {
     static PRINTED: AtomicBool = AtomicBool::new(false);
     if !PRINTED.swap(true, Ordering::Relaxed) {
@@ -191,17 +190,17 @@ fn enqueue(s: &mut State, ev: &KdEvent) {
     }
 }
 
-/// `mouse_moved()` in C.
+/// Queues a motion event.
 fn motion_event(s: &mut State, moved: MouseMotion) {
     enqueue(s, &KdEvent::motion(moved));
 }
 
-/// `mouse_button()` in C.
+/// Queues a button event.
 fn button_event(s: &mut State, which: KevType, direction: u8) {
     enqueue(s, &KdEvent::button(which, direction == MOUSE_UP));
 }
 
-/// `init_mouse_hw()` in C: program the serial port.
+/// Programs the serial port.
 fn init_mouse_hw(s: &State, unit: c_int, mode: u8) {
     let base_addr = com::base_addr(unit) as u16;
     Port::new(base_addr + RIE).write_u8(0);
@@ -213,11 +212,11 @@ fn init_mouse_hw(s: &State, unit: c_int, mode: u8) {
     Port::new(base_addr + RIE).write_u8(IERD | IELS);
 }
 
-/// `serial_mouse_open()` in C: take over the unit's interrupt vector.
+/// Takes over the unit's interrupt vector.
 fn serial_open(s: &mut State, dev: DevT) {
     let unit = c_int::from(dev & 7);
     let mouse_pic = com::irq(unit);
-    // SAFETY: `splhi()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `splhigh` has no precondition.
     let sp = unsafe { spl::splhi() };
     s.oldvect = irq::handler(mouse_pic);
     irq::set_handler(mouse_pic, Some(mouseintr));
@@ -227,9 +226,9 @@ fn serial_open(s: &mut State, dev: DevT) {
     unsafe { spl::splx(sp) };
 }
 
-/// `kd_mouse_open()` in C: route the IRQ to the keyboard driver.
+/// Routes the IRQ to the keyboard driver.
 fn kd_open(s: &mut State, mouse_pic: c_int) {
-    // SAFETY: `splhi()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `splhigh` has no precondition.
     let sp = unsafe { spl::splhi() };
     s.oldvect = irq::handler(mouse_pic);
     irq::set_handler(
@@ -241,9 +240,9 @@ fn kd_open(s: &mut State, mouse_pic: c_int) {
     unsafe { spl::splx(sp) };
 }
 
-/// `serial_mouse_close()` in C.
+/// Gives back the unit's interrupt vector.
 fn serial_close(s: &State, dev: DevT) {
-    // SAFETY: `splhi()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `splhigh` has no precondition.
     let sp = unsafe { spl::splhi() };
     let unit = c_int::from(dev & 7);
     let mouse_pic = com::irq(unit);
@@ -256,9 +255,9 @@ fn serial_close(s: &State, dev: DevT) {
     unsafe { spl::splx(sp) };
 }
 
-/// `kd_mouse_close()` in C.
+/// Routes the IRQ back away from the keyboard driver.
 fn kd_close(s: &State, mouse_pic: c_int) {
-    // SAFETY: `splhi()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `splhigh` has no precondition.
     let sp = unsafe { spl::splhi() };
     ioapic::mask(mouse_pic);
     irq::set_handler(mouse_pic, s.oldvect);
@@ -266,7 +265,7 @@ fn kd_close(s: &State, mouse_pic: c_int) {
     unsafe { spl::splx(sp) };
 }
 
-/// `kd_mouse_write()` in C: send a byte to the PS/2 mouse.
+/// Sends a byte to the PS/2 mouse.
 fn write_char(ch: u8) {
     while Port::new(K_STATUS).read_u8() & K_IBUF_FUL != 0 {
         core::hint::spin_loop();
@@ -278,7 +277,7 @@ fn write_char(ch: u8) {
     Port::new(K_RDWR).write_u8(ch);
 }
 
-/// `kd_mouse_read()` in C: wait for a byte the interrupt path delivers.
+/// Waits for a byte the interrupt path delivers.
 fn read_char(s: &mut State) -> c_int {
     if s.mouse_char_index >= s.mousebufsize {
         return -1;
@@ -299,15 +298,15 @@ fn read_char(s: &mut State) -> c_int {
     c_int::from(ch)
 }
 
-/// `kd_mouse_read_reset()` in C.
+/// Resets the byte the interrupt path delivers.
 const fn read_reset(s: &mut State) {
     s.mousebufindex = 0;
     s.mouse_char_index = 0;
 }
 
-/// `ibm_ps2_mouse_open()` in C.
+/// Enables the PS/2 mouse.
 fn ps2_open(s: &mut State, _dev: DevT) {
-    // SAFETY: `spltty()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `spltty` has no precondition.
     let sp = unsafe { spl::spltty() };
     s.lastbuttons = 0;
     s.mouse_char_cmd = true;
@@ -342,9 +341,9 @@ fn ps2_open(s: &mut State, _dev: DevT) {
     unsafe { spl::splx(sp) };
 }
 
-/// `ibm_ps2_mouse_close()` in C.
+/// Disables the PS/2 mouse.
 fn ps2_close(s: &mut State, _dev: DevT) {
-    // SAFETY: `spltty()` is the asm entry of <i386/spl.h>.
+    // SAFETY: raising to `spltty` has no precondition.
     let sp = unsafe { spl::spltty() };
     s.mouse_char_cmd = true;
     read_reset(s);
@@ -359,7 +358,7 @@ fn ps2_close(s: &mut State, _dev: DevT) {
     unsafe { spl::splx(sp) };
 }
 
-/// `mouse_packet_mouse_system_mouse()` in C.
+/// Decodes a Mouse Systems packet.
 fn packet_mouse_system(s: &mut State, buf: [u8; MOUSEBUFSIZE]) {
     let buttons = buf[0] & 0x7;
     let buttonchanges = buttons ^ s.lastbuttons;
@@ -386,7 +385,7 @@ fn packet_mouse_system(s: &mut State, buf: [u8; MOUSEBUFSIZE]) {
     }
 }
 
-/// `mouse_packet_microsoft_mouse()` in C.
+/// Decodes a Microsoft packet.
 fn packet_microsoft(s: &mut State, buf: [u8; MOUSEBUFSIZE]) {
     let mut buttons = (buf[0] & 0x30) >> 4;
     buttons |= s.middlegitech as u8;
@@ -436,7 +435,7 @@ fn packet_microsoft(s: &mut State, buf: [u8; MOUSEBUFSIZE]) {
     }
 }
 
-/// `mouse_packet_ibm_ps2_mouse()` in C.
+/// Decodes a PS/2 packet.
 fn packet_ibm_ps2(s: &mut State, buf: [u8; MOUSEBUFSIZE]) {
     let buttons = buf[0] & 0x7;
     let buttonchanges = buttons ^ s.lastbuttons;
@@ -478,8 +477,7 @@ fn packet_ibm_ps2(s: &mut State, buf: [u8; MOUSEBUFSIZE]) {
     }
 }
 
-/// `mouse_handle_byte()` in C: accumulate bytes until a packet is complete,
-/// then decode it.
+/// Accumulates bytes until a packet is complete, then decodes it.
 fn handle_byte(s: &mut State, ch: u8) {
     if s.show_mouse_byte != 0 {
         kprint!("{:x}({}) ", c_int::from(ch), char::from(ch));
@@ -550,12 +548,12 @@ fn handle_byte(s: &mut State, ch: u8) {
     }
 }
 
-/// `mouseopen()` in C.
+/// Opens the mouse device for the protocol its minor number names.
 ///
 /// # Safety
 ///
 /// The device layer calls this with a valid, open request; everything else
-/// runs at `SPLKD`.
+/// runs at `spltty`.
 pub(crate) unsafe fn mouseopen(
     dev: DevT,
     _flags: c_int,
@@ -606,7 +604,7 @@ pub(crate) unsafe fn mouseopen(
     Ok(DeviceSuccess::Success)
 }
 
-/// `mouseclose()` in C.
+/// Closes the mouse device.
 ///
 /// # Safety
 ///
@@ -632,12 +630,12 @@ pub(crate) unsafe fn mouseclose(dev: DevT, _flags: c_int) {
     set_mouse_in_use(0);
 }
 
-/// `mouseread()` in C.
+/// Reads queued mouse events, or queues the request until one arrives.
 ///
 /// # Safety
 ///
 /// The device layer calls this with a valid, read-only request whose buffer
-/// `device_read_alloc()` may allocate; everything else runs at `SPLKD`.
+/// `device_read_alloc()` may allocate; everything else runs at `spltty`.
 pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> IoResult {
     let wanted = unsafe { (*ior).count() };
     if wanted % size_of::<KdEvent>() as c_long != 0 {
@@ -668,7 +666,7 @@ pub(crate) unsafe fn mouseread(_dev: DevT, ior: *mut IoReq) -> IoResult {
     Ok(DeviceSuccess::Success)
 }
 
-/// `mouse_read_done()` in C, as a callback value.
+/// Completes a queued read once events arrive.
 ///
 /// # Safety
 ///
@@ -693,7 +691,7 @@ unsafe fn mouse_read_done(ior: *mut IoReq) -> bool {
     true
 }
 
-/// `mousegetstat()` in C.
+/// Reports a status flavor of the mouse device.
 ///
 /// # Safety
 ///
@@ -718,7 +716,7 @@ pub(crate) unsafe fn mousegetstat(
     }
 }
 
-/// `mouseintr()` in C, as a callback value.
+/// The serial mouse's interrupt handler.
 unsafe extern "C" fn mouseintr(unit: c_int) {
     let base_addr = com::base_addr(unit) as u16;
     let id = Port::new(base_addr + RID).read_u8();
@@ -735,17 +733,18 @@ unsafe extern "C" fn mouseintr(unit: c_int) {
     }
 }
 
-/// `mouse_handle_byte()` in C; called at `SPLKD` from the kd interrupt path.
+/// Feeds a PS/2 byte to the packet decoder; called at `spltty` from the kd
+/// interrupt path.
 pub(crate) fn mouse_handle_byte(ch: u8) {
     handle_byte(state(), ch);
 }
 
-/// `mouse_moved()` in C.
+/// Queues a motion event.
 pub(crate) fn mouse_moved(where_: MouseMotion) {
     motion_event(state(), where_);
 }
 
-/// `mouse_button()` in C.
+/// Queues a button event.
 pub(crate) fn mouse_button(which: KevType, direction: u8) {
     button_event(state(), which, direction);
 }

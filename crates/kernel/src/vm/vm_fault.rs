@@ -5,8 +5,7 @@
 //   the Computer Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The page-fault module, which `vm/vm_fault.c` used to define and
-//! `vm/vm_fault.h` declared:
+//! The page-fault module:
 //!
 //! finding the resident page for an object/offset, handling a map fault and
 //! its continuation, wiring a map entry, unwiring it, cleaning up an
@@ -46,8 +45,7 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::mem::{align_of, size_of};
 use core::ptr::{self, NonNull, addr_of_mut};
 
-/// `VM_PAGE_HIGHMEM` of <`vm/vm_page.h>`: the page may come from high
-/// physical memory.
+/// The allocation flag that lets the page come from high physical memory.
 const VM_PAGE_HIGHMEM: c_uint = 0x08;
 
 /// Why [`fault_page`] produced no page.
@@ -65,8 +63,7 @@ pub(crate) enum FaultError {
     MemoryError,
 }
 
-/// `vm_fault_state_t` of `vm/vm_fault.c`: the state [`fault`] saves on the
-/// current thread for a continuation.
+/// The state [`fault`] saves on the current thread for a continuation.
 #[repr(C)]
 #[allow(missing_docs)]
 struct VmFaultState {
@@ -113,24 +110,21 @@ const _: () = {
     assert!(core::mem::offset_of!(VmFaultState, vmfp_access) == 88);
 };
 
-/// `vm_object_absent_max` of `vm/vm_fault.c`: the outstanding page-request
-/// count past which the fault waits for the object's absent count to drop.
+/// The outstanding page-request count past which the fault waits for the
+/// object's absent count to drop.
 static VM_OBJECT_ABSENT_MAX: c_int = 50;
 
-/// `vm_fault_dirty_handling` of `vm/vm_fault.c`: whether a write fault marks
-/// the page dirty.
+/// Whether a write fault marks the page dirty.
 static VM_FAULT_DIRTY_HANDLING: c_int = 0;
-/// `vm_fault_interruptible` of `vm/vm_fault.c`: whether a fault may be
-/// interrupted.
+/// Whether a fault may be interrupted.
 static VM_FAULT_INTERRUPTIBLE: c_int = 1;
-/// `software_reference_bits` of `vm/vm_fault.c`: whether the hardware
-/// reference bits are emulated.
+/// Whether the hardware reference bits are emulated.
 static SOFTWARE_REFERENCE_BITS: c_int = 1;
 
-/// `vm_fault_state_cache` of `vm/vm_fault.c`: the state record's slab cache.
+/// The slab cache of fault state records.
 static mut VM_FAULT_STATE_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `kmem_cache_alloc(&vm_fault_state_cache)` of the C.
+/// Allocates a fault state record, or `None` when the cache is out of memory.
 fn cache_alloc() -> Option<NonNull<VmFaultState>> {
     // SAFETY: the caller runs after `init_module()`, so the cache is live,
     // and the cache's lock serializes the call.
@@ -138,7 +132,7 @@ fn cache_alloc() -> Option<NonNull<VmFaultState>> {
     Some(buf.cast::<VmFaultState>())
 }
 
-/// `kmem_cache_free(&vm_fault_state_cache, state)` of the C.
+/// Returns `state` to the cache.
 ///
 /// # Safety
 ///
@@ -148,7 +142,7 @@ unsafe fn cache_free(state: NonNull<VmFaultState>) {
     unsafe { (*addr_of_mut!(VM_FAULT_STATE_CACHE)).free(state.cast::<u8>()) };
 }
 
-/// `vm_fault_init()` of `vm/vm_fault.c`: initialize the state cache.
+/// Initializes the state cache.
 pub(crate) fn init_module() {
     // SAFETY: the call runs once in the bootstrap sequence, after the slab
     // package is up and before any fault state is allocated.
@@ -188,12 +182,11 @@ impl Fault {
     }
 }
 
-/// The `vm_fault_state_t` [`fault`] allocated on the current thread for a
-/// continuation.
+/// The fault state [`fault`] saved on the current thread for a continuation.
 ///
 /// # Safety
 ///
-/// The current thread's `ith_other` must hold the state [`fault`] saved
+/// The current thread's saved `other` slot must hold the state [`fault`] saved
 /// before calling with a continuation.
 unsafe fn fault_state() -> *mut VmFaultState {
     unsafe { (*per_cpu::thread()).saved.other.cast::<VmFaultState>() }
@@ -214,8 +207,8 @@ unsafe fn after_block_and_backoff() -> FaultError {
     }
 }
 
-/// The `after_thread_block` code of the C: take the object lock back and
-/// report a failed wait, or `None` to continue the search.
+/// Takes the object lock back after a wait and reports a failed wait, or
+/// `None` to continue the search.
 ///
 /// # Safety
 ///
@@ -252,7 +245,7 @@ unsafe fn after_wait(
 ///
 /// `object` must be live and locked with its paging reference held, and
 /// `first_m` the busy top page the search left.  With a continuation, the
-/// current thread's `ith_other` must hold the state `vm_fault()` saved.
+/// current thread's saved `other` slot must hold the state [`fault`] saved.
 unsafe fn block_and_backoff(
     object: *mut VmObject,
     first_m: *mut VmPage,
@@ -282,7 +275,8 @@ unsafe fn block_and_backoff(
     Fault::error(unsafe { after_block_and_backoff() }, protection)
 }
 
-/// `RELEASE_PAGE()` of the C `vm_fault_page()`.
+/// Releases the busy page `m` and puts it back on the active queue when it is
+/// on no queue.
 ///
 /// # Safety
 ///
@@ -299,7 +293,7 @@ unsafe fn release_page(m: *mut VmPage) {
     }
 }
 
-/// `vm_fault_wire()` in C: wire down every page of `entry` in `map`.
+/// Wires down every page of `entry` in `map`.
 ///
 /// # Safety
 ///
@@ -326,8 +320,8 @@ pub(crate) unsafe fn wire(map: &VmMap, entry: NonNull<VmMapEntry>) {
     }
 }
 
-/// `vm_fault_wire_fast()` of `vm/vm_fault.c`: whether the page was resident
-/// and usable, so the fast path could wire it without a fault.
+/// Whether the page was resident and usable, so the fast path could wire it
+/// without a fault.
 ///
 /// # Safety
 ///
@@ -396,7 +390,7 @@ pub(crate) unsafe fn wire_fast(
     }
 
     // SAFETY: the object is live and locked; the page is live and busy, as
-    // the C's `RELEASE_PAGE` assumes.
+    // `release_page` assumes.
     if !unsafe { (*object).copy.is_null() }
         && (prot & VmProt::WRITE) != VmProt::NONE
     {
@@ -435,8 +429,8 @@ pub(crate) unsafe fn wire_fast(
     true
 }
 
-/// The `GIVE_UP` path of [`wire_fast`]: drop the object's paging reference
-/// and lock, then the object reference.
+/// Gives up the fast path for [`wire_fast`]: drops the object's paging
+/// reference and lock, then the object reference.
 ///
 /// # Safety
 ///
@@ -451,7 +445,8 @@ unsafe fn give_up(object: *mut VmObject) -> bool {
     false
 }
 
-/// `vm_fault_cleanup()` of `vm/vm_fault.c`.
+/// Drops the paging reference and lock of `object`, then frees the busy top
+/// page and its own object's paging reference.
 ///
 /// # Safety
 ///
@@ -1410,17 +1405,16 @@ impl FaultState {
     }
 }
 
-/// `vm_fault_page()` of `vm/vm_fault.c`: find the resident page for the
-/// object/offset pair, following the shadow chain and requesting the data
-/// from the pager when it is absent.
+/// Finds the resident page for the object/offset pair, following the shadow
+/// chain and requesting the data from the pager when it is absent.
 ///
 /// # Safety
 ///
 /// `first_object` must be live, locked and referenced and must donate one
 /// paging reference; the call consumes the lock and the reference.  When
-/// `resume` is set, the current thread's `ith_other` must hold the state
-/// [`fault`] saved, and `continuation` must be the continuation that state
-/// names.
+/// `resume` is set, the current thread's saved `other` slot must hold the
+/// state [`fault`] saved, and `continuation` must be the continuation that
+/// state names.
 #[expect(clippy::too_many_arguments)]
 pub(crate) unsafe fn fault_page(
     first_object: *mut VmObject,
@@ -1549,13 +1543,13 @@ pub(crate) unsafe fn fault_page(
     unsafe { state.finish() }
 }
 
-/// `vm_fault_continue()` of `vm/vm_fault.c`: the continuation the fault
-/// computation resumes through after its stack may have been discarded.
+/// The continuation the fault computation resumes through after its stack may
+/// have been discarded.
 ///
 /// # Safety
 ///
-/// The scheduling code calls this only with the current thread's `ith_other`
-/// holding the state [`fault`] saved.
+/// The scheduling code calls this only with the current thread's saved `other`
+/// slot holding the state [`fault`] saved.
 unsafe extern "C" fn vm_fault_continue() {
     let state = unsafe { fault_state() };
     // SAFETY: the state is live until `fault` frees it at its end.
@@ -1966,14 +1960,14 @@ unsafe fn fault_success(
     SuccessStep::Break(Ok(()))
 }
 
-/// `vm_fault()` of `vm/vm_fault.c`: handle a page fault, including the
-/// pseudo-faults that change a mapping's wiring.
+/// Handles a page fault, including the pseudo-faults that change a mapping's
+/// wiring.
 ///
 /// # Safety
 ///
 /// `map` must be a live map covering `vaddr`.  With a continuation the call
-/// does not return to its caller: it invokes the continuation at its end,
-/// and with `resume` the current thread's `ith_other` must hold the state
+/// does not return to its caller: it invokes the continuation at its end, and
+/// with `resume` the current thread's saved `other` slot must hold the state
 /// [`vm_fault_continue`] saved.
 ///
 /// # Panics
@@ -2044,7 +2038,7 @@ pub(crate) unsafe fn fault(
     result
 }
 
-/// `vm_fault_unwire()` of `vm/vm_fault.c`.
+/// Unwires every page of `entry` in `map`.
 ///
 /// # Safety
 ///
@@ -2235,8 +2229,8 @@ unsafe fn copy_dest(
     Ok((page, top))
 }
 
-/// `vm_fault_copy()` of `vm/vm_fault.c`: copy pages from `src_object` into
-/// `dst_object`, advancing through the destination map's `dst_version`.
+/// Copies pages from `src_object` into `dst_object`, advancing through the
+/// destination map's `dst_version`.
 ///
 /// # Safety
 ///
@@ -2245,8 +2239,8 @@ unsafe fn copy_dest(
 ///
 /// # Panics
 ///
-/// Halts through the kernel panic path when `vm_fault_page()` cannot produce
-/// the page the C asserted.
+/// Halts through the kernel panic path when [`fault_page`] cannot produce the
+/// page.
 #[expect(clippy::too_many_arguments)]
 pub(crate) unsafe fn copy(
     src_object: Option<NonNull<VmObject>>,
@@ -2367,8 +2361,8 @@ pub(crate) unsafe fn copy(
     Ok(())
 }
 
-/// `vm_fault_copy_cleanup()` of `vm/vm_fault.c`: release the busy page a
-/// [`copy`] fault returned, then its object through [`cleanup`].
+/// Releases the busy page a [`copy`] fault returned, then its object through
+/// [`cleanup`].
 ///
 /// # Safety
 ///

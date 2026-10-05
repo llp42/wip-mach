@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kernel-message routines, which `ipc/ipc_kmsg.c` used to define and
-//! `ipc/ipc_kmsg.h` declares.
+//! The kernel-message routines.
 
 use crate::arch::vm_param::PAGE_SIZE;
 use crate::arch::x86_64::per_cpu::{self, cpu_id};
@@ -38,20 +37,17 @@ use core::mem::{size_of, size_of_val};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::sync::atomic::Ordering;
 
-/// `IKM_SIZE_NETWORK` of <`ipc/ipc_kmsg.h>`: the size marking a message the
-/// network code owns.
+/// The size marking a message the network code owns.
 const IKM_SIZE_NETWORK: usize = usize::MAX;
-/// `IKM_OVERHEAD` of <`ipc/ipc_kmsg.h>`: the allocation bytes before the
-/// message header.
+/// The allocation bytes before the message header.
 pub(crate) const IKM_OVERHEAD: usize =
     size_of::<IpcKmsg>() - size_of::<MachMsgHeader>();
-/// `IKM_SAVED_MSG_SIZE` of <`ipc/ipc_kmsg.h>`: the body of a cached message.
+/// The body size of a cached message.
 const IKM_SAVED_MSG_SIZE: usize = PAGE_SIZE - IKM_OVERHEAD;
-/// `IKM_EXPAND_FACTOR` of <`ipc/ipc_kmsg.h>`: how much a body can grow when
-/// port names widen into kernel ports.
+/// How much a body can grow when port names widen into kernel ports.
 const IKM_EXPAND_FACTOR: c_uint = size_of::<usize>().div_ceil(4) as c_uint;
 
-/// `ikm_plus_overhead()` of <`ipc/ipc_kmsg.h`>.
+/// `size` plus the allocation bytes before the message header.
 pub(crate) const fn ikm_plus_overhead(size: usize) -> usize {
     size.wrapping_add(IKM_OVERHEAD)
 }
@@ -61,127 +57,123 @@ const _: () = assert!(size_of::<usize>() >= size_of::<c_uint>());
 /// `sizeof(mach_msg_user_header_t)`: the user and kernel headers have the
 /// same size.
 const MACH_MSG_HEADER_SIZE: usize = size_of::<MachMsgHeader>();
-/// `MACH_MSG_USER_ALIGNMENT` of <mach/message.h> without `USER32`.
+/// The alignment of a user message: one word, as user tasks are 64-bit.
 const MACH_MSG_USER_ALIGNMENT: usize = size_of::<usize>();
 
-/// `MACH_MSG_TYPE_MOVE_RECEIVE` of <mach/message.h>: the sender held receive
-/// rights.
+/// The receive-right disposition: the sender held receive rights.
 const MACH_MSG_TYPE_PORT_RECEIVE: c_uint = 16;
 /// `MACH_MSG_TYPE_MOVE_SEND`, the wire alias `MACH_MSG_TYPE_PORT_SEND`.
 const MACH_MSG_TYPE_PORT_SEND: c_uint = 17;
 /// `MACH_MSG_TYPE_PORT_SEND_ONCE`, the wire alias
 /// `MACH_MSG_TYPE_PORT_SEND_ONCE`.
 const MACH_MSG_TYPE_PORT_SEND_ONCE: c_uint = 18;
-/// `MACH_MSG_TYPE_COPY_SEND` of <mach/message.h>: a copy of a send right.
+/// The disposition that copies a send right.
 const MACH_MSG_TYPE_COPY_SEND: c_uint = 19;
-/// `MACH_MSG_TYPE_MAKE_SEND` of <mach/message.h>: a new send right.
+/// The disposition that makes a new send right.
 const MACH_MSG_TYPE_MAKE_SEND: c_uint = 20;
-/// `MACH_MSG_TYPE_MAKE_SEND_ONCE` of <mach/message.h>: a new send-once
-/// right.
+/// The disposition that makes a new send-once right.
 const MACH_MSG_TYPE_MAKE_SEND_ONCE: c_uint = 21;
-/// `MACH_MSG_TYPE_PROTECTED_PAYLOAD` of <mach/message.h>.
+/// The type of a protected payload in place of a reply port name.
 const MACH_MSG_TYPE_PROTECTED_PAYLOAD: c_uint = 23;
 
-/// `MACH_MSGH_BITS_REMOTE_MASK` of <mach/message.h>.
+/// The remote-disposition bits of a message header.
 const MACH_MSGH_BITS_REMOTE_MASK: u32 = 0x0000_00ff;
-/// `MACH_MSGH_BITS_LOCAL_MASK` of <mach/message.h>.
+/// The local-disposition bits of a message header.
 const MACH_MSGH_BITS_LOCAL_MASK: u32 = 0x0000_ff00;
-/// `MACH_MSGH_BITS_COMPLEX` of <mach/message.h>.
+/// The header bit of a message that carries rights or out-of-line memory.
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
-/// `MACH_MSGH_BITS_CIRCULAR` of <mach/message.h>: internal use only.
+/// The header bit of a circular message, internal to the kernel.
 const MACH_MSGH_BITS_CIRCULAR: u32 = 0x4000_0000;
-/// `MACH_MSGH_BITS_PORTS_MASK` of <mach/message.h>.
+/// The remote and local disposition bits together.
 const MACH_MSGH_BITS_PORTS_MASK: u32 =
     MACH_MSGH_BITS_REMOTE_MASK | MACH_MSGH_BITS_LOCAL_MASK;
 
-/// `MACH_PORT_TYPE_SEND` of <mach/port.h>.
+/// The type bit of a send right.
 const MACH_PORT_TYPE_SEND: c_uint = 1 << 16;
-/// `MACH_PORT_TYPE_RECEIVE` of <mach/port.h>.
+/// The type bit of a receive right.
 const MACH_PORT_TYPE_RECEIVE: c_uint = 1 << 17;
-/// `MACH_PORT_TYPE_SEND_ONCE` of <mach/port.h>.
+/// The type bit of a send-once right.
 const MACH_PORT_TYPE_SEND_ONCE: c_uint = 1 << 18;
-/// `MACH_PORT_UREFS_MAX` of <ipc/port.h>.
+/// The most user references an entry may hold.
 const MACH_PORT_UREFS_MAX: u32 = (1 << 16) - 1;
-/// `IE_BITS_UREFS_MASK` of <`ipc/ipc_entry.h`>.
+/// The user-reference count bits of an entry.
 const IE_BITS_UREFS_MASK: u32 = 0x0000_ffff;
-/// `IE_BITS_GEN_ONE` of <`ipc/ipc_entry.h>`: one generation step; zero in this
-/// configuration.
+/// One generation step; zero in this configuration.
 const IE_BITS_GEN_ONE: u32 = 0;
-/// `MACH_PORT_NAME_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NAME_NULL: c_uint = 0;
-/// `MACH_PORT_NAME_DEAD` of <mach/port.h>.
+/// The dead port name.
 const MACH_PORT_NAME_DEAD: c_uint = c_uint::MAX;
-/// `IKOT_PAGING_REQUEST` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a pager request port.
 const IKOT_PAGING_REQUEST: c_uint = 9;
-/// `IKOT_DEVICE` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a device port.
 const IKOT_DEVICE: c_uint = 10;
-/// `IKOT_USER_DEVICE` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a user device port.
 const IKOT_USER_DEVICE: c_uint = 28;
-/// `IO_DEAD` of <`ipc/ipc_object.h>`: the one non-null pointer `IO_VALID()`
-/// rejects.
+/// The dead object value: the one non-null pointer [`io_valid`] rejects.
 const IO_DEAD: *mut c_void = usize::MAX as *mut c_void;
 
-/// `PORT_T_SIZE_IN_BITS` of <`ipc/ipc_machdep.h`>.
+/// The size of a port in a message body, in bits.
 const PORT_T_SIZE_IN_BITS: c_uint = usize::BITS;
-/// `PORT_NAME_T_SIZE_IN_BITS` of <`ipc/ipc_machdep.h`>.
+/// The size of a port name in a message body, in bits.
 const PORT_NAME_T_SIZE_IN_BITS: c_uint = c_uint::BITS;
 
-/// `mach_msg_kernel_align()` of <mach/message.h>.
+/// Rounds `x` up to the kernel message alignment.
 const fn kernel_align(x: usize) -> usize {
     x.wrapping_add(size_of::<usize>() - 1) & !(size_of::<usize>() - 1)
 }
 
-/// `mach_msg_kernel_is_misaligned()` of <mach/message.h>.
+/// Whether `x` is not a multiple of the kernel message alignment.
 const fn kernel_is_misaligned(x: usize) -> bool {
     x & (size_of::<usize>() - 1) != 0
 }
 
-/// `mach_msg_user_is_misaligned()` of <mach/message.h>.
+/// Whether `x` is not a multiple of the user message alignment.
 const fn user_is_misaligned(x: usize) -> bool {
     x & (MACH_MSG_USER_ALIGNMENT - 1) != 0
 }
 
-/// `MACH_MSGH_BITS()` of <mach/message.h>.
+/// The header bits of a message with the `remote` and `local` dispositions.
 const fn mach_msg_bits(remote: u32, local: u32) -> u32 {
     remote | (local << 8)
 }
 
-/// `MACH_MSGH_BITS_REMOTE()` of <mach/message.h>.
+/// The remote disposition in `bits`.
 const fn mach_msg_bits_remote(bits: u32) -> u32 {
     bits & MACH_MSGH_BITS_REMOTE_MASK
 }
 
-/// `MACH_MSGH_BITS_LOCAL()` of <mach/message.h>.
+/// The local disposition in `bits`.
 const fn mach_msg_bits_local(bits: u32) -> u32 {
     (bits & MACH_MSGH_BITS_LOCAL_MASK) >> 8
 }
 
-/// `MACH_MSGH_BITS_PORTS()` of <mach/message.h>.
+/// The two dispositions in `bits`.
 const fn mach_msg_bits_ports(bits: u32) -> u32 {
     bits & MACH_MSGH_BITS_PORTS_MASK
 }
 
-/// `MACH_MSGH_BITS_OTHER()` of <mach/message.h>.
+/// The bits of `bits` other than the dispositions.
 const fn mach_msg_bits_other(bits: u32) -> u32 {
     bits & !MACH_MSGH_BITS_PORTS_MASK
 }
 
-/// `MACH_MSG_TYPE_PORT_ANY()` of <mach/message.h>.
+/// Whether `name` is a port-right type.
 const fn mach_msg_type_port_any(name: c_uint) -> bool {
     name >= MACH_MSG_TYPE_PORT_RECEIVE && name <= MACH_MSG_TYPE_MAKE_SEND_ONCE
 }
 
-/// `MACH_MSG_TYPE_PORT_ANY_SEND()` of <mach/message.h>.
+/// Whether `name` is a send or send-once right type.
 const fn mach_msg_type_port_any_send(name: c_uint) -> bool {
     name >= MACH_MSG_TYPE_PORT_SEND && name <= MACH_MSG_TYPE_MAKE_SEND_ONCE
 }
 
-/// `MACH_PORT_NAME_VALID()` of <mach/port.h>.
+/// Whether `name` is neither null nor dead.
 const fn mach_port_name_valid(name: c_uint) -> bool {
     name != MACH_PORT_NAME_NULL && name != MACH_PORT_NAME_DEAD
 }
 
-/// `IO_VALID()` of <`ipc/ipc_object.h`>.
+/// Whether `object` is neither null nor dead.
 fn io_valid(object: *mut c_void) -> bool {
     !object.is_null() && object != IO_DEAD
 }
@@ -196,27 +188,29 @@ const fn as_index(count: c_uint) -> usize {
     count as usize
 }
 
-/// `IP_TIMESTAMP_ORDER()` of <`ipc/ipc_port.h`>.
+/// Whether `one` happened before `two` across the counter's 32-bit wrap.
 const fn timestamp_order(one: c_uint, two: c_uint) -> bool {
     // The C compares the `int` reinterpretation of the wrapped difference.
     (one.wrapping_sub(two) as i32) < 0
 }
 
-/// `ipc_kobject_vm_page_list()` of <`kern/ipc_kobject.h`>.
+/// Whether out-of-line memory to a port of kernel-object type `ikot` travels
+/// as a page list.
 const fn kobject_vm_page_list(ikot: c_uint) -> bool {
     ikot == IKOT_PAGING_REQUEST
         || ikot == IKOT_DEVICE
         || ikot == IKOT_USER_DEVICE
 }
 
-/// `ipc_kobject_vm_page_steal()` of <`kern/ipc_kobject.h`>.
+/// Whether out-of-line memory to a port of kernel-object type `ikot` has its
+/// pages stolen.
 const fn kobject_vm_page_steal(ikot: c_uint) -> bool {
     ikot == IKOT_PAGING_REQUEST
 }
 
-/// `sizeof(mach_msg_type_t)` of <mach/message.h>.
+/// The size of a `mach_msg_type_t`.
 const MSG_TYPE_SIZE: usize = 8;
-/// `sizeof(mach_msg_type_long_t)` of <mach/message.h>.
+/// The size of a `mach_msg_type_long_t`.
 const MSG_TYPE_LONG_SIZE: usize = 8;
 
 /// The `msgt_name` field of the descriptor word.
@@ -365,7 +359,7 @@ const unsafe fn write_type_deallocate(addr: usize, value: bool) {
 }
 
 impl MachMsgHeader {
-    /// `msgh_bits` of <mach/message.h>.
+    /// The header's disposition and flag bits.
     pub(crate) const fn bits(&self) -> u32 {
         self.bits
     }
@@ -374,7 +368,7 @@ impl MachMsgHeader {
         self.bits = bits;
     }
 
-    /// `msgh_size` of <mach/message.h>.
+    /// The message size the header records.
     pub(crate) const fn size(&self) -> u32 {
         self.size
     }
@@ -383,7 +377,7 @@ impl MachMsgHeader {
         self.size = size;
     }
 
-    /// `msgh_remote_port` of <mach/message.h>.
+    /// The remote port field.
     pub(crate) const fn remote(&self) -> usize {
         self.remote_port
     }
@@ -392,7 +386,7 @@ impl MachMsgHeader {
         self.remote_port = port;
     }
 
-    /// `msgh_local_port` of <mach/message.h>.
+    /// The local port field.
     pub(crate) const fn local(&self) -> usize {
         self.local_port
     }
@@ -406,12 +400,12 @@ impl MachMsgHeader {
         self.local_port = payload;
     }
 
-    /// `msgh_seqno` of <mach/message.h>.
+    /// Sets the header's sequence number.
     pub(crate) const fn set_seqno(&mut self, seqno: u32) {
         self.seqno = seqno;
     }
 
-    /// `msgh_id` of <mach/message.h>.
+    /// The message id.
     pub(crate) const fn id(&self) -> c_int {
         self.id
     }
@@ -421,7 +415,7 @@ impl MachMsgHeader {
     }
 }
 
-/// `ipc_kmsg_t` of <`ipc/ipc_kmsg.h>`: a kernel message buffer.
+/// A kernel message buffer.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Kmsg(NonNull<IpcKmsg>);
@@ -453,7 +447,7 @@ impl Kmsg {
         self.0.as_ptr()
     }
 
-    /// `&kmsg->ikm_header` of <`ipc/ipc_kmsg.h`>.
+    /// The message's header, which the body follows.
     ///
     /// # Safety
     ///
@@ -462,7 +456,7 @@ impl Kmsg {
         unsafe { ptr::addr_of_mut!((*self.record()).header) }
     }
 
-    /// `ikm_size` of <`ipc/ipc_kmsg.h`>.
+    /// The size of the message buffer.
     ///
     /// # Safety
     ///
@@ -471,7 +465,7 @@ impl Kmsg {
         unsafe { (*self.record()).size }
     }
 
-    /// The `kmsg->ikm_size = size` assignment of `ikm_init()`.
+    /// Sets the size of the message buffer.
     ///
     /// # Safety
     ///
@@ -480,7 +474,7 @@ impl Kmsg {
         unsafe { (*self.record()).size = size };
     }
 
-    /// `kmsg->ikm_header.msgh_size` of <mach/message.h>.
+    /// The message size the header records.
     ///
     /// # Safety
     ///
@@ -489,7 +483,7 @@ impl Kmsg {
         unsafe { (*self.header()).size() }
     }
 
-    /// The `kmsg->ikm_header.msgh_seqno = seqno` assignment of `mach_msg()`.
+    /// Sets the header's sequence number.
     ///
     /// # Safety
     ///
@@ -498,7 +492,7 @@ impl Kmsg {
         unsafe { (*self.header()).seqno = seqno };
     }
 
-    /// `ikm_marequest` of <`ipc/ipc_kmsg.h`>.
+    /// The message's msg-accepted request, or null.
     ///
     /// # Safety
     ///
@@ -507,7 +501,7 @@ impl Kmsg {
         unsafe { (*self.record()).marequest }
     }
 
-    /// The `kmsg->ikm_marequest = marequest` assignment of `ikm_init()`.
+    /// Sets the message's msg-accepted request.
     ///
     /// # Safety
     ///
@@ -516,7 +510,7 @@ impl Kmsg {
         unsafe { (*self.record()).marequest = marequest };
     }
 
-    /// `ikm_next` of <`ipc/ipc_kmsg.h`>.
+    /// The next message in its queue.
     ///
     /// # Safety
     ///
@@ -525,7 +519,7 @@ impl Kmsg {
         unsafe { (*self.record()).next.cast() }
     }
 
-    /// The `kmsg->ikm_next = next` assignment.
+    /// Sets the next message in its queue.
     ///
     /// # Safety
     ///
@@ -534,7 +528,7 @@ impl Kmsg {
         unsafe { (*self.record()).next = next.cast() };
     }
 
-    /// `ikm_prev` of <`ipc/ipc_kmsg.h`>.
+    /// The previous message in its queue.
     ///
     /// # Safety
     ///
@@ -543,7 +537,7 @@ impl Kmsg {
         unsafe { (*self.record()).prev.cast() }
     }
 
-    /// The `kmsg->ikm_prev = prev` assignment.
+    /// Sets the previous message in its queue.
     ///
     /// # Safety
     ///
@@ -552,8 +546,7 @@ impl Kmsg {
         unsafe { (*self.record()).prev = prev.cast() };
     }
 
-    /// The `kmsg->ikm_header.msgh_remote_port = 0` of
-    /// `ipc_port_destroy()`.
+    /// Clears the remote port of a message whose destination is going away.
     ///
     /// # Safety
     ///
@@ -590,8 +583,7 @@ impl Kmsg {
         unsafe { (*self.header()).remote() }
     }
 
-    /// The `kmsg->ikm_header.msgh_remote_port = port` assignment of
-    /// `ipc_mqueue_send()`'s dead-port path.
+    /// Sets the remote port field.
     ///
     /// # Safety
     ///
@@ -601,8 +593,7 @@ impl Kmsg {
         unsafe { (*self.header()).set_remote(port) };
     }
 
-    /// The `ikm_init_special(kmsg, IKM_SIZE_NETWORK)` of `device/net_io.c`:
-    /// mark the message as one the network pool owns.
+    /// Marks the message as one the network pool owns.
     ///
     /// # Safety
     ///
@@ -615,11 +606,10 @@ impl Kmsg {
     }
 }
 
-/// `ipc_kmsg_cache` of `ipc/ipc_kmsg.c`: one cached message per CPU.
+/// One cached message per CPU.
 ///
-/// Each CPU touches only the slot `cpu_id()` selects, so the accesses
-/// need no ordering against another CPU.  The C half reads and writes the
-/// same array with the `ikm_cache()` macros.
+/// Each CPU touches only the slot `cpu_id()` selects, so the accesses need no
+/// ordering against another CPU.
 static mut IPC_KMSG_CACHE: [*mut c_void; MAX_NCPUS] =
     [ptr::null_mut(); MAX_NCPUS];
 
@@ -634,12 +624,12 @@ fn cache_slot() -> *mut *mut c_void {
     }
 }
 
-/// `ipc_kmsg_enqueue()` in C.
+/// Appends `kmsg` to `queue`.
 ///
 /// # Safety
 ///
-/// `queue` must point at a live `struct ipc_kmsg_queue` this caller owns,
-/// and `kmsg` at a live message not already queued.
+/// `queue` must point at a live message queue this caller owns, and `kmsg` at
+/// a live message not already queued.
 pub(crate) unsafe fn enqueue(queue: *mut IpcKmsgQueue, kmsg: Kmsg) {
     unsafe {
         let record = kmsg.record();
@@ -660,7 +650,7 @@ pub(crate) unsafe fn enqueue(queue: *mut IpcKmsgQueue, kmsg: Kmsg) {
     }
 }
 
-/// The `ipc_kmsg_rmqueue_first_macro()` of <`ipc/ipc_kmsg.h`>.
+/// Removes `kmsg`, which must be the first message, from `queue`.
 ///
 /// # Safety
 ///
@@ -680,11 +670,11 @@ pub(crate) unsafe fn rmqueue_first(queue: *mut IpcKmsgQueue, kmsg: Kmsg) {
     }
 }
 
-/// `ipc_kmsg_dequeue()` in C.
+/// Takes the first message off `queue`.
 ///
 /// # Safety
 ///
-/// `queue` must point at a live `struct ipc_kmsg_queue`.
+/// `queue` must point at a live message queue.
 pub(crate) unsafe fn dequeue(queue: *mut IpcKmsgQueue) -> Option<Kmsg> {
     let first = unsafe { (*queue).base.cast::<IpcKmsg>() };
     if first.is_null() {
@@ -698,7 +688,7 @@ pub(crate) unsafe fn dequeue(queue: *mut IpcKmsgQueue) -> Option<Kmsg> {
     Some(unsafe { Kmsg::from_record(first) })
 }
 
-/// `ipc_kmsg_rmqueue()` in C.
+/// Removes `kmsg` from `queue`.
 ///
 /// # Safety
 ///
@@ -721,7 +711,7 @@ pub(crate) unsafe fn rmqueue(queue: *mut IpcKmsgQueue, kmsg: Kmsg) {
     }
 }
 
-/// `ipc_kmsg_queue_next()` in C.
+/// The message after `kmsg` in `queue`, or `None` at its end.
 ///
 /// # Safety
 ///
@@ -754,7 +744,7 @@ unsafe fn kfree_addr(data: usize, size: usize) {
     unsafe { slab::kfree(data, size) };
 }
 
-/// `vm_map_copy_discard()` against a raw address.
+/// Discards the copy at the raw address `copy`.
 ///
 /// # Safety
 ///
@@ -767,8 +757,7 @@ unsafe fn discard_copy(copy: usize) {
     unsafe { VmMapCopy::discard(copy) };
 }
 
-/// `ipc_kmsg_clean_body()` in C: release every right and buffer the body
-/// names between `saddr` and `eaddr`.
+/// Releases every right and buffer the body names between `saddr` and `eaddr`.
 ///
 /// # Safety
 ///
@@ -832,9 +821,8 @@ unsafe fn clean_body(mut saddr: usize, eaddr: usize) {
     }
 }
 
-/// `ipc_kmsg_clean_partial()` in C: clean a partially acquired message body
-/// up to the failing descriptor, and, when `dolast`, the `number` rights the
-/// descriptor already copied in.
+/// Cleans a partially acquired message body up to the failing descriptor, and,
+/// when `dolast`, the `number` rights the descriptor already copied in.
 ///
 /// # Safety
 ///
@@ -915,7 +903,7 @@ unsafe fn clean_partial(
     }
 }
 
-/// `ipc_entry_lookup_failed()` of <`ipc/ipc_space.h>`: report a bogus name.
+/// Reports a bogus name.
 ///
 /// # Safety
 ///
@@ -951,8 +939,7 @@ unsafe fn entry_lookup_failed(header: *mut MachMsgHeader, port_name: c_uint) {
     }
 }
 
-/// `ipc_kmsg_clean()` in C: release every right, reference and buffer the
-/// message holds.
+/// Releases every right, reference and buffer the message holds.
 ///
 /// # Safety
 ///
@@ -995,7 +982,8 @@ pub(crate) unsafe fn clean(kmsg: Kmsg) {
     }
 }
 
-/// `ipc_kmsg_destroy()` in C.
+/// Destroys a message: cleans and frees it, through a per-thread list, so that
+/// a destroy nested in the cleanup appends to the list instead of recursing.
 ///
 /// # Safety
 ///
@@ -1032,7 +1020,7 @@ pub(crate) unsafe fn destroy(kmsg: Kmsg) {
     }
 }
 
-/// `ikm_free()` of <`ipc/ipc_kmsg.h>`: free a message of any variety.
+/// Frees a message of any variety.
 ///
 /// # Safety
 ///
@@ -1040,8 +1028,8 @@ pub(crate) unsafe fn destroy(kmsg: Kmsg) {
 pub(crate) unsafe fn ikm_free(kmsg: Kmsg) {
     let size = unsafe { kmsg.size() };
 
-    // The C tests the truncated `integer_t`, so a size with the top half
-    // word set takes the `ipc_kmsg_free()` path.
+    // The size is tested as a truncated 32-bit signed value, so a size with
+    // the top half-word set takes the `free` path.
     if (size as u32) as i32 > 0 {
         unsafe {
             slab::kfree(
@@ -1054,7 +1042,8 @@ pub(crate) unsafe fn ikm_free(kmsg: Kmsg) {
     }
 }
 
-/// `ipc_kmsg_free()` in C.
+/// Frees a message: to the network pool when the pool owns it, to the
+/// allocator otherwise.
 ///
 /// # Safety
 ///
@@ -1074,13 +1063,13 @@ pub(crate) unsafe fn free(kmsg: Kmsg) {
     }
 }
 
-/// `ikm_alloc()` of <`ipc/ipc_kmsg.h`>.
+/// Allocates a message buffer for a `size`-byte message.
 pub(crate) fn ikm_alloc(size: usize) -> Option<Kmsg> {
     let buf = slab::kalloc(size.wrapping_add(IKM_OVERHEAD))?;
     Some(Kmsg(buf.cast::<IpcKmsg>()))
 }
 
-/// `ikm_init()` of <`ipc/ipc_kmsg.h`>.
+/// Initializes the buffer fields of a message of `size` bytes.
 ///
 /// # Safety
 ///
@@ -1106,7 +1095,8 @@ pub(crate) unsafe fn alloc(size: usize) -> Option<Kmsg> {
     Some(kmsg)
 }
 
-/// `ikm_cache_alloc()` of <`ipc/ipc_kmsg.h`>.
+/// Allocates a page-sized message, from this CPU's cache slot when it holds
+/// one.
 pub(crate) fn cache_alloc() -> Option<Kmsg> {
     let slot = cache_slot();
 
@@ -1126,8 +1116,7 @@ pub(crate) fn cache_alloc() -> Option<Kmsg> {
     Some(kmsg)
 }
 
-/// `ikm_cache_free()` of <`ipc/ipc_kmsg.h>`: cache a page-sized message, or
-/// free anything else.
+/// Caches a page-sized message, or frees anything else.
 ///
 /// # Safety
 ///
@@ -1147,8 +1136,8 @@ pub(crate) unsafe fn cache_free(kmsg: Kmsg) {
     }
 }
 
-/// `ikm_cache_free_try()` of <`ipc/ipc_kmsg.h>`: cache the message when the
-/// running CPU's slot is empty; the caller keeps it otherwise.
+/// Caches the message when the running CPU's slot is empty; the caller keeps
+/// it otherwise.
 ///
 /// # Safety
 ///
@@ -1165,7 +1154,7 @@ pub(crate) unsafe fn cache_free_try(kmsg: Kmsg) -> bool {
     empty
 }
 
-/// `ipc_kmsg_get()` in C.
+/// Copies a user message of `size` bytes into a new kernel message.
 ///
 /// # Safety
 ///
@@ -1205,7 +1194,7 @@ pub(crate) unsafe fn get(
     Ok(kmsg)
 }
 
-/// `ipc_kmsg_get_from_kernel()` in C.
+/// Copies a kernel message of `size` bytes into a new kernel message.
 ///
 /// # Safety
 ///
@@ -1233,7 +1222,8 @@ pub(crate) unsafe fn get_from_kernel(
     Ok(kmsg)
 }
 
-/// `ipc_kmsg_put()` in C.
+/// Copies a kernel message of `size` bytes out to the user buffer and frees
+/// it.
 ///
 /// # Safety
 ///
@@ -1263,7 +1253,7 @@ const BITS_REQUEST: u32 =
 /// `MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE, 0)`: a reply message.
 const BITS_REPLY: u32 = mach_msg_bits(MACH_MSG_TYPE_PORT_SEND_ONCE, 0);
 
-/// `ipc_kmsg_copyin_header()` in C.
+/// Translates the port names of a message header in `space` into kernel ports.
 ///
 /// # Safety
 ///
@@ -2065,8 +2055,7 @@ unsafe fn copyin_header_distinct(
 
 const _: () = assert!(!kernel_is_misaligned(size_of::<MachMsgHeader>()));
 
-/// `copyin_port()` of <`ipc/copy_user.h>`: copy one user port name into a
-/// kernel port.
+/// Copies one user port name into a kernel port.
 ///
 /// # Safety
 ///
@@ -2084,8 +2073,7 @@ unsafe fn copyin_port(src: usize, dst: usize) -> Result<(), UserFault> {
     Ok(())
 }
 
-/// `copyout_port()` of <`ipc/copy_user.h>`: copy one kernel port into a user
-/// port name.
+/// Copies one kernel port into a user port name.
 ///
 /// # Safety
 ///
@@ -2281,7 +2269,8 @@ unsafe fn copyin_body_ports(
     Ok(())
 }
 
-/// `ipc_kmsg_copyin_body()` in C.
+/// Translates the rights and out-of-line memory of a message body in `space`
+/// and `map`.
 ///
 /// # Safety
 ///
@@ -2400,7 +2389,7 @@ unsafe fn copyin_body(
     Ok(())
 }
 
-/// `ipc_kmsg_copyin()` in C.
+/// Translates a whole user message in `space` and `map`.
 ///
 /// # Safety
 ///
@@ -2424,7 +2413,8 @@ pub(crate) unsafe fn copyin(
     unsafe { copyin_body(kmsg, space, map) }
 }
 
-/// `ipc_kmsg_copyin_from_kernel()` in C.
+/// Translates the rights of a message the kernel built, which it already
+/// holds.
 ///
 /// # Safety
 ///
@@ -2527,9 +2517,8 @@ pub(crate) unsafe fn copyin_from_kernel(kmsg: Kmsg) {
     }
 }
 
-/// The `optimized ipc_object_copyout_dest` of `ipc_kmsg_copyout_header()`:
-/// consume the destination send right and return its name and the port's
-/// protected payload.
+/// Consumes the destination send right and returns its name and the port's
+/// protected payload, the fast path of [`copyout_header`].
 ///
 /// # Safety
 ///
@@ -2566,7 +2555,7 @@ unsafe fn copyout_dest_fast(
     }
 }
 
-/// `ipc_kmsg_copyout_header()` in C.
+/// Translates the ports of a message header into names in `space`.
 ///
 /// # Safety
 ///
@@ -2811,8 +2800,7 @@ unsafe fn copyout_header_request(
         }
         return false;
     };
-    // The C's `gen = entry->ie_bits + IE_BITS_GEN_ONE` and the send-once
-    // type.
+    // The generation step and the send-once type.
     // SAFETY: the entry is live and the space is write-locked.
     unsafe {
         let generation = (*entry).bits().wrapping_add(IE_BITS_GEN_ONE);
@@ -3264,9 +3252,9 @@ unsafe fn copyout_header_finish(
     }
 }
 
-/// `ipc_kmsg_copyout_object()` in C: copy out a port right, always returning
-/// a name, and consuming the supplied object; a right the receiver had no
-/// room for comes back as the [`Shortage`] that destroyed it.
+/// Copies out a port right, always returning a name, and consuming the
+/// supplied object; a right the receiver had no room for comes back as the
+/// [`Shortage`] that destroyed it.
 ///
 /// # Safety
 ///
@@ -3439,7 +3427,8 @@ fn memory_shortage(error: VmError) -> Shortage {
     }
 }
 
-/// `ipc_kmsg_copyout_body()` in C: returns what the copyout had to destroy.
+/// Copies out the rights and out-of-line memory of a message body; returns
+/// what the copyout had to destroy.
 ///
 /// # Safety
 ///
@@ -3566,7 +3555,7 @@ pub(crate) unsafe fn copyout_body(
     lost
 }
 
-/// `ipc_kmsg_copyout()` in C.
+/// Translates a whole message into `space` and `map` for its receiver.
 ///
 /// # Safety
 ///
@@ -3596,8 +3585,8 @@ pub(crate) unsafe fn copyout(
     Ok(())
 }
 
-/// `ipc_kmsg_copyout_pseudo()` in C: returns what the copyout had to
-/// destroy.
+/// Copies out a message the sender gets back after a failed send; returns what
+/// the copyout had to destroy.
 ///
 /// # Safety
 ///
@@ -3638,7 +3627,8 @@ pub(crate) unsafe fn copyout_pseudo(
     lost
 }
 
-/// `ipc_kmsg_copyout_dest()` in C.
+/// Copies out the destination and reply rights of a message without a
+/// receiver, quietly.
 ///
 /// # Safety
 ///

@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The port-set routines, which `ipc/ipc_pset.c` used to define and
-//! `ipc/ipc_pset.h` declares.
+//! The port-set routines.
 
 use crate::ipc::error::Error;
 use crate::ipc::ipc_mqueue;
@@ -19,10 +18,10 @@ use crate::ipc::{
 use core::ffi::c_uint;
 use core::ptr::{self, NonNull};
 
-/// `IOT_PORT_SET` of <`ipc/ipc_object.h`> as `ipc_object_alloc()` takes it.
+/// The port-set object type, as `ipc_object::alloc` takes it.
 const IOT_PORT_SET_OBJECT: c_uint = IOT_PORT_SET as c_uint;
 
-/// `ipc_pset_alloc()` in C.
+/// Allocates a port set in `space` under a fresh name.
 ///
 /// # Safety
 ///
@@ -48,7 +47,7 @@ pub(crate) unsafe fn alloc(
     Ok((name, pset))
 }
 
-/// `ipc_pset_alloc_name()` in C.
+/// Allocates a port set in `space` under `name`.
 ///
 /// # Safety
 ///
@@ -76,7 +75,7 @@ pub(crate) unsafe fn alloc_name(
     Ok(pset)
 }
 
-/// `ipc_pset_add()` in C.
+/// Adds `port` to `pset`.
 ///
 /// # Safety
 ///
@@ -102,7 +101,7 @@ pub(crate) unsafe fn add(pset: *mut IpcTarget, port: IpcPort) {
     }
 }
 
-/// `ipc_pset_remove()` in C.
+/// Removes `port` from `pset`.
 ///
 /// # Safety
 ///
@@ -127,7 +126,7 @@ pub(crate) unsafe fn remove(pset: *mut IpcTarget, port: IpcPort) {
     }
 }
 
-/// `ipc_pset_move()` in C.
+/// Moves `port` into `nset`, or out of its set when `nset` is `None`.
 ///
 /// # Safety
 ///
@@ -221,7 +220,7 @@ pub(crate) unsafe fn move_between(
     }
 }
 
-/// `ipc_pset_destroy()` in C.
+/// Destroys `pset`, removing its member ports.
 ///
 /// # Safety
 ///

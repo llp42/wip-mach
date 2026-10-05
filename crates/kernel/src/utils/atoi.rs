@@ -6,14 +6,12 @@
 //   Copyright 1988, 1989 by Intel Corporation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! `mach_atoi()`, which `util/atoi.c` used to define; `util/atoi.h` keeps the
-//! C declaration and the `MACH_ATOI_DEFAULT` macro.
+//! The decimal parser of the boot command line.
 
 use core::ffi::c_int;
 use core::slice;
 
-/// `MACH_ATOI_DEFAULT` of <util/atoi.h>: the "no number" value the C interface
-/// stores.
+/// The "no number" value [`mach_atoi`] stores.
 const MACH_ATOI_DEFAULT: c_int = -1;
 
 /// Parse the leading decimal digits of `bytes`.
@@ -36,9 +34,8 @@ fn parse(bytes: &[u8]) -> (usize, Option<c_int>) {
     (used, number)
 }
 
-/// `mach_atoi()` of <util/atoi.h>: parse the leading decimal digits at `s`,
-/// store the number or `MACH_ATOI_DEFAULT` at `nump`, and return the number of
-/// bytes consumed.
+/// Parses the leading decimal digits at `s`, stores the number or
+/// `MACH_ATOI_DEFAULT` at `nump`, and returns the number of bytes consumed.
 ///
 /// # Safety
 ///

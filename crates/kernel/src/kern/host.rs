@@ -4,7 +4,7 @@
 //   University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The cores of `kern/host.c`, mirroring <kern/host.h>.
+//! The host object and the host calls' cores.
 
 use crate::arch::types::VmOffset;
 use crate::kern::debug::kpanic;
@@ -18,8 +18,7 @@ use core::ffi::{c_uint, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr::{self, NonNull};
 
-/// `struct host` of <kern/host.h>, the host object MIG hands the host
-/// routines.
+/// The host object MIG hands the host routines.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct Host {
@@ -27,14 +26,13 @@ pub struct Host {
     pub host_priv_self: *mut c_void,
 }
 
-/// `realhost` of kern/host.c: the one host object, and the C symbol the
-/// bootstrap and server paths still name.
+/// The one host object.
 pub(crate) static mut REALHOST: Host = Host {
     host_self: ptr::null_mut(),
     host_priv_self: ptr::null_mut(),
 };
 
-/// `&realhost`, which the C passes to `ipc_kobject_set()`.
+/// The address of [`REALHOST`], the host object the host ports name.
 pub(crate) fn realhost() -> *mut Host {
     ptr::addr_of_mut!(REALHOST)
 }
@@ -53,8 +51,8 @@ pub(crate) fn host_priv_self() -> *mut c_void {
     unsafe { (*realhost()).host_priv_self }
 }
 
-/// The body of `host_processor_set_priv()` in kern/host.c: a live host and a
-/// live name set give back the same set with one more reference.
+/// A live host and a live name set give back the same set with one more
+/// reference.
 pub(crate) fn processor_set_priv(
     host: Option<NonNull<Host>>,
     name: Option<&mut ProcessorSet>,
@@ -68,9 +66,8 @@ pub(crate) fn processor_set_priv(
     }
 }
 
-/// The body of `processor_set_processors()` in kern/host.c: allocate the array
-/// MIG sends back, walk the set's processor queue and convert each processor
-/// to its name port.
+/// Allocates the array the reply carries, walks the set's processor queue and
+/// converts each processor to its name port.
 pub(crate) fn processor_ports(
     pset: &mut ProcessorSet,
 ) -> Result<(NonNull<VmOffset>, c_uint), Error> {
@@ -105,8 +102,8 @@ pub(crate) fn processor_ports(
             cursor.move_next();
             let processor = processor.as_ptr();
             // SAFETY: `processor` is a live queue member, so it is a live
-            // processor whose name port `ipc_processor_init()` built, and `i`
-            // is below `count`, inside the allocation.
+            // processor whose name port `ipc_host::processor_init` built, and
+            // `i` is below `count`, inside the allocation.
             ports
                 .add(i)
                 .write(crate::kern::ipc_host::processor_name_to_port(
@@ -120,8 +117,7 @@ pub(crate) fn processor_ports(
     Ok((ports.cast::<VmOffset>(), count))
 }
 
-/// The body of `host_processors()` in kern/host.c: the control port of every
-/// CPU the machine reports.
+/// The control port of every CPU the machine reports.
 pub(crate) fn processors(
     host: Option<NonNull<Host>>,
 ) -> Result<(NonNull<VmOffset>, c_uint), Error> {
@@ -175,8 +171,7 @@ pub(crate) fn processors(
     Ok((ports, count))
 }
 
-/// The body of `host_processor_sets()` in kern/host.c: the name port of
-/// every set on the host, in the array MIG sends back.
+/// The name port of every set on the host, in the array the reply carries.
 ///
 /// # Safety
 ///

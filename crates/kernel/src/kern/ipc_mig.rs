@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The MIG support entry points of <`mach/mig_support.h`> and the kernel-side
-//! RPC stubs, which `kern/ipc_mig.c` defined and `kern/ipc_mig.h` declares.
+//! The MIG support entry points and the kernel-side RPC traps.
 //!
 //! The symbols the generated code calls are in [`crate::mig::runtime`]; this
 //! module holds the routines themselves.
@@ -38,45 +37,44 @@ use core::ffi::{c_int, c_uint, c_ulong, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 
-/// `MACH_PORT_NULL` in <mach/port.h>: no port name.
+/// No port name.
 const MACH_PORT_NULL: c_uint = 0;
 /// The `natural_t` words the C scratch array of `thread_set_self_state()`
 /// held.
 const MAX_SELF_STATE: usize = 150;
 
-/// `MACH_PORT_NAME_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NAME_NULL: c_uint = 0;
-/// `MACH_PORT_NAME_DEAD` of <mach/port.h>.
+/// The dead port name.
 const MACH_PORT_NAME_DEAD: c_uint = c_uint::MAX;
-/// `MACH_PORT_DEAD` of <mach/port.h> and `IO_DEAD` of <`ipc/ipc_object.h>`: the
-/// all-ones word both macros spell.
+/// The dead port value: the all-ones word.
 const IO_DEAD: *mut c_void = usize::MAX as *mut c_void;
 
-/// `MACH_MSG_TYPE_PORT_RECEIVE` of <mach/message.h>.
+/// The receive-right disposition.
 const MACH_MSG_TYPE_PORT_RECEIVE: c_uint = 16;
 /// `MACH_MSG_TYPE_PORT_SEND`, the wire alias of `MACH_MSG_TYPE_MOVE_SEND`.
 const MACH_MSG_TYPE_PORT_SEND: c_uint = 17;
-/// `MACH_MSG_TYPE_COPY_SEND` of <mach/message.h>.
+/// The disposition that copies a send right.
 const MACH_MSG_TYPE_COPY_SEND: c_uint = 19;
-/// `MACH_MSG_TYPE_MAKE_SEND_ONCE` of <mach/message.h>.
+/// The disposition that makes a send-once right.
 const MACH_MSG_TYPE_MAKE_SEND_ONCE: c_uint = 21;
-/// `MACH_SEND_ALWAYS` of <mach/message.h>: internal to the kernel.  The
-/// port passes it to the message-queue option word, which is unsigned.
+/// The kernel's send option that ignores the queue limit, as the unsigned
+/// message-queue option word takes it.
 const MACH_SEND_ALWAYS: c_uint = 0x0001_0000;
-/// `MACH_MSG_TIMEOUT_NONE` of <mach/message.h>.
+/// No timeout.
 const MACH_MSG_TIMEOUT_NONE: c_uint = 0;
-/// `IE_BITS_TYPE_MASK` of <`ipc/ipc_entry.h>`: the capability-type field.
+/// The capability-type field.
 const IE_BITS_TYPE_MASK: u32 = 0x001f_0000;
-/// `MACH_PORT_TYPE_SEND` of <mach/port.h>.
+/// The type bit of a send right.
 const MACH_PORT_TYPE_SEND: u32 = 1 << 16;
-/// `IKOT_THREAD` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a thread port.
 const IKOT_THREAD: c_uint = 1;
-/// `IKOT_TASK` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a task port.
 const IKOT_TASK: c_uint = 2;
-/// `IKOT_DEVICE` of <`kern/ipc_kobject.h`>.
+/// The kernel-object type of a device port.
 const IKOT_DEVICE: c_uint = 10;
 
-/// `current_space()` of <kern/thread.h>: the running task's IPC space.
+/// The running task's IPC space.
 ///
 /// # Safety
 ///
@@ -86,7 +84,7 @@ pub(crate) unsafe fn current_space() -> IpcSpace {
     unsafe { IpcSpace::from_raw((*task::current_task()).itk_space) }
 }
 
-/// `current_map()` of <kern/thread.h>: the running task's address space.
+/// The running task's address space.
 ///
 /// # Safety
 ///
@@ -96,9 +94,8 @@ pub(crate) unsafe fn current_map() -> *mut VmMap {
     unsafe { (*task::current_task()).map.cast() }
 }
 
-/// `invalid_name_to_port()` of <ipc/port.h>: the port an invalid name stands
-/// for.  A valid name is impossible at every call site and halts, as the C
-/// inline did.
+/// The port an invalid name stands for.  A valid name is impossible at every
+/// call site and halts the kernel.
 fn invalid_name_to_port(name: c_uint) -> *mut c_void {
     match name {
         MACH_PORT_NAME_NULL => ptr::null_mut(),
@@ -112,17 +109,17 @@ fn invalid_name_to_port(name: c_uint) -> *mut c_void {
     }
 }
 
-/// `MACH_PORT_NAME_VALID()` of <mach/port.h>.
+/// Whether `name` is neither null nor dead.
 const fn mach_port_name_valid(name: c_uint) -> bool {
     name != MACH_PORT_NAME_NULL && name != MACH_PORT_NAME_DEAD
 }
 
-/// `MACH_MSG_TYPE_PORT_ANY()` of <mach/message.h>.
+/// Whether `name` is a port-right type.
 const fn mach_msg_type_port_any(name: c_uint) -> bool {
     MACH_MSG_TYPE_PORT_RECEIVE <= name && name <= MACH_MSG_TYPE_MAKE_SEND_ONCE
 }
 
-/// `IO_VALID()` of <`ipc/ipc_object.h`>.
+/// Whether `object` is neither null nor dead.
 fn io_valid(object: *mut c_void) -> bool {
     !object.is_null() && object != IO_DEAD
 }
@@ -221,7 +218,7 @@ pub(crate) unsafe fn set_self_state(
     }
 }
 
-/// `thread_set_self_state()` of <`kern/ipc_mig.h>`: the trap -77 entry.
+/// The `thread_set_self_state` trap entry, trap -77.
 ///
 /// # Safety
 ///
@@ -235,8 +232,8 @@ pub(crate) unsafe extern "C" fn thread_set_self_state(
     kern_return(unsafe { set_self_state(flavor, new_state, new_state_count) })
 }
 
-/// The `ipc_object_copyin()` the `port_name_to_*()` slow paths share: one send
-/// right to `name`, or `None` when the copyin failed.
+/// One send right to `name` from the current space, or `None` when the copyin
+/// failed: the slow path of the name translations.
 ///
 /// # Safety
 ///
@@ -259,8 +256,8 @@ unsafe fn release_send(object: *mut c_void) {
     }
 }
 
-/// The `fast_send_right_lookup()` macro of `kern/ipc_mig.c`: `name` looked up as
-/// a bare send right, with the port locked, or `None` for the slow path.
+/// `name` looked up as a bare send right in the current space, with the port
+/// locked, or `None` for the slow path.
 ///
 /// # Safety
 ///
@@ -287,8 +284,7 @@ unsafe fn fast_send_right_lookup(name: c_uint) -> Option<IpcPort> {
     }
 }
 
-/// `port_name_to_device()` of `kern/ipc_mig.c`.  `DEVICE_NULL` is the null
-/// pointer.
+/// The device the send right `name` names, with a reference, or `None`.
 ///
 /// # Safety
 ///
@@ -324,7 +320,7 @@ unsafe fn port_name_to_device(name: c_uint) -> Option<NonNull<c_void>> {
     device
 }
 
-/// `port_name_to_thread()` of `kern/ipc_mig.c`.
+/// The thread the send right `name` names, with a reference, or `None`.
 ///
 /// # Safety
 ///
@@ -358,7 +354,7 @@ unsafe fn port_name_to_thread(name: c_uint) -> Option<NonNull<Thread>> {
     thread
 }
 
-/// `port_name_to_task()` of `kern/ipc_mig.c`.
+/// The task the send right `name` names, with a reference, or `None`.
 ///
 /// # Safety
 ///
@@ -392,7 +388,8 @@ unsafe fn port_name_to_task(name: c_uint) -> Option<NonNull<Task>> {
     task
 }
 
-/// `port_name_to_map()` of `kern/ipc_mig.c`.
+/// The address map of the task the send right `name` names, with a reference,
+/// or `None`.
 ///
 /// # Safety
 ///
@@ -429,7 +426,8 @@ unsafe fn port_name_to_map(name: c_uint) -> Option<NonNull<VmMap>> {
     map
 }
 
-/// `port_name_to_space()` of `kern/ipc_mig.c`.
+/// The IPC space of the task the send right `name` names, with a reference, or
+/// `None`.
 ///
 /// # Safety
 ///
@@ -467,7 +465,7 @@ unsafe fn port_name_to_space(name: c_uint) -> Option<IpcSpace> {
     space
 }
 
-/// `mach_msg_send_from_kernel()` of `kern/ipc_mig.c`.
+/// Sends a message the kernel built, of `send_size` bytes at `msg`.
 ///
 /// # Safety
 ///
@@ -491,7 +489,7 @@ pub(crate) unsafe fn mach_msg_send_from_kernel(
     // SAFETY: the message is live and this call owns it.
     unsafe { ipc_kmsg::copyin_from_kernel(kmsg) };
     // SAFETY: the message is live and holds the send right the send consumes;
-    // the C's `ipc_mqueue_send_always` discarded the result.
+    // the result is discarded.
     let _ = unsafe {
         ipc_mqueue::send(
             kmsg.as_ptr(),
@@ -518,7 +516,7 @@ pub(crate) struct VmMapRequest {
     pub(crate) inheritance: c_int,
 }
 
-/// `syscall_vm_map()` of `kern/ipc_mig.c`.
+/// The `vm_map` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -600,7 +598,7 @@ pub(crate) unsafe fn syscall_vm_map(
     result.map_err(RpcError::Vm)
 }
 
-/// `syscall_vm_map()` of <`kern/ipc_mig.h>`: the trap 64 entry.
+/// The `syscall_vm_map` trap entry, trap 64.
 ///
 /// # Safety
 ///
@@ -636,7 +634,7 @@ pub(crate) unsafe extern "C" fn syscall_vm_map_entry(
     kern_return(unsafe { syscall_vm_map(&request) })
 }
 
-/// `syscall_vm_allocate()` of `kern/ipc_mig.c`.
+/// The `vm_allocate` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -681,7 +679,7 @@ pub(crate) unsafe fn syscall_vm_allocate(
     result.map_err(RpcError::from)
 }
 
-/// `syscall_vm_allocate()` of <`kern/ipc_mig.h>`: the trap 65 entry.
+/// The `syscall_vm_allocate` trap entry, trap 65.
 ///
 /// # Safety
 ///
@@ -698,7 +696,7 @@ pub(crate) unsafe extern "C" fn syscall_vm_allocate_entry(
     })
 }
 
-/// `syscall_vm_deallocate()` of `kern/ipc_mig.c`.
+/// The `vm_deallocate` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -720,7 +718,7 @@ pub(crate) unsafe fn syscall_vm_deallocate(
     result.map_err(RpcError::from)
 }
 
-/// `syscall_vm_deallocate()` of <`kern/ipc_mig.h>`: the trap 66 entry.
+/// The `syscall_vm_deallocate` trap entry, trap 66.
 ///
 /// # Safety
 ///
@@ -733,7 +731,7 @@ pub(crate) unsafe extern "C" fn syscall_vm_deallocate_entry(
     kern_return(unsafe { syscall_vm_deallocate(target_map, start, size) })
 }
 
-/// `syscall_task_create()` of `kern/ipc_mig.c`.
+/// The `task_create` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -786,7 +784,7 @@ pub(crate) unsafe fn syscall_task_create(
     created.map(|_| ()).map_err(RpcError::from)
 }
 
-/// `syscall_task_create()` of <`kern/ipc_mig.h>`: the trap 68 entry.
+/// The `syscall_task_create` trap entry, trap 68.
 ///
 /// # Safety
 ///
@@ -802,7 +800,7 @@ pub(crate) unsafe extern "C" fn syscall_task_create_entry(
     })
 }
 
-/// `syscall_task_terminate()` of `kern/ipc_mig.c`.
+/// The `task_terminate` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -824,7 +822,7 @@ pub(crate) unsafe fn syscall_task_terminate(
     result.map_err(RpcError::from)
 }
 
-/// `syscall_task_terminate()` of <`kern/ipc_mig.h>`: the trap 69 entry.
+/// The `syscall_task_terminate` trap entry, trap 69.
 ///
 /// # Safety
 ///
@@ -836,7 +834,7 @@ pub(crate) unsafe extern "C" fn syscall_task_terminate_entry(
     kern_return(unsafe { syscall_task_terminate(task) })
 }
 
-/// `syscall_task_suspend()` of `kern/ipc_mig.c`.
+/// The `task_suspend` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -858,7 +856,7 @@ pub(crate) unsafe fn syscall_task_suspend(
     result.map_err(RpcError::from)
 }
 
-/// `syscall_task_suspend()` of <`kern/ipc_mig.h>`: the trap 70 entry.
+/// The `syscall_task_suspend` trap entry, trap 70.
 ///
 /// # Safety
 ///
@@ -870,7 +868,7 @@ pub(crate) unsafe extern "C" fn syscall_task_suspend_entry(
     kern_return(unsafe { syscall_task_suspend(task) })
 }
 
-/// `syscall_task_set_special_port()` of `kern/ipc_mig.c`.
+/// The `task_set_special_port` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -922,7 +920,7 @@ pub(crate) unsafe fn syscall_task_set_special_port(
     result.map_err(RpcError::from)
 }
 
-/// `syscall_task_set_special_port()` of <`kern/ipc_mig.h>`: the trap 71 entry.
+/// The `syscall_task_set_special_port` trap entry, trap 71.
 ///
 /// # Safety
 ///
@@ -937,7 +935,7 @@ pub(crate) unsafe extern "C" fn syscall_task_set_special_port_entry(
     })
 }
 
-/// `syscall_mach_port_allocate()` of `kern/ipc_mig.c`.
+/// The `mach_port_allocate` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -971,7 +969,7 @@ pub(crate) unsafe fn syscall_mach_port_allocate(
     result.map(|_| ()).map_err(RpcError::from)
 }
 
-/// `syscall_mach_port_allocate()` of <`kern/ipc_mig.h>`: the trap 72 entry.
+/// The `syscall_mach_port_allocate` trap entry, trap 72.
 ///
 /// # Safety
 ///
@@ -985,7 +983,7 @@ pub(crate) unsafe extern "C" fn syscall_mach_port_allocate_entry(
     kern_return(unsafe { syscall_mach_port_allocate(task, right, namep) })
 }
 
-/// `syscall_mach_port_allocate_name()` of `kern/ipc_mig.c`.
+/// The `mach_port_allocate_name` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -1010,8 +1008,7 @@ pub(crate) unsafe fn syscall_mach_port_allocate_name(
     result.map_err(RpcError::from)
 }
 
-/// `syscall_mach_port_allocate_name()` of <`kern/ipc_mig.h>`: the trap 75
-/// entry.
+/// The `syscall_mach_port_allocate_name` trap entry, trap 75.
 ///
 /// # Safety
 ///
@@ -1024,7 +1021,7 @@ pub(crate) unsafe extern "C" fn syscall_mach_port_allocate_name_entry(
     kern_return(unsafe { syscall_mach_port_allocate_name(task, right, name) })
 }
 
-/// `syscall_mach_port_deallocate()` of `kern/ipc_mig.c`.
+/// The `mach_port_deallocate` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -1047,7 +1044,7 @@ pub(crate) unsafe fn syscall_mach_port_deallocate(
     result.map_err(RpcError::from)
 }
 
-/// `syscall_mach_port_deallocate()` of <`kern/ipc_mig.h>`: the trap 73 entry.
+/// The `syscall_mach_port_deallocate` trap entry, trap 73.
 ///
 /// # Safety
 ///
@@ -1059,7 +1056,7 @@ pub(crate) unsafe extern "C" fn syscall_mach_port_deallocate_entry(
     kern_return(unsafe { syscall_mach_port_deallocate(task, name) })
 }
 
-/// `syscall_mach_port_insert_right()` of `kern/ipc_mig.c`.
+/// The `mach_port_insert_right` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -1103,8 +1100,8 @@ pub(crate) unsafe fn syscall_mach_port_insert_right(
         crate::ipc::mach_port::insert_right(Some(space), name, object, newtype)
     };
     if result.is_err() && io_valid(object) {
-        // SAFETY: the failed insert left the right to this call; the C's
-        // `ipc_object_destroy()` consumes it.
+        // SAFETY: the failed insert left the right to this call, and
+        // destroying it consumes it.
         unsafe { ipc_object::destroy_object(object, newtype) };
     }
     // SAFETY: the reference `port_name_to_space()` took is the one released
@@ -1114,8 +1111,7 @@ pub(crate) unsafe fn syscall_mach_port_insert_right(
     result.map_err(RpcError::from)
 }
 
-/// `syscall_mach_port_insert_right()` of <`kern/ipc_mig.h>`: the trap 74
-/// entry.
+/// The `syscall_mach_port_insert_right` trap entry, trap 74.
 ///
 /// # Safety
 ///
@@ -1131,7 +1127,7 @@ pub(crate) unsafe extern "C" fn syscall_mach_port_insert_right_entry(
     })
 }
 
-/// `syscall_thread_depress_abort()` of `kern/ipc_mig.c`.
+/// The `thread_depress_abort` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -1153,7 +1149,7 @@ pub(crate) unsafe fn syscall_thread_depress_abort(
     result.map_err(RpcError::Kern)
 }
 
-/// `syscall_thread_depress_abort()` of <`kern/ipc_mig.h>`: the trap 76 entry.
+/// The `syscall_thread_depress_abort` trap entry, trap 76.
 ///
 /// # Safety
 ///
@@ -1165,7 +1161,7 @@ pub(crate) unsafe extern "C" fn syscall_thread_depress_abort_entry(
     kern_return(unsafe { syscall_thread_depress_abort(thread) })
 }
 
-/// `syscall_device_write_request()` of `kern/ipc_mig.c`.
+/// The `device_write_request` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -1206,7 +1202,7 @@ pub(crate) unsafe fn syscall_device_write_request(
     result.map_err(RpcError::Device)
 }
 
-/// `syscall_device_write_request()` of <`kern/ipc_mig.h>`: the trap 40 entry.
+/// The `syscall_device_write_request` trap entry, trap 40.
 ///
 /// # Safety
 ///
@@ -1234,7 +1230,7 @@ pub(crate) unsafe extern "C" fn syscall_device_write_request_entry(
     }
 }
 
-/// `syscall_device_writev_request()` of `kern/ipc_mig.c`.
+/// The `device_writev_request` call as a trap, on port names.
 ///
 /// # Safety
 ///
@@ -1276,7 +1272,7 @@ pub(crate) unsafe fn syscall_device_writev_request(
     result.map_err(RpcError::Device)
 }
 
-/// `syscall_device_writev_request()` of <`kern/ipc_mig.h>`: the trap 39 entry.
+/// The `syscall_device_writev_request` trap entry, trap 39.
 ///
 /// # Safety
 ///

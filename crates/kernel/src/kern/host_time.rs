@@ -22,15 +22,13 @@ use crate::mig::time_value::{
 use core::ffi::c_void;
 use core::ptr;
 
-/// `clock_boottime_offset` of `kern/mach_clock.c`: the boot clock less the
-/// real-time clock.
+/// The boot clock less the real-time clock.
 static mut CLOCK_BOOTTIME_OFFSET: TimeValue64 = TimeValue64 {
     seconds: 0,
     nanoseconds: 0,
 };
 
-/// `clock_boottime_update()` in `kern/mach_clock.c`: fold the real-time clock's
-/// change into the boot clock's offset.
+/// Folds the real-time clock's change into the boot clock's offset.
 fn clock_boottime_update(new_time: TimeValue64) {
     let time = wallclock();
     let delta = time.sub(new_time);
@@ -144,8 +142,8 @@ pub(crate) fn set_time64(
     // SAFETY: `s` is the level `splhigh()` returned.
     unsafe { spl::splx(s) };
 
-    // SAFETY: `thread` is the live current thread and the null is the C
-    // `PROCESSOR_NULL`, the unbind the C performed.
+    // SAFETY: `thread` is the live current thread, and binding it to no
+    // processor unbinds it.
     unsafe { thread_bind(thread, ptr::null_mut()) };
 
     Ok(())
@@ -204,8 +202,8 @@ pub(crate) fn adjust_time(
     // SAFETY: `s` is the level `splclock()` returned.
     unsafe { spl::splx(s) };
 
-    // SAFETY: `thread` is the live current thread and the null is the C
-    // `PROCESSOR_NULL`, the unbind the C performed.
+    // SAFETY: `thread` is the live current thread, and binding it to no
+    // processor unbinds it.
     unsafe { thread_bind(thread, ptr::null_mut()) };
 
     Ok(old)

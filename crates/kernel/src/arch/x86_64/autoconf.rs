@@ -3,8 +3,7 @@
 //   Copyright (c) 1993,1992,1991,1990,1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The AT-bus device tables and probe, which `i386/i386at/autoconf.c` used to
-//! define and `i386/i386at/autoconf.h` declares.
+//! The AT-bus device tables and probe.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::busses::configure_bus_device;
@@ -14,25 +13,21 @@ use crate::kern::console::{CStrArg, kprint};
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-/// `SPLTTY` of <i386/ipl.h>: the level the serial table records in `sysdep`.
+/// The interrupt level the serial table records in `sysdep`.
 const SPL_TTY: VmOffset = 6;
 
 /// The `{0}` sentinel that ends each bus table.
 const SENTINEL_DEVICE: BusDevice =
-    // SAFETY: a zeroed `struct bus_device` is a null driver and nothing else
-    // set, which is exactly the C's `{0}`.
+    // SAFETY: a zeroed `BusDevice` is a null driver and nothing else set.
     unsafe { core::mem::zeroed() };
 const SENTINEL_CTLR: BusCtlr =
-    // SAFETY: a zeroed `struct bus_ctlr` is a null driver and nothing else
-    // set, which is exactly the C's `{0}`.
+    // SAFETY: a zeroed `BusCtlr` is a null driver and nothing else set.
     unsafe { core::mem::zeroed() };
 
-/// `bus_master_init[]` of `i386/i386at/autoconf.c`: the AT-bus controller
-/// table, ended by a driver-less sentinel.
+/// The AT-bus controller table, ended by a driver-less sentinel.
 pub(crate) static mut BUS_MASTER_INIT: [BusCtlr; 1] = [SENTINEL_CTLR];
 
-/// `bus_device_init[]` of `i386/i386at/autoconf.c`: the AT-bus device table,
-/// ended by a driver-less sentinel.
+/// The AT-bus device table, ended by a driver-less sentinel.
 pub(crate) static mut BUS_DEVICE_INIT: [BusDevice; 4] = [
     BusDevice {
         driver: ptr::addr_of_mut!(com::COMDRIVER),
@@ -91,7 +86,7 @@ pub(crate) static mut BUS_DEVICE_INIT: [BusDevice; 4] = [
     SENTINEL_DEVICE,
 ];
 
-/// The `bus_master_init[]` table walk, until the driver-less sentinel.
+/// The walk of [`BUS_MASTER_INIT`], until the driver-less sentinel.
 struct BusMasters {
     next: *mut BusCtlr,
 }
@@ -120,7 +115,7 @@ fn bus_masters() -> BusMasters {
     }
 }
 
-/// The `bus_device_init[]` table walk, until the driver-less sentinel.
+/// The walk of [`BUS_DEVICE_INIT`], until the driver-less sentinel.
 pub(crate) struct BusDevices {
     next: *mut BusDevice,
 }
@@ -149,13 +144,12 @@ pub(crate) fn bus_devices() -> BusDevices {
     }
 }
 
-/// `probeio()` of `i386/i386at/autoconf.c`: probe and attach the AT-bus
-/// devices.
+/// Probes and attaches the AT-bus devices.
 pub(crate) fn probeio() {
     let mut adapter = 0;
     for master in bus_masters() {
-        // SAFETY: every entry up to the sentinel is an initialized
-        // `bus_ctlr`, and the sentinel ends the walk.
+        // SAFETY: every entry up to the sentinel is an initialized `BusCtlr`,
+        // and the sentinel ends the walk.
         let (name, address, phys) = unsafe {
             ((*master).name, (*master).address, (*master).phys_address)
         };
@@ -176,7 +170,7 @@ pub(crate) fn probeio() {
 
     for device in bus_devices() {
         // SAFETY: every entry up to the sentinel is an initialized
-        // `bus_device`, and the sentinel ends the walk.
+        // `BusDevice`, and the sentinel ends the walk.
         let (name, address, phys, alive, ctlr) = unsafe {
             (
                 (*device).name,
@@ -205,8 +199,8 @@ pub(crate) fn probeio() {
     }
 }
 
-/// `take_dev_irq()` of `i386/i386at/autoconf.c`: bind `dev`'s interrupt to
-/// its line, or halt when another device already holds it.
+/// Binds `dev`'s interrupt to its line, or halts when another device already
+/// holds it.
 pub(crate) fn take_dev_irq(dev: &BusDevice) {
     // The table's `sysdep1` is an IRQ number below `NINTR`, so the narrowing
     // from `natural_t` cannot lose a bit.

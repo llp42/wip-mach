@@ -1263,7 +1263,7 @@ unsafe fn fill_state(
         let xfstate = state.cast::<I386XfloatState>();
         let image = unsafe { (*xfstate).hw_state.as_ptr() };
         // The caller's record is only four-byte aligned, below the 64 bytes
-        // [`I386XfpSave`] demands, so the image is read into an aligned
+        // `I386XfpSave` demands, so the image is read into an aligned
         // copy rather than referenced in place.
         let user = unsafe { ptr::read_unaligned(image.cast::<I386XfpSave>()) };
         // SAFETY: the caller supplied the XFLOAT record, and the union
@@ -1399,7 +1399,7 @@ unsafe fn get_xfloat_state(ifps: *mut I386FpSaveState, state: *mut c_void) {
     let xfp = unsafe { &(*ifps).save.xfp_save_state };
 
     // The caller's record is only four-byte aligned, below the 64 bytes
-    // [`I386XfpSave`] demands, so the image is built in an aligned, zeroed
+    // `I386XfpSave` demands, so the image is built in an aligned, zeroed
     // copy and then stored unaligned.
     // SAFETY: every field of the image is an integer or an array of them,
     // for which all-zero bits are valid.

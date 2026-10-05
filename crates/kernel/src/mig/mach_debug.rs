@@ -35,7 +35,7 @@ use core::mem::size_of;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::slice;
 
-/// `mach_port_get_srights()` of `ipc/mach_debug.c`.
+/// Reports how many send rights exist for the receive right `name`.
 ///
 /// # Safety
 ///
@@ -56,7 +56,7 @@ pub unsafe extern "C" fn mach_port_get_srights(
     }
 }
 
-/// `host_ipc_marequest_info()` of `ipc/mach_debug.c`.
+/// Reports the buckets of the msg-accepted request table.
 ///
 /// # Safety
 ///
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn host_ipc_marequest_info(
     }
 }
 
-/// `mach_port_dnrequest_info()` of `ipc/mach_debug.c`.
+/// Reports the size and use of the dead-name request table of `name`.
 ///
 /// # Safety
 ///
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn mach_port_dnrequest_info(
     }
 }
 
-/// `host_stack_usage()` of kern/thread.c.
+/// Reports the kernel stacks' usage.
 ///
 /// # Safety
 ///
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn host_stack_usage(
     0
 }
 
-/// `processor_set_stack_usage()` of kern/thread.c.
+/// Reports the kernel stacks' usage, for `pset`.
 ///
 /// # Safety
 ///
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn processor_set_stack_usage(
     0
 }
 
-/// `host_virtual_physical_table_info()` of `vm/vm_debug.c`.
+/// Reports the buckets of the virtual-to-physical table.
 ///
 /// # Safety
 ///
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn host_virtual_physical_table_info(
     }
 }
 
-/// `mach_port_kernel_object()` of `ipc/mach_debug.c`.
+/// Reports the type and address of the kernel object `name` names.
 ///
 /// # Safety
 ///
@@ -221,7 +221,7 @@ pub unsafe extern "C" fn mach_port_kernel_object(
     }
 }
 
-/// `mach_vm_region_info()` of `vm/vm_debug.c`.
+/// Reports the region of `map` at `address`, and its object's port.
 ///
 /// # Safety
 ///
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn mach_vm_region_info(
     }
 }
 
-/// `mach_vm_object_info()` of `vm/vm_debug.c`.
+/// Reports `object`'s information, and its shadow and copy.
 ///
 /// # Safety
 ///
@@ -272,7 +272,7 @@ pub unsafe extern "C" fn mach_vm_object_info(
     }
 }
 
-/// `mach_vm_object_pages()` of `vm/vm_debug.c`.
+/// Reports `object`'s resident pages.
 ///
 /// # Safety
 ///
@@ -324,8 +324,7 @@ pub unsafe extern "C" fn host_slab_info(
         let nr_caches = slab::nr_caches();
         let info_size = nr_caches as usize * size_of::<CacheInfo>();
 
-        // `kalloc` reports a zero-size request as failure, as the C's
-        // `info == NULL` check does.
+        // `kalloc` reports a zero-size request as failure.
         let Some(base) = slab::kalloc(info_size) else {
             return c_int::from(Error::ResourceShortage);
         };
@@ -412,7 +411,7 @@ pub unsafe extern "C" fn host_slab_info(
     }
 }
 
-/// `mach_vm_object_pages_phys()` of `vm/vm_debug.c`.
+/// Reports `object`'s resident pages with their physical addresses.
 ///
 /// # Safety
 ///

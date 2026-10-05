@@ -5,8 +5,7 @@
 //   Copyright (c) 1991,1990 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The VM debugging calls, which `vm/vm_debug.c` used to define, and the
-//! `mach_debug/vm_info.h` records they fill.
+//! The VM debugging calls, and the `mach_debug` interface records they fill.
 
 use crate::arch::types::{RpcPhysAddr, VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
@@ -26,7 +25,7 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use core::ptr::{NonNull, addr_of_mut, null_mut, with_exposed_provenance_mut};
 
-/// `VOI_STATE_*` of <`mach_debug/vm_info.h>`: the object-state bits.
+/// `VOI_STATE_*`: the object-state bits.
 const VOI_STATE_PAGER_CREATED: c_uint = 0x0000_0001;
 const VOI_STATE_PAGER_INITIALIZED: c_uint = 0x0000_0002;
 const VOI_STATE_PAGER_READY: c_uint = 0x0000_0004;
@@ -37,7 +36,7 @@ const VOI_STATE_ALIVE: c_uint = 0x0000_0040;
 const VOI_STATE_LOCK_IN_PROGRESS: c_uint = 0x0000_0080;
 const VOI_STATE_LOCK_RESTART: c_uint = 0x0000_0100;
 
-/// `VPI_STATE_*` of <`mach_debug/vm_info.h>`: the page-state bits.
+/// `VPI_STATE_*`: the page-state bits.
 const VPI_STATE_BUSY: c_uint = 0x0000_0001;
 const VPI_STATE_WANTED: c_uint = 0x0000_0002;
 const VPI_STATE_TABLED: c_uint = 0x0000_0004;
@@ -60,7 +59,8 @@ const VPI_STATE_NODATA: c_uint = VPI_STATE_BUSY
     | VPI_STATE_PRIVATE
     | VPI_STATE_ABSENT;
 
-/// `vm_region_info_t` of <`mach_debug/vm_info.h`>.
+/// `vm_region_info_t`: the record `mach_vm_region_info()` fills for one map
+/// entry.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct VmRegionInfo {
@@ -93,7 +93,8 @@ const _: () = {
     assert!(offset_of!(VmRegionInfo, vri_sharing) == 60);
 };
 
-/// `vm_object_info_t` of <`mach_debug/vm_info.h`>.
+/// `vm_object_info_t`: the record `mach_vm_object_info()` fills for one
+/// object.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct VmObjectInfo {
@@ -132,8 +133,8 @@ const _: () = {
     assert!(offset_of!(VmObjectInfo, voi_state) == 92);
 };
 
-/// `vm_page_info_t` of <`mach_debug/vm_info.h>`: the object-local record, whose
-/// physical address is a `vm_offset_t`.
+/// `vm_page_info_t`: the object-local page record, whose physical address is a
+/// `vm_offset_t`.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct VmPageInfo {
@@ -156,8 +157,8 @@ const _: () = {
     assert!(offset_of!(VmPageInfo, vpi_state) == 28);
 };
 
-/// `vm_page_phys_info_t` of <`mach_debug/vm_info.h>`: the interface record,
-/// whose physical address is the 64-bit `rpc_phys_addr_t`.
+/// `vm_page_phys_info_t`: the interface page record, whose physical address is
+/// the 64-bit `rpc_phys_addr_t`.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct VmPagePhysInfo {
@@ -185,14 +186,13 @@ const fn as_index(count: c_uint) -> usize {
     count as usize
 }
 
-/// `panic()` of `vm_debug.c`; the C called it with the routine name as both
-/// tags.
+/// Halts the kernel with `message`, under the `mach_vm_object_pages` tag.
 fn die(message: &'static str) -> ! {
     kpanic!("_mach_vm_object_pages", "{}", message)
 }
 
-/// `vm_object_real_name()` in C: a send right for the object's name port, or
-/// `IP_NULL` when the object or its name port is null.
+/// A send right for the object's name port, or null when the object or its
+/// name port is null.
 ///
 /// # Safety
 ///
@@ -215,8 +215,8 @@ unsafe fn object_real_name(object: *mut VmObject) -> *mut c_void {
     }
 }
 
-/// `mach_vm_region_info()` in C: the region containing or following
-/// `address`, and a send right for its object's name port.
+/// The region containing or following `address`, and a send right for its
+/// object's name port.
 ///
 /// # Safety
 ///
@@ -310,8 +310,8 @@ pub(crate) unsafe fn region_info(
     Ok((info, port))
 }
 
-/// `mach_vm_object_info()` in C: the object's record and send rights for its
-/// shadow and copy objects' name ports.
+/// The object's record and send rights for its shadow and copy objects' name
+/// ports.
 ///
 /// # Safety
 ///
@@ -459,8 +459,8 @@ impl PageRecord for VmPagePhysInfo {
     }
 }
 
-/// The state bits `_mach_vm_object_pages()` computes for one page, including
-/// the two `pmap_is_*()` probes.
+/// The state bits [`object_pages`] reports for one page, including the two
+/// `pmap_is_*()` probes.
 ///
 /// # Safety
 ///
@@ -536,8 +536,7 @@ unsafe fn page_state(page: *mut VmPage) -> c_uint {
     }
 }
 
-/// `_mach_vm_object_pages()` in C, generic over the record the caller asked
-/// for.
+/// The page records of `object`, of the record type `R` the caller asked for.
 ///
 /// # Safety
 ///
@@ -663,7 +662,7 @@ unsafe fn object_pages<R: PageRecord>(
     Ok(())
 }
 
-/// `mach_vm_object_pages()` in C.
+/// The object-local page records `mach_vm_object_pages()` reports.
 ///
 /// # Safety
 ///
@@ -676,7 +675,7 @@ pub(crate) unsafe fn object_pages_info(
     unsafe { object_pages::<VmPageInfo>(object, pagesp, countp) }
 }
 
-/// `mach_vm_object_pages_phys()` in C.
+/// The physical page records `mach_vm_object_pages_phys()` reports.
 ///
 /// # Safety
 ///
@@ -689,7 +688,8 @@ pub(crate) unsafe fn object_pages_phys(
     unsafe { object_pages::<VmPagePhysInfo>(object, pagesp, countp) }
 }
 
-/// `host_virtual_physical_table_info()` in C.
+/// The bucket occupancy of the virtual-to-physical page table, as
+/// `host_virtual_physical_table_info()` reports it.
 ///
 /// # Safety
 ///

@@ -6,9 +6,9 @@
 //   Copyright 1988, 1989 by Intel Corporation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kd output engine of <i386at/kd.c>: `kd_putc()` draws one character,
-//! `kd_putc_esc()` collects escape sequences, and `kd_parserest()` interprets
-//! the ANSI commands the console writes.
+//! The kd output engine: [`putc`] draws one character, [`putc_esc`] collects
+//! escape sequences, and [`parse_parameters`] interprets the ANSI commands the
+//! console writes.
 
 use super::display::{
     dclear, dmvdown, dmvup, dput, scrolldn, scrollup, setpos,
@@ -36,7 +36,7 @@ enum Progress {
     Incomplete,
 }
 
-/// `kd_putc()` in C.
+/// Draws `ch` at the cursor, handling the control characters.
 pub(crate) fn putc(ch: u8) {
     if ch == 0 && state().sit_for_0 {
         return;
@@ -73,7 +73,7 @@ fn bell_off_action(_callout: Pin<&MachCallout>) {
     unsafe { kd_belloff(core::ptr::null_mut()) };
 }
 
-/// `kd_putc_esc()` in C.
+/// Feeds `c` to the escape-sequence collector, or draws it outside a sequence.
 pub(crate) fn putc_esc(c: u8) {
     let spt = state().esc_spt;
 
@@ -106,7 +106,7 @@ pub(crate) fn putc_esc(c: u8) {
     }
 }
 
-/// `kd_parseesc()` in C.
+/// Parses the collected escape sequence.
 fn parse_escape() -> Progress {
     let seq = state().esc_seq;
     match seq[1] {
@@ -124,7 +124,7 @@ fn parse_escape() -> Progress {
     }
 }
 
-/// `kd_parserest()` in C.
+/// Parses the parameters of a CSI sequence from `start` and runs its command.
 fn parse_parameters(seq: &[u8], start: usize) -> Progress {
     let mut cp = start;
     let mut number: [Option<c_int>; MAX_PARAMS] = [None; MAX_PARAMS];
@@ -280,8 +280,7 @@ fn set_attributes(values: &[Option<c_int>]) {
     update_attr();
 }
 
-/// `kd_update_kd_attr()` in C: blend `kd_attrflags` and `kd_color` into
-/// `kd_attr`.
+/// Blends `kd_attrflags` and `kd_color` into `kd_attr`.
 fn update_attr() {
     let s = state();
     let mut attr = s.kd_color;
@@ -302,12 +301,12 @@ fn update_attr() {
     s.kd_attr = attr;
 }
 
-/// The `reverse_video_char()` macro of <i386at/kd.c>.
+/// The reverse-video form of the attribute `attr`.
 const fn reverse_video(attr: u8) -> u8 {
     (attr & 0x88) | (attr.rotate_left(4) & 0x77)
 }
 
-/// `kd_up()` in C: one line up, scrolling the screen down at the top.
+/// Moves one line up, scrolling the screen down at the top.
 fn move_up() {
     let pos = state().kd_curpos;
     if pos < ONE_LINE {
@@ -317,7 +316,7 @@ fn move_up() {
     }
 }
 
-/// `kd_down()` in C: one line down, scrolling the screen up at the bottom.
+/// Moves one line down, scrolling the screen up at the bottom.
 fn move_down() {
     let pos = state().kd_curpos;
     if pos >= ONE_PAGE - ONE_LINE {
@@ -327,7 +326,7 @@ fn move_down() {
     }
 }
 
-/// `kd_right()` in C: one cell right, scrolling at the line end.
+/// Moves one cell right, scrolling at the line end.
 fn move_right() {
     let pos = state().kd_curpos;
     if pos < ONE_PAGE - ONE_SPACE {
@@ -338,7 +337,7 @@ fn move_right() {
     }
 }
 
-/// `kd_left()` in C: one cell left, stopping at the screen start.
+/// Moves one cell left, stopping at the screen start.
 fn move_left() {
     let pos = state().kd_curpos;
     if pos > 0 {
@@ -346,17 +345,17 @@ fn move_left() {
     }
 }
 
-/// `kd_cr()` in C.
+/// Moves to the line start.
 fn carriage_return() {
     setpos(beg_of_line(state().kd_curpos));
 }
 
-/// `kd_home()` in C.
+/// Moves to the screen's top-left cell.
 fn home() {
     setpos(0);
 }
 
-/// `kd_tab()` in C: spaces up to the next multiple of eight.
+/// Writes spaces up to the next multiple of eight.
 fn tab() {
     let pos = state().kd_curpos;
     let spaces = 8 - current_column(pos) % 8;
@@ -367,46 +366,45 @@ fn tab() {
     }
 }
 
-/// `kd_cls()` in C: blank the whole screen.
+/// Blanks the whole screen.
 fn clear_screen() {
     let (_, attr) = cursor();
     dclear(0, c_int::from(ONE_PAGE / ONE_SPACE), attr);
 }
 
-/// `kd_cltobcur()` in C: blank from the cursor to the screen bottom.
+/// Blanks from the cursor to the screen bottom.
 fn clear_to_bottom() {
     let (pos, attr) = cursor();
     let count = (ONE_PAGE - pos) / ONE_SPACE;
     dclear(pos, c_int::from(count), attr);
 }
 
-/// `kd_cltopcur()` in C: blank from the screen top to the cursor.
+/// Blanks from the screen top to the cursor.
 fn clear_from_top() {
     let (pos, attr) = cursor();
     let count = (pos + ONE_SPACE) / ONE_SPACE;
     dclear(0, c_int::from(count), attr);
 }
 
-/// `kd_cltoecur()` in C: blank from the cursor to the line end.
+/// Blanks from the cursor to the line end.
 fn clear_to_line_end() {
     let (pos, attr) = cursor();
     blank(pos, beg_of_line(pos) + ONE_LINE, attr);
 }
 
-/// `kd_clfrbcur()` in C: blank from the line start through the cursor.
+/// Blanks from the line start through the cursor.
 fn clear_from_line_start() {
     let (pos, attr) = cursor();
     blank(beg_of_line(pos), pos + ONE_SPACE, attr);
 }
 
-/// `kd_eraseln()` in C: blank the whole line.
+/// Blanks the whole line.
 fn erase_line() {
     let (pos, attr) = cursor();
     blank(beg_of_line(pos), beg_of_line(pos) + ONE_LINE, attr);
 }
 
-/// `kd_erase()` in C: blank `number` cells from the cursor, stopping at the
-/// line end.
+/// Blanks `number` cells from the cursor, stopping at the line end.
 fn erase_chars(number: c_int) {
     let (pos, attr) = cursor();
     let mut stop = pos + ONE_SPACE * number as c_short;
@@ -417,7 +415,7 @@ fn erase_chars(number: c_int) {
     blank(pos, stop, attr);
 }
 
-/// `kd_insch()` in C: open `number` cells for characters at the cursor.
+/// Opens `number` cells for characters at the cursor.
 fn insert_chars(number: c_int) {
     if number <= 0 {
         return;
@@ -438,7 +436,7 @@ fn insert_chars(number: c_int) {
     dclear(pos, count, attr);
 }
 
-/// `kd_delln()` in C: delete `number` lines at the cursor.
+/// Deletes `number` lines at the cursor.
 fn delete_lines(number: c_int) {
     if number <= 0 {
         return;
@@ -459,7 +457,7 @@ fn delete_lines(number: c_int) {
     dclear(to, count, attr);
 }
 
-/// `kd_insln()` in C: open `number` lines at the cursor.
+/// Opens `number` lines at the cursor.
 fn insert_lines(number: c_int) {
     if number <= 0 {
         return;
@@ -480,7 +478,7 @@ fn insert_lines(number: c_int) {
     dclear(top, count, attr);
 }
 
-/// `kd_delch()` in C: delete `number` cells at the cursor.
+/// Deletes `number` cells at the cursor.
 fn delete_chars(number: c_int) {
     if number <= 0 {
         return;

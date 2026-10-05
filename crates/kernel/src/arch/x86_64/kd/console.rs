@@ -6,8 +6,8 @@
 //   Copyright 1988, 1989 by Intel Corporation.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The kd console entry points, which <device/cons.c> calls through `constab`:
-//! probe/init and the polled getc/putc, plus the bell ioctl.
+//! The kd console entry points the console table calls: probe/init and the
+//! polled getc/putc, plus the bell ioctl.
 
 use super::keymap::KEY_MAP;
 use super::{
@@ -20,11 +20,11 @@ use crate::device::r#return::{DeviceError, DeviceSuccess, IoResult};
 use crate::kern::console::kprint;
 use core::ffi::{c_int, c_uint};
 
-/// `KD_BELLON`/`KD_BELLOFF` of <i386at/kd.h>.
+/// The bell ioctl's on and off values.
 const KD_BELLON: c_int = 1;
 const KD_BELLOFF: c_int = 0;
 
-/// `kdcnprobe()` in C.
+/// Claims the console as the internal display and keyboard.
 ///
 /// # Safety
 ///
@@ -35,7 +35,7 @@ pub(crate) unsafe fn kdcnprobe(cp: *mut ConsDev) {
     cp.cn_pri = CN_INTERNAL;
 }
 
-/// `kdcninit()` in C.
+/// Initializes the display and keyboard.
 ///
 /// # Safety
 ///
@@ -44,7 +44,7 @@ pub(crate) unsafe fn kdcninit(_cp: *mut ConsDev) {
     kdinit();
 }
 
-/// `kdcngetc()` in C.
+/// Reads a character, spinning for one when `wait` is set, or `-1`.
 ///
 /// # Safety
 ///
@@ -63,11 +63,11 @@ pub(crate) unsafe fn kdcngetc(_dev: u16, wait: c_int) -> c_int {
     }
 }
 
-/// `kdcnputc()` in C: a character before `kdinit()` is dropped.
+/// Writes `c` to the screen; a character before `kdinit()` is dropped.
 ///
 /// # Safety
 ///
-/// The caller must hold `SPLKD`.
+/// The caller must hold `spltty`.
 pub(crate) unsafe fn kdcnputc(_dev: u16, c: c_int) {
     if !state().kd_initialized {
         return;
@@ -79,7 +79,7 @@ pub(crate) unsafe fn kdcnputc(_dev: u16, c: c_int) {
     esc::putc_esc(c as u8);
 }
 
-/// `kdcnmaygetc()` in C.
+/// Reads a character from the keyboard controller without waiting, or `-1`.
 pub(crate) fn maygetc() -> c_int {
     if !state().kd_initialized {
         return -1;
@@ -122,29 +122,29 @@ pub(crate) fn maygetc() -> c_int {
                 kd().state_bits() as c_uint,
                 state().kd_extended,
             );
-            // SAFETY: `scancode` is below `NUMKEYS`, `char_idx` is a
-            // `key_map` column, and the table is never written after boot.
+            // SAFETY: `scancode` is below `NUMKEYS`, `char_idx` is a `KEY_MAP`
+            // column, and the table is never written after boot.
             let mut c = unsafe { KEY_MAP[scancode as usize][char_idx] };
             if c == K_SCAN {
                 char_idx += 1;
                 // SAFETY: `scancode` is below `NUMKEYS`, `char_idx` is a
-                // `key_map` column, and the table is never written
-                // after boot; `char_idx + 1` is still a valid column.
+                // `KEY_MAP` column, and the table is never written after boot;
+                // `char_idx + 1` is still a valid column.
                 c = unsafe { KEY_MAP[scancode as usize][char_idx] };
                 let st = keyboard::modifier(kd().state_bits(), c, up);
                 kd().set_state_bits(st);
             } else if !up
                 && c == K_ESC
                 // SAFETY: `scancode` is below `NUMKEYS`, `char_idx` is a
-                // `key_map` column, and the table is never written
-                // after boot; `char_idx + 1` is a valid column.
+                // `KEY_MAP` column, and the table is never written after boot;
+                // `char_idx + 1` is a valid column.
                 && unsafe { KEY_MAP[scancode as usize][char_idx + 1] } == 0x5b
             {
                 // Remap some keys to the readline-like shortcuts the console
                 // reader supports.
                 // SAFETY: `scancode` is below `NUMKEYS`, `char_idx` is a
-                // `key_map` column, and the table is never written
-                // after boot; `char_idx + 2` is a valid column.
+                // `KEY_MAP` column, and the table is never written after boot;
+                // `char_idx + 2` is a valid column.
                 c = unsafe { KEY_MAP[scancode as usize][char_idx + 2] };
                 return match c {
                     0x48 => 0x01, // home
@@ -166,7 +166,7 @@ pub(crate) fn maygetc() -> c_int {
     }
 }
 
-/// `kdsetbell()` in C: turn the bell on or off.
+/// Turns the bell on or off.
 pub(crate) fn set_bell(val: c_int, _flags: c_int) -> IoResult {
     if val == KD_BELLON {
         kd_bellon();

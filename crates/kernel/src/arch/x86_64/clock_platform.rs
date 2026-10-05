@@ -45,8 +45,7 @@ impl TimePage for MachPlatform {
     }
 }
 
-/// `mtime` of `kern/mach_clock.c`: the page `mapable_time_init()` wired, or
-/// null before that.
+/// The mapped time page [`mapable_time_init`] wired, or null before that.
 static MTIME: AtomicPtr<MappedTimeValue> = AtomicPtr::new(ptr::null_mut());
 
 /// Publish both domains to the mapped time page (the `clock` crate's
@@ -56,21 +55,20 @@ pub(crate) fn publish_mapped_time(wall_nanos: u64, uptime_nanos: u64) {
     update_mapped_uptime(TimeValue64::from_nanos(uptime_nanos));
 }
 
-/// `update_mapped_time()` in `kern/mach_clock.c`.
+/// Publishes `value` as the wall time on the mapped time page.
 fn update_mapped_time(value: TimeValue64) {
     let mtime = MTIME.load(Ordering::Relaxed);
     if mtime.is_null() {
         return;
     }
 
-    // The C stored the `int64_t` seconds into the page's `int` fields, and
-    // the truncation is part of the interface `include/mach/time_value.h`
-    // documents.  The volatile stores and SeqCst fences are the C's
-    // `volatile` pointer and `__sync_synchronize()`.
-    // SAFETY: `mtime` is the page `mapable_time_init()` wired, never
-    // unmapped, and its only writer is the master CPU's clock interrupt,
-    // where this runs; every field written is a plain scalar of the
-    // `mapped_time_value_t` mirror.
+    // The seconds are stored into the page's `int` fields too, and their
+    // truncation is part of the interface.  The volatile stores and `SeqCst`
+    // fences order the writes for the user side's double check.
+    // SAFETY: `mtime` is the page `mapable_time_init()` wired, never unmapped,
+    // and its only writer is the master CPU's clock interrupt, where this
+    // runs; every field written is a plain scalar of the `MappedTimeValue`
+    // mirror.
     unsafe {
         addr_of_mut!((*mtime).check_seconds)
             .write_volatile(value.seconds as c_int);
@@ -87,7 +85,7 @@ fn update_mapped_time(value: TimeValue64) {
     }
 }
 
-/// `update_mapped_uptime()` in `kern/mach_clock.c`.
+/// Publishes `value` as the uptime on the mapped time page.
 fn update_mapped_uptime(value: TimeValue64) {
     let mtime = MTIME.load(Ordering::Relaxed);
     if mtime.is_null() {
@@ -108,7 +106,7 @@ fn update_mapped_uptime(value: TimeValue64) {
     }
 }
 
-/// `mapable_time_init()` in `kern/mach_clock.c`.
+/// Wires and zeroes the mapped time page, then publishes the clock on it.
 pub(crate) fn mapable_time_init() {
     // SAFETY: `kernel_map` is the live kernel map this boot step runs on.
     let map = unsafe { NonNull::new_unchecked(KERNEL_MAP) };
@@ -126,8 +124,7 @@ pub(crate) fn mapable_time_init() {
     publish_mapped_time(CLOCK.wall().as_nanos(), CLOCK.mono().as_nanos());
 }
 
-/// The mapped time page: `mtime` of `kern/mach_clock.c`, null until
-/// `mapable_time_init()` ran at boot.
+/// The mapped time page, null until [`mapable_time_init`] ran at boot.
 pub(crate) fn mapped_time_page() -> *mut MappedTimeValue {
     MTIME.load(Ordering::Relaxed)
 }
@@ -163,9 +160,9 @@ pub(crate) fn tick(basepri: bool) {
 
     if wheel().poll() {
         if basepri {
-            // SAFETY: `splsoftclock()` is the routine <i386/spl.h>
-            // declares; the C discarded its level because the interrupt
-            // return restores it.
+            // SAFETY: lowering to the soft-clock level has no precondition
+            // here; the level is discarded because the interrupt return
+            // restores it.
             let _ = unsafe { spl::splsoftclock() };
             softclock();
         } else {

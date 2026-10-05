@@ -5,8 +5,7 @@
 //   Copyright (c) 1993,1992,1991,1990,1989,1988,1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The exception up-call and its continuations, which `kern/exception.c` used
-//! to define for <kern/exception.h>.
+//! The exception up-call and its continuations.
 
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::user_access;
@@ -37,41 +36,40 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 /// The exception number zero, which names no exception.
 const NO_EXCEPTION: c_int = 0;
-/// `MACH_RCV_NOTIFY` of <mach/message.h>.
+/// The receive option naming a reply destination in the notify name.
 const MACH_RCV_NOTIFY: c_int = 0x0000_0200;
-/// `MACH_MSG_OPTION_NONE` of <mach/message.h>.
+/// No message options.
 const MACH_MSG_OPTION_NONE: c_uint = 0;
-/// `MACH_MSG_TIMEOUT_NONE` of <mach/message.h>.
+/// No timeout.
 const MACH_MSG_TIMEOUT_NONE: c_uint = 0;
-/// `MACH_MSG_SIZE_MAX` of <mach/message.h>.
+/// The largest message size, an unbounded receive.
 const MACH_MSG_SIZE_MAX: c_uint = 0xffff_ffff;
-/// `MACH_MSGH_BITS_COMPLEX` of <mach/message.h>.
+/// The header bit of a message that carries rights.
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
-/// `MACH_MSG_TYPE_MOVE_SEND` of <mach/message.h>.
+/// The disposition that moves a send right.
 const MACH_MSG_TYPE_MOVE_SEND: u32 = 17;
-/// `MACH_MSG_TYPE_MOVE_SEND_ONCE` of <mach/message.h>.
+/// The disposition that moves a send-once right.
 const MACH_MSG_TYPE_MOVE_SEND_ONCE: u32 = 18;
-/// `MACH_MSG_TYPE_INTEGER_32` of <mach/message.h>.
+/// The type of a 32-bit integer in a message body.
 const MACH_MSG_TYPE_INTEGER_32: u32 = 2;
-/// `MACH_MSG_TYPE_INTEGER_64` of <mach/message.h>.
+/// The type of a 64-bit integer in a message body.
 const MACH_MSG_TYPE_INTEGER_64: u32 = 11;
 /// `MACH_EXCEPTION_ID` of mach/exc.defs.
 const MACH_EXCEPTION_ID: c_int = 2400;
 /// `MACH_EXCEPTION_REPLY_ID`: the reply's `msgh_id`.
 const MACH_EXCEPTION_REPLY_ID: c_int = 2500;
-/// `MACH_PORT_NAME_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NAME_NULL: c_uint = 0;
-/// `MACH_PORT_TYPE_SEND_ONCE` of <mach/port.h>: `1 << (right + 16)` for the
-/// send-once right.
+/// The type bit of a send-once right: `1 << (right + 16)`.
 const MACH_PORT_TYPE_SEND_ONCE: u32 = 1 << 18;
-/// `PORT_T_SIZE_IN_BITS` of `ipc/ipc_machdep.h`.
+/// The size of a port in a message body, in bits.
 const PORT_T_BITS: u32 = 64;
-/// `RPC_LONG_INTEGER_T_SIZE_IN_BITS` of kern/exception.c.
+/// The size of an exception code in a message body, in bits.
 const RPC_LONG_T_BITS: u32 = 64;
-/// `RPC_LONG_INTEGER_T_TYPE` of kern/exception.c.
+/// The type of an exception code in a message body.
 const RPC_LONG_T_TYPE: u32 = MACH_MSG_TYPE_INTEGER_64;
 
-/// `MACH_MSGH_BITS(remote, local)` of <mach/message.h>.
+/// The header bits of a message with the `remote` and `local` dispositions.
 const fn mach_msg_bits(remote: u32, local: u32) -> u32 {
     remote | (local << 8)
 }
@@ -82,17 +80,16 @@ const fn descriptor_word(name: u32, size: u32) -> u32 {
     name | (size << 8) | (1 << 29)
 }
 
-/// `exc_port_proto` of kern/exception.c: a send right to the destination
-/// port.
+/// A send right to the destination port.
 const EXC_PORT_PROTO: MachMsgType =
     MachMsgType::new(descriptor_word(MACH_MSG_TYPE_MOVE_SEND, PORT_T_BITS), 1);
-/// `exc_code_proto` of kern/exception.c: the exception code.
+/// The exception code.
 const EXC_CODE_PROTO: MachMsgType =
     MachMsgType::new(descriptor_word(MACH_MSG_TYPE_INTEGER_32, 32), 1);
-/// `exc_subcode_proto` of kern/exception.c: the exception subcode.
+/// The exception subcode.
 const EXC_SUBCODE_PROTO: MachMsgType =
     MachMsgType::new(descriptor_word(RPC_LONG_T_TYPE, RPC_LONG_T_BITS), 1);
-/// `exc_RetCode_proto` of kern/exception.c: the reply's return code.
+/// The reply's return code.
 const EXC_RETCODE_PROTO: MachMsgType =
     MachMsgType::new(descriptor_word(MACH_MSG_TYPE_INTEGER_32, 32), 1);
 
@@ -103,8 +100,8 @@ const _: () = {
     assert!(EXC_RETCODE_PROTO.word() == 0x2000_2002);
 };
 
-/// `struct mach_exception` of kern/exception.c: the message this module
-/// synthesizes for an exception server.
+/// The `exception_raise` request message this module builds for an exception
+/// server.
 #[repr(C)]
 #[allow(missing_docs)]
 struct MachException {
@@ -137,8 +134,7 @@ const _: () = {
     assert!(offset_of!(MachException, subcode) == 104);
 };
 
-/// `exception_raise_misses` of kern/exception.c: how often the optimized
-/// handoff failed, a counter for a debugger to read.
+/// How often the optimized handoff failed, a counter for a debugger to read.
 static EXCEPTION_RAISE_MISSES: AtomicU32 = AtomicU32::new(0);
 
 /// Whether `thread` has a halt or terminate reason pending.
@@ -154,19 +150,19 @@ fn port_ptr(port: Option<IpcPort>) -> *mut c_void {
     port.map_or(ptr::null_mut(), IpcPort::as_ptr)
 }
 
-/// The continuation `thread_halt_self()` resumes a halted thread through,
-/// <`kern/sched_prim.h`>'s `thread_exception_return`.
+/// The continuation `Thread::halt_self` resumes a halted thread through: the
+/// return to user mode.
 unsafe extern "C" fn exception_return() {
     // SAFETY: the routine returns to user mode and never comes back.
     unsafe { crate::arch::x86_64::locore::thread_exception_return() }
 }
 
-/// The continuation `thread_halt_self()` resumes a halted thread through in
-/// `exception_raise_continue_slow()`.
+/// The continuation `Thread::halt_self` resumes a halted thread through in
+/// [`continue_slow`]: releases the reply port, then returns to user mode.
 unsafe extern "C" fn thread_release_and_exception_return() {
     let self_ = per_cpu::thread();
-    // SAFETY: the thread is at a clean point, and `ith_port` is the live
-    // reply port whose reference this continuation releases.
+    // SAFETY: the thread is at a clean point, and its saved exception port is
+    // the live reply port whose reference this continuation releases.
     let reply_port =
         unsafe { IpcPort::from_raw((*self_).saved.exception.port) };
     // SAFETY: the reference the receive path was holding is this call's.
@@ -175,7 +171,8 @@ unsafe extern "C" fn thread_release_and_exception_return() {
     unsafe { crate::arch::x86_64::locore::thread_exception_return() }
 }
 
-/// `exception_no_server()` of kern/exception.c.
+/// Halts the thread while it should halt, then terminates its task: no
+/// exception server took the exception.
 ///
 /// # Safety
 ///
@@ -186,9 +183,8 @@ pub(crate) unsafe fn no_server() -> ! {
     let thread = per_cpu::thread();
 
     while should_halt(thread) {
-        // SAFETY: `thread_exception_return` never returns; it is the
-        // continuation the C passed, and `thread_halt_self()` only comes back
-        // when the thread is released to halt cleanly.
+        // SAFETY: `thread_exception_return` never returns; `Thread::halt_self`
+        // only comes back when the thread is released to halt cleanly.
         unsafe {
             Thread::halt_self(Some(exception_return));
         }
@@ -205,8 +201,8 @@ pub(crate) unsafe fn no_server() -> ! {
     kpanic!("exception_no_server", "terminating the task didn't kill us")
 }
 
-/// `exception()` of kern/exception.c: make an up-call to the thread's
-/// exception server, or to the task's when the thread has none.
+/// Makes an up-call to the thread's exception server, or to the task's when
+/// the thread has none.
 ///
 /// # Safety
 ///
@@ -248,8 +244,8 @@ pub(crate) unsafe fn exception(
         unsafe { try_task(exception_, code, subcode) }
     }
 
-    // SAFETY: the port is live and locked; the C's bare `ip_reference()` and
-    // `ip_srights++` are the increments, and `ith_exc*` save the state for
+    // SAFETY: the port is live and locked; the reference and the send right
+    // are the increments, and the thread's saved exception state is kept for
     // the task fallback.
     unsafe {
         exc_port.increment_references();
@@ -280,8 +276,7 @@ pub(crate) unsafe fn exception(
     }
 }
 
-/// `exception_try_task()` of kern/exception.c: make an up-call to the task's
-/// exception server.
+/// Makes an up-call to the task's exception server.
 ///
 /// # Safety
 ///
@@ -321,9 +316,8 @@ pub(crate) unsafe fn try_task(
         unsafe { no_server() }
     }
 
-    // SAFETY: the port is live and locked; the increments are the C's bare
-    // `ip_reference()` and `ip_srights++`, and the saved state is cleared for
-    // the last chance.
+    // SAFETY: the port is live and locked; the reference and the send right
+    // are the increments, and the saved state is cleared for the last chance.
     unsafe {
         exc_port.increment_references();
         exc_port.increment_srights();
@@ -368,8 +362,8 @@ struct Rights {
 }
 
 impl Rights {
-    /// The `slow_exception_raise` arm: synthesize the kmsg and send it, then
-    /// wait for the reply.
+    /// The slow path of [`raise`]: builds the message, sends it, then waits
+    /// for the reply.
     ///
     /// # Safety
     ///
@@ -775,9 +769,9 @@ unsafe fn finish_copyout(
         };
     }
 
-    // SAFETY: the receiver's buffer is writable for the whole record,
-    // which its `ith_rcv_size` check established, and the message is live
-    // and owned by this call.
+    // SAFETY: the receiver's buffer is writable for the whole record, which
+    // its saved receive size check established, and the message is live and
+    // owned by this call.
     if unsafe {
         user_access::copyout(
             head.cast(),
@@ -828,8 +822,7 @@ unsafe fn finish_copyout(
     };
 }
 
-/// `exception_raise()` of kern/exception.c: make an `exception_raise`
-/// up-call to an exception server.
+/// Makes an `exception_raise` up-call to an exception server.
 ///
 /// # Safety
 ///
@@ -914,9 +907,9 @@ unsafe fn resolve_reply_port(self_: *mut Thread) -> (IpcPort, *mut IpcMqueue) {
         port
     };
 
-    // SAFETY: the reply port is live and locked; the C's bare
-    // `ip_sorights++` and two `ip_reference()` calls, then the second
-    // reference is saved in `ith_port`.
+    // SAFETY: the reply port is live and locked; a send-once right and two
+    // references are taken, and the second reference is saved as the thread's
+    // exception port.
     unsafe {
         reply_port.increment_sorights();
         reply_port.increment_references();
@@ -1039,9 +1032,9 @@ unsafe fn handoff(
     Some((mqueue, receiver))
 }
 
-/// `exception_parse_reply()` of kern/exception.c: check and consume the reply
-/// the server sent back, and return whether the server handled the
-/// exception, its reply well formed and its return code `KERN_SUCCESS`.
+/// Checks and consumes the reply the server sent back, and returns whether the
+/// server handled the exception: its reply well formed and its return code
+/// `KERN_SUCCESS`.
 ///
 /// # Safety
 ///
@@ -1052,7 +1045,7 @@ pub(crate) unsafe fn parse_reply(kmsg: Kmsg) -> bool {
     let msg = unsafe { kmsg.header().cast::<MigReplyHeader>() };
     let head = unsafe { ptr::addr_of_mut!((*msg).head) };
 
-    // SAFETY: the reply header is live; the C's `BAD_TYPECHECK` compares the
+    // SAFETY: the reply header is live; the type check compares the
     // descriptor's first word.
     let misformatted = unsafe {
         (*head).bits() != mach_msg_bits(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0)
@@ -1078,17 +1071,16 @@ pub(crate) unsafe fn parse_reply(kmsg: Kmsg) -> bool {
     code == KERN_SUCCESS
 }
 
-/// `exception_raise_continue()` of kern/exception.c: resume the receive after
-/// the handoff put this thread to sleep.
+/// Resumes the receive after the handoff put this thread to sleep.
 ///
 /// # Safety
 ///
-/// Must run as the continuation `exception_raise()` left in the thread,
-/// with `ith_port` naming the live reply port and that port's message
-/// queue left locked for this resumption.
+/// Must run as the continuation [`raise`] left in the thread, with its saved
+/// exception port naming the live reply port and that port's message queue
+/// left locked for this resumption.
 pub(crate) unsafe fn raise_continue() -> ! {
     let self_ = per_cpu::thread();
-    // SAFETY: the thread's `ith_port` was set by `exception_raise()`.
+    // SAFETY: `raise` set the thread's saved exception port.
     let reply_port =
         unsafe { IpcPort::from_raw((*self_).saved.exception.port) };
     let reply_mqueue = unsafe { reply_port.messages() };
@@ -1116,19 +1108,19 @@ pub(crate) unsafe fn raise_continue() -> ! {
     }
 }
 
-/// `exception_raise_continue_slow()` of kern/exception.c: finish an exception
-/// reply receive, retrying while the thread is interrupted.
+/// Finishes an exception reply receive, retrying while the thread is
+/// interrupted.
 ///
 /// # Safety
 ///
-/// The caller must be the running thread, entering with no locks held and
-/// with `ith_port` naming the live reply port; when `received` holds a
-/// message, the caller owns it.
+/// The caller must be the running thread, entering with no locks held and with
+/// its saved exception port naming the live reply port; when `received` holds
+/// a message, the caller owns it.
 pub(crate) unsafe fn continue_slow(
     mut received: Result<Kmsg, ReceiveError>,
 ) -> ! {
     let self_ = per_cpu::thread();
-    // SAFETY: the thread's `ith_port` was set by `exception_raise()`.
+    // SAFETY: `raise` set the thread's saved exception port.
     let reply_port =
         unsafe { IpcPort::from_raw((*self_).saved.exception.port) };
     let reply_mqueue = unsafe { reply_port.messages() };
@@ -1137,7 +1129,8 @@ pub(crate) unsafe fn continue_slow(
         while should_halt(self_) {
             // SAFETY: the AST and the port are the running thread's.
             if unsafe { (*self_).ast }.contains(AstReason::TERMINATE) {
-                // SAFETY: the reference `ith_port` names is this call's.
+                // SAFETY: the reference the saved exception port holds is this
+                // call's.
                 unsafe { reply_port.release() };
             }
             // SAFETY: the thread halts at a clean point; the continuation
@@ -1180,7 +1173,8 @@ pub(crate) unsafe fn continue_slow(
         };
     }
 
-    // SAFETY: the reference `ith_port` names is the one this call releases.
+    // SAFETY: the reference the saved exception port holds is the one this
+    // call releases.
     unsafe { reply_port.release() };
 
     let handled = match received {
@@ -1214,13 +1208,13 @@ pub(crate) unsafe fn continue_slow(
 
     unsafe { no_server() }
 }
-/// `exception_raise_continue()` of kern/exception.c; the receive path passes
-/// it as its continuation.
+/// The continuation the exception reply receive passes: resumes it after a
+/// wait.
 ///
 /// # Safety
 ///
-/// Runs as the continuation `exception_raise()` left in the thread, with
-/// `ith_port` naming the live reply port.
+/// Runs as the continuation [`raise`] left in the thread, with its saved
+/// exception port naming the live reply port.
 pub(crate) unsafe extern "C" fn exception_raise_continue() {
     unsafe { raise_continue() }
 }

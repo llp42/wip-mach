@@ -229,8 +229,8 @@ pub(crate) unsafe fn mach_notify_new_task(
     })
 }
 
-/// `memory_object_data_error()` of the MIG `memory_object_reply` stubs,
-/// with the error the pager reports for the range.
+/// `memory_object_data_error()` of the MIG `mach` stubs, with the error the
+/// pager reports for the range.
 ///
 /// # Errors
 ///
@@ -255,7 +255,7 @@ pub(crate) unsafe fn r_memory_object_data_error(
     })
 }
 
-/// `memory_object_ready()` of the MIG `memory_object_reply` stubs.
+/// `memory_object_ready()` of the MIG `mach` stubs.
 ///
 /// # Errors
 ///
@@ -278,8 +278,8 @@ pub(crate) unsafe fn r_memory_object_ready(
     })
 }
 
-/// `memory_object_data_request()` of the MIG `memory_object_user` stubs,
-/// with the protection bits unwrapped for the C.
+/// `memory_object_data_request()` of the MIG `memory_object` stubs, with the
+/// protection bits unwrapped for the stub.
 ///
 /// # Errors
 ///
@@ -307,8 +307,8 @@ pub(crate) unsafe fn memory_object_data_request(
     })
 }
 
-/// `memory_object_data_unlock()` of the MIG `memory_object_user` stubs,
-/// with the protection bits unwrapped for the C.
+/// `memory_object_data_unlock()` of the MIG `memory_object` stubs, with the
+/// protection bits unwrapped for the stub.
 ///
 /// # Errors
 ///
@@ -336,7 +336,7 @@ pub(crate) unsafe fn memory_object_data_unlock(
     })
 }
 
-/// `memory_object_data_return()` of the MIG `memory_object_user` stubs.
+/// `memory_object_data_return()` of the MIG `memory_object` stubs.
 ///
 /// # Errors
 ///
@@ -397,7 +397,7 @@ pub(crate) unsafe fn memory_object_data_initialize(
     })
 }
 
-/// `memory_object_lock_completed()` of the MIG `memory_object_user` stubs.
+/// `memory_object_lock_completed()` of the MIG `memory_object` stubs.
 ///
 /// # Errors
 ///
@@ -425,8 +425,8 @@ pub(crate) unsafe fn memory_object_lock_completed(
     })
 }
 
-/// `memory_object_supply_completed()` of the MIG `memory_object_user`
-/// stubs, with the outcome of the supply.
+/// `memory_object_supply_completed()` of the MIG `memory_object` stubs, with
+/// the outcome of the supply.
 ///
 /// # Errors
 ///
@@ -458,8 +458,7 @@ pub(crate) unsafe fn memory_object_supply_completed(
     })
 }
 
-/// `memory_object_change_completed()` of the MIG `memory_object_user`
-/// stubs.
+/// `memory_object_change_completed()` of the MIG `memory_object` stubs.
 ///
 /// # Errors
 ///
@@ -485,7 +484,7 @@ pub(crate) unsafe fn memory_object_change_completed(
     })
 }
 
-/// `memory_object_init()` of the MIG `memory_object_user` stubs.
+/// `memory_object_init()` of the MIG `memory_object` stubs.
 ///
 /// # Errors
 ///
@@ -541,7 +540,7 @@ pub(crate) unsafe fn memory_object_create(
     })
 }
 
-/// `memory_object_copy()` of the MIG `memory_object_user` stubs.
+/// `memory_object_copy()` of the MIG `memory_object` stubs.
 ///
 /// # Errors
 ///
@@ -569,7 +568,7 @@ pub(crate) unsafe fn memory_object_copy(
     })
 }
 
-/// `memory_object_terminate()` of the MIG `memory_object_user` stubs.
+/// `memory_object_terminate()` of the MIG `memory_object` stubs.
 ///
 /// # Errors
 ///

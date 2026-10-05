@@ -3,8 +3,7 @@
 //   Copyright (c) 1993 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The soft debugger and the panic path, which `kern/debug.c` used to define
-//! and `kern/debug.h` declares.
+//! The soft debugger and the panic path.
 
 use crate::arch::x86_64::model_dep;
 use crate::arch::x86_64::per_cpu::cpu_id;
@@ -17,19 +16,16 @@ use core::ffi::c_char;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// The `panic_lock` of `kern/debug.c`: a `struct slock_irq` whose `struct
-/// slock` is the [`SimpleLock`] the C `simple_lock_irq()` takes.
+/// The lock that serializes panic reports.
 static PANIC_LOCK: SimpleLock = SimpleLock::new();
 
-/// `panicstr` of `kern/debug.c`, as the non-null marker that says a panic is
-/// already being reported; the C stored the message pointer in a `char *`.
+/// The marker that says a panic is already being reported.
 static PANIC_TAKEN: AtomicBool = AtomicBool::new(false);
 
-/// `paniccpu` of `kern/debug.c`: the CPU that took the panic.
+/// The CPU that took the panic.
 static PANIC_CPU: AtomicU32 = AtomicU32::new(0);
 
-/// Print `message` as a panic and halt the machine, the body of the C
-/// `Panic()`.
+/// Prints `message` as a panic and halts the machine.
 pub(crate) fn panic_fmt(
     file: &str,
     line: u32,
@@ -84,7 +80,8 @@ macro_rules! kpanic {
 }
 pub(crate) use kpanic;
 
-/// `SoftDebugger()` in C.
+/// Reports a debugger entry with `message` and continues: the kernel has no
+/// debugger.
 ///
 /// # Safety
 ///
@@ -96,7 +93,7 @@ pub(crate) unsafe fn soft_debugger(message: *const c_char) {
     kprint!("But no debugger, continuing.\n");
 }
 
-/// `Debugger()` in C.
+/// Halts the machine: the kernel has no debugger to enter.
 ///
 /// # Safety
 ///
@@ -105,7 +102,7 @@ pub(crate) unsafe fn debugger(_message: *const c_char) {
     kpanic!("debugger", "Debugger invoked, but there isn't one!")
 }
 
-/// `panic_init()` in C.
+/// Initializes the panic lock.
 pub(crate) fn panic_init() {
     PANIC_LOCK.init();
 }

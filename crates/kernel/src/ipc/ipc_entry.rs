@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The translation-entry routines, which `ipc/ipc_entry.c` used to define and
-//! `ipc/ipc_entry.h` declares.
+//! The translation-entry routines.
 
 use crate::ipc::error::Error;
 use crate::ipc::{IE_BITS_TYPE_MASK, IpcEntry, IpcSpace};
@@ -15,78 +14,74 @@ use core::ffi::{c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 
-/// `IE_NULL` of <`ipc/ipc_entry.h>`: no entry.
+/// No entry.
 const IE_NULL: *mut IpcEntry = ptr::null_mut();
-/// `IO_NULL` of <`ipc/ipc_object.h>`: no object.
+/// No object.
 const IO_NULL: *mut c_void = ptr::null_mut();
-/// `IS_FREE_LIST_SIZE_LIMIT` of <`ipc/ipc_space.h>`: the most free entries kept
-/// linked before they are returned to the cache.
+/// The most free entries kept linked before they are returned to the cache.
 const IS_FREE_LIST_SIZE_LIMIT: usize = 64;
-/// `IE_BITS_GEN_MASK` of <`ipc/ipc_entry.h>`: the generation bits of an entry;
-/// zero in this configuration.
+/// The generation bits of an entry; zero in this configuration.
 const IE_BITS_GEN_MASK: u32 = 0;
-/// `IE_BITS_GEN_ONE` of <`ipc/ipc_entry.h>`: one generation step; zero in this
-/// configuration.
+/// One generation step; zero in this configuration.
 pub(crate) const IE_BITS_GEN_ONE: u32 = 0;
 
-/// `ipc_entry_cache` of `ipc/ipc_entry.c`: the `struct ipc_entry` slab cache.
+/// The slab cache of [`IpcEntry`] records.
 static mut IPC_ENTRY_CACHE: KmemCache = KmemCache::zeroed();
 
 impl IpcEntry {
-    /// `ie_name` of <`ipc/ipc_entry.h`>.
+    /// The name the entry is under.
     pub(crate) const fn name(&self) -> c_uint {
         self.name
     }
 
-    /// The `entry->ie_name = name` assignment.
+    /// Sets the entry's name.
     pub(crate) const fn set_name(&mut self, name: c_uint) {
         self.name = name;
     }
 
-    /// `ie_bits` of <`ipc/ipc_entry.h`>.
+    /// The entry's type and reference bits.
     pub(crate) const fn bits(&self) -> u32 {
         self.bits
     }
 
-    /// The `entry->ie_bits = bits` assignment.
+    /// Sets the entry's bits.
     pub(crate) const fn set_bits(&mut self, bits: u32) {
         self.bits = bits;
     }
 
-    /// The `entry->ie_bits |= bits` assignment.
+    /// Sets `bits` in the entry's bits.
     pub(crate) const fn or_bits(&mut self, bits: u32) {
         self.bits |= bits;
     }
 
-    /// `ie_object` of <`ipc/ipc_entry.h`>.
+    /// The object the entry names.
     pub(crate) const fn object(&self) -> *mut c_void {
         self.object
     }
 
-    /// The `entry->ie_object = object` assignment.
+    /// Sets the entry's object.
     pub(crate) const fn set_object(&mut self, object: *mut c_void) {
         self.object = object;
     }
 
-    /// `ie_next_free` of <`ipc/ipc_entry.h>`: the `index.next_free` union
-    /// member.
+    /// The next free entry, while the entry is free.
     pub(crate) const fn next_free(&self) -> *mut Self {
         self.index.cast()
     }
 
-    /// The `entry->ie_next_free = entry` assignment.
+    /// Links the entry to `entry` on the free list.
     pub(crate) const fn set_next_free(&mut self, entry: *mut Self) {
         self.index = entry.cast();
     }
 
-    /// `ie_request` of <`ipc/ipc_entry.h>`: the `index.request` union member.
+    /// The dead-name request index, while the entry is in use.
     pub(crate) const fn request(&self) -> c_uint {
         // SAFETY: the union's low word is the `request` member; the whole
         // field is readable.
         unsafe { ptr::addr_of!(self.index).cast::<c_uint>().read() }
     }
 
-    /// The `entry->ie_request = request` assignment.
+    /// Sets the entry's dead-name request index.
     pub(crate) const fn set_request(&mut self, request: c_uint) {
         // SAFETY: the union's low word is the `request` member; a `u32` write
         // at the field's address is the C's `index.request`.
@@ -106,7 +101,7 @@ const fn map_error(error: kmem::RadixTreeError) -> Error {
     }
 }
 
-/// `ie_alloc()` of <`ipc/ipc_entry.h`>.
+/// Allocates an entry from the cache.
 fn ie_alloc() -> Option<*mut IpcEntry> {
     // SAFETY: `ipc_bootstrap()` initialized the cache before any entry could
     // exist.
@@ -114,7 +109,7 @@ fn ie_alloc() -> Option<*mut IpcEntry> {
     Some(buf.as_ptr().cast())
 }
 
-/// `ie_free()` of <`ipc/ipc_entry.h`>.
+/// Returns `entry` to the cache.
 ///
 /// # Safety
 ///
@@ -127,8 +122,7 @@ pub(crate) unsafe fn free(entry: *mut IpcEntry) {
     unsafe { (*ptr::addr_of_mut!(IPC_ENTRY_CACHE)).free(entry) };
 }
 
-/// `ipc_entry_get()` of <`ipc/ipc_space.h>`: pull an entry off the free list,
-/// or `None` when it is empty.
+/// Pulls an entry off the free list, or `None` when it is empty.
 ///
 /// # Safety
 ///
@@ -152,14 +146,13 @@ pub(crate) unsafe fn entry_get(
 
         (*record).size = (*record).size.wrapping_add(1);
 
-        // The generation is zero in this configuration, so the C's
-        // `MACH_PORT_MAKE()` is the entry's stored name.
+        // The generation is zero in this configuration, so the name is the
+        // entry's stored name.
         Some(((*free).name(), free))
     }
 }
 
-/// `ipc_entry_dealloc()` of <`ipc/ipc_space.h>`: return an entry to the free
-/// list, or to the cache when the list is full.
+/// Returns an entry to the free list, or to the cache when the list is full.
 ///
 /// # Safety
 ///
@@ -188,8 +181,8 @@ pub(crate) unsafe fn dealloc(
     }
 }
 
-/// The free-list removal `ipc_entry_alloc_name()` performs when the map
-/// already holds an unused entry.
+/// Unlinks the unused `entry` from the free list, when the name map already
+/// holds it.
 ///
 /// # Safety
 ///
@@ -214,7 +207,7 @@ unsafe fn unlink_free(space: IpcSpace, entry: *mut IpcEntry) {
     }
 }
 
-/// `ipc_entry_alloc()` in C.
+/// Allocates an entry in `space` under a fresh name.
 ///
 /// # Safety
 ///
@@ -271,7 +264,7 @@ pub(crate) unsafe fn alloc(
     }
 }
 
-/// `ipc_entry_alloc_name()` in C.
+/// Allocates the entry for `name` in `space`, or finds the one already there.
 ///
 /// # Safety
 ///

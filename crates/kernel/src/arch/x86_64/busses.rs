@@ -3,12 +3,11 @@
 //   Copyright (c) 1993-1989 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The generic bus autoconfiguration of `chips/busses.c`, which
-//! `i386/i386at/autoconf.c`'s `probeio()` calls at boot.
+//! The generic bus autoconfiguration, which `probeio()` runs at boot.
 //!
-//! The tables it walks, `bus_master_init[]` and `bus_device_init[]`, live in
-//! that C file.  [`BusCtlr`], [`BusDevice`] and [`BusDriver`] are the mirrors
-//! of <chips/busses.h> that [`crate::arch::x86_64::com`] already owns.
+//! The tables it walks, `BUS_MASTER_INIT` and `BUS_DEVICE_INIT`, live in
+//! [`autoconf`](crate::arch::x86_64::autoconf); [`BusCtlr`], [`BusDevice`] and
+//! [`BusDriver`] are the records [`crate::arch::x86_64::com`] owns.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::com::{BusCtlr, BusDevice, BusDriver};
@@ -19,7 +18,7 @@ use core::ptr::{self, NonNull};
 /// The `?` the tables use for an adaptor or controller any number matches.
 const WILDCARD: c_char = b'?' as c_char;
 
-/// The `bus_master_init[]` walk, which stops at its driver-less sentinel.
+/// The walk of `BUS_MASTER_INIT`, which stops at its driver-less sentinel.
 struct BusMasters {
     next: *mut BusCtlr,
 }
@@ -28,8 +27,8 @@ impl Iterator for BusMasters {
     type Item = (NonNull<BusCtlr>, NonNull<BusDriver>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // SAFETY: `next` starts at `bus_master_init[]` and only steps inside
-        // it, so every entry read, sentinel included, is initialized.
+        // SAFETY: `next` starts at `BUS_MASTER_INIT` and only steps inside it,
+        // so every entry read, sentinel included, is initialized.
         let driver = unsafe { ptr::addr_of!((*self.next).driver).read() };
         let driver = NonNull::new(driver)?;
         let entry = NonNull::new(self.next)?;
@@ -48,7 +47,7 @@ fn masters() -> BusMasters {
     }
 }
 
-/// The `bus_device_init[]` walk, which stops at its driver-less sentinel.
+/// The walk of `BUS_DEVICE_INIT`, which stops at its driver-less sentinel.
 struct BusDevices {
     next: *mut BusDevice,
 }
@@ -57,8 +56,8 @@ impl Iterator for BusDevices {
     type Item = (NonNull<BusDevice>, NonNull<BusDriver>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // SAFETY: `next` starts at `bus_device_init[]` and only steps inside
-        // it, so every entry read, sentinel included, is initialized.
+        // SAFETY: `next` starts at `BUS_DEVICE_INIT` and only steps inside it,
+        // so every entry read, sentinel included, is initialized.
         let driver = unsafe { ptr::addr_of!((*self.next).driver).read() };
         let driver = NonNull::new(driver)?;
         let entry = NonNull::new(self.next)?;
@@ -77,8 +76,7 @@ fn devices() -> BusDevices {
     }
 }
 
-/// The `bus_device_init[]` walk of one found controller, the device loop of
-/// `configure_bus_master()`.
+/// Probes and attaches the devices of one found controller.
 fn configure_master_devices(
     driver: *mut BusDriver,
     master: NonNull<BusCtlr>,
@@ -91,8 +89,7 @@ fn configure_master_devices(
         unsafe { ((*driver).slave, (*driver).mname, (*driver).dinfo) };
 
     for (device, device_driver) in devices() {
-        // SAFETY: the walk only yields initialized `bus_device_init[]`
-        // entries.
+        // SAFETY: the walk only yields initialized `BUS_DEVICE_INIT` entries.
         let (alive, adaptor, ctlr, device_unit, device_name, device_slave) = unsafe {
             let entry = device.as_ref();
             (
@@ -185,7 +182,8 @@ fn configure_master_devices(
     }
 }
 
-/// `configure_bus_master()` of `chips/busses.c`.
+/// Finds and attaches the controller `name` of the adaptor `adpt_no` on
+/// `bus_name`, then its devices, returning whether it was found.
 fn configure_master(
     name: &CStr,
     virt: VmOffset,
@@ -193,8 +191,7 @@ fn configure_master(
     bus_name: &CStr,
 ) -> bool {
     let Some((master, driver)) = masters().find(|(entry, _)| {
-        // SAFETY: the walk only yields initialized `bus_master_init[]`
-        // entries.
+        // SAFETY: the walk only yields initialized `BUS_MASTER_INIT` entries.
         let entry = unsafe { entry.as_ref() };
         if entry.alive != 0 {
             return false;
@@ -257,7 +254,8 @@ fn configure_master(
     true
 }
 
-/// `configure_bus_device()` of `chips/busses.c`.
+/// Finds and attaches the device `name` of the adaptor `adpt_no` on
+/// `bus_name`, returning whether it was found.
 fn configure_device(
     name: &CStr,
     virt: VmOffset,
@@ -266,8 +264,7 @@ fn configure_device(
     bus_name: &CStr,
 ) -> bool {
     let Some((device, driver)) = devices().find(|(entry, _)| {
-        // SAFETY: the walk only yields initialized `bus_device_init[]`
-        // entries.
+        // SAFETY: the walk only yields initialized `BUS_DEVICE_INIT` entries.
         let entry = unsafe { entry.as_ref() };
         if entry.alive != 0 {
             return false;
@@ -298,9 +295,9 @@ fn configure_device(
         // table, not a found device.
         return false;
     };
-    // SAFETY: `probe` is the driver's probe routine, and the C passed it the
-    // device entry as a controller: `bus_ctlr` and `bus_device` place `unit`
-    // and `address` at the same offsets, which is all the AT-bus probe reads.
+    // SAFETY: `probe` is the driver's probe routine, which takes the device
+    // entry as a controller: `BusCtlr` and `BusDevice` place `unit` and
+    // `address` at the same offsets, which is all the AT-bus probe reads.
     if !unsafe { probe(virt, device.as_ptr().cast::<BusCtlr>()) } {
         return false;
     }
@@ -348,7 +345,7 @@ fn configure_device(
     true
 }
 
-/// `configure_bus_master()` of `chips/busses.c`.
+/// [`configure_master`] over NUL-terminated names.
 ///
 /// # Safety
 ///
@@ -365,7 +362,7 @@ pub(crate) unsafe fn configure_bus_master(
     configure_master(name, virt, adpt_no, bus_name)
 }
 
-/// `configure_bus_device()` of `chips/busses.c`.
+/// [`configure_device`] over NUL-terminated names.
 ///
 /// # Safety
 ///

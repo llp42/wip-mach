@@ -32,8 +32,8 @@ use core::slice;
 /// # Safety
 ///
 /// `thread` must be null or a live thread; `descriptor_list` must point at
-/// `count` writable descriptors when `desc_list_inline` is true, and at a
-/// live `vm_map_copy` the caller owns when it is false.
+/// `count` writable descriptors when `desc_list_inline` is true, and at a live
+/// map copy the caller owns when it is false.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn i386_set_ldt(
     thread: *mut Thread,
@@ -202,8 +202,7 @@ pub unsafe extern "C" fn i386_get_gdt(
     }
 }
 
-/// `i386_get_xstate_size()` of i386/i386/fpu.h, the routine
-/// <`mach/i386/mach_i386.defs`> declares.
+/// Reports the size of a thread's extended FPU state.
 ///
 /// # Safety
 ///

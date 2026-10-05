@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Port I/O, which `i386/i386/pio_glue.c` used to provide as shims over the
-//! statement-expression macros of <i386/pio.h>.
+//! Port I/O.
 
 use core::arch::asm;
 

@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The virtual-memory object module, which `vm/vm_object.c` used to define
-//! and `vm/vm_object.h` declares.
+//! The virtual-memory object module.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
@@ -45,36 +44,36 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull, addr_of, addr_of_mut, null_mut};
 use core::sync::atomic::{AtomicI32, AtomicIsize, AtomicU32, Ordering};
 
-/// `VM_OBJECT_EVENT_*` of <`vm/vm_object.h>`: the `all_wanted` bit an event
-/// waiting on the object sets.
+/// The bit in an object's `all_wanted` mask that a thread waiting for each
+/// event sets.
 const EVENT_INITIALIZED: u32 = 0;
 pub(crate) const EVENT_PAGER_READY: u32 = 1;
 const EVENT_PAGING_IN_PROGRESS: u32 = 2;
 const EVENT_ABSENT_COUNT: u32 = 3;
 
-/// `IKOT_*` of <`kern/ipc_kobject.h`>.
+/// The kernel-object types of the ports a memory object is reached through:
+/// none, pager, pager request, terminating pager and pager name.
 const IKOT_NONE: c_uint = 0;
 const IKOT_PAGER: c_uint = 8;
 const IKOT_PAGING_REQUEST: c_uint = 9;
 const IKOT_PAGER_TERMINATING: c_uint = 15;
 const IKOT_PAGING_NAME: c_uint = 16;
 
-/// `MEMORY_OBJECT_COPY_*` of <`mach/memory_object.h>`: the copy strategies
-/// `vm_object_copy_strategically()` dispatches over.
+/// `MEMORY_OBJECT_COPY_*`: the copy strategies [`copy_strategically`]
+/// dispatches over.
 const MEMORY_OBJECT_COPY_NONE: c_int = 0;
 const MEMORY_OBJECT_COPY_CALL: c_int = 1;
 const MEMORY_OBJECT_COPY_DELAY: c_int = 2;
 
-/// `VM_MAX_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS` of
-/// <`machine/vm_param.h`>, the size the kernel object and the submap
-/// placeholder are created with.
+/// The size of the kernel's virtual address range, which the kernel object and
+/// the submap placeholder are created with.
 const KERNEL_OBJECT_SIZE: VmSize = 0x7fff_ffff;
 
-/// `vm_object_cache` of `vm/vm_object.c`: the `struct vm_object` slab cache.
+/// The slab cache of [`VmObject`] records.
 static mut VM_OBJECT_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `vm_object_cached_list`: the objects whose `can_persist` kept them after
-/// their last reference went away.
+/// The objects whose `can_persist` kept them after their last reference went
+/// away.
 static VM_OBJECT_CACHED_LIST: SyncCell<VmObjectCachedList> =
     SyncCell(UnsafeCell::new(VmObjectCachedList::new()));
 
@@ -89,50 +88,46 @@ unsafe fn cached_list() -> Pin<&'static mut VmObjectCachedList> {
     unsafe { Pin::new_unchecked(&mut *VM_OBJECT_CACHED_LIST.0.get()) }
 }
 
-/// `vm_object_cached_lock_data`: serializes the cached list and the port
-/// associations.
+/// Serializes the cached list and the port associations.
 static VM_OBJECT_CACHED_LOCK: crate::kern::lock::SimpleLock =
     crate::kern::lock::SimpleLock::new();
 
-/// `vm_object_template`: the image `_vm_object_setup()` copies into a fresh
-/// object.
+/// The image [`setup`] copies into a fresh object.
 static mut VM_OBJECT_TEMPLATE: VmObject = VmObject::zeroed();
 
-/// `kernel_object_store`, file-private in the C.
+/// The storage of [`KERNEL_OBJECT`].
 static mut KERNEL_OBJECT_STORE: VmObject = VmObject::zeroed();
 
-/// `vm_submap_object_store`, file-private in `vm/vm_map_glue.c`.
+/// The storage of [`VM_SUBMAP_OBJECT`].
 static mut VM_SUBMAP_OBJECT_STORE: VmObject = VmObject::zeroed();
 
-/// `vm_submap_object` of <`vm/vm_map.h>`: the placeholder object dropped into
-/// a submap's range until `vm_map_submap()` creates the submap.
+/// The placeholder object dropped into a submap's range until
+/// [`VmMap::submap`](crate::vm::vm_map::VmMap::submap) creates the submap.
 pub static mut VM_SUBMAP_OBJECT: *mut VmObject =
     &raw mut VM_SUBMAP_OBJECT_STORE;
 
-/// `kernel_object` of <`vm/vm_object.h>`: the single object all wired-down
-/// kernel memory belongs to.
+/// The single object all wired-down kernel memory belongs to.
 pub static mut KERNEL_OBJECT: *mut VmObject = &raw mut KERNEL_OBJECT_STORE;
 
-/// `vm_object_pmap_protect_by_page` of `vm/vm_object.c`.
+/// When set, [`pmap_protect`] protects page by page instead of by range.
 static VM_OBJECT_PMAP_PROTECT_BY_PAGE: AtomicI32 = AtomicI32::new(0);
 
-/// `object_collapses` and `object_bypasses` of `vm/vm_object.c`: debugging
-/// counters, written for a debugger to read and never synchronized against.
+/// Debugging counters of collapses and bypasses, written for a debugger to
+/// read and never synchronized against.
 static OBJECT_COLLAPSES: AtomicIsize = AtomicIsize::new(0);
 static OBJECT_BYPASSES: AtomicIsize = AtomicIsize::new(0);
 
-/// `vm_object_collapse_debug`, `vm_object_collapse_allowed` and
-/// `vm_object_collapse_bypass_allowed`: the collapse switch a debugger sets.
+/// The collapse switches a debugger sets: tracing, collapsing and bypassing.
 static VM_OBJECT_COLLAPSE_DEBUG: AtomicI32 = AtomicI32::new(0);
 static VM_OBJECT_COLLAPSE_ALLOWED: AtomicI32 = AtomicI32::new(1);
 static VM_OBJECT_COLLAPSE_BYPASS_ALLOWED: AtomicI32 = AtomicI32::new(1);
 
-/// `vm_object_page_remove_lookup` and `vm_object_page_remove_iterate` of
-/// `vm/vm_object.c`: how each removal path was taken.
+/// How often each page-removal path was taken: lookups by offset and walks of
+/// the page list.
 static PAGE_REMOVE_LOOKUP: AtomicU32 = AtomicU32::new(0);
 static PAGE_REMOVE_ITERATE: AtomicU32 = AtomicU32::new(0);
 
-/// `panic()` of `vm/vm_object.c`.
+/// Halts the kernel with `message`, under the `func` tag.
 fn die(func: &'static str, message: &'static str) -> ! {
     kpanic!(func, "{}", message)
 }
@@ -141,8 +136,7 @@ fn die(func: &'static str, message: &'static str) -> ! {
 ///
 /// # Safety
 ///
-/// The caller must run after `vm_object_bootstrap()` has initialized the
-/// object cache.
+/// The caller must run after [`bootstrap()`] has initialized the object cache.
 unsafe fn cache_alloc() -> *mut VmObject {
     let Some(buf) = (unsafe { (*addr_of_mut!(VM_OBJECT_CACHE)).alloc() })
     else {
@@ -151,7 +145,7 @@ unsafe fn cache_alloc() -> *mut VmObject {
     buf.as_ptr().cast::<VmObject>()
 }
 
-/// `kmem_cache_free(&vm_object_cache, object)` of the C.
+/// Returns `object` to the cache.
 ///
 /// # Safety
 ///
@@ -164,7 +158,7 @@ unsafe fn cache_free(object: *mut VmObject) {
     };
 }
 
-/// `vm_object_cached_lock_data` acquisition.
+/// Takes the lock of the cached list and the port associations.
 ///
 /// # Safety
 ///
@@ -174,7 +168,7 @@ unsafe fn cache_lock() {
     unsafe { (*addr_of!(VM_OBJECT_CACHED_LOCK)).lock() };
 }
 
-/// `vm_object_cached_lock_data` release.
+/// Releases the lock of the cached list and the port associations.
 ///
 /// # Safety
 ///
@@ -183,7 +177,7 @@ unsafe fn cache_unlock() {
     unsafe { (*addr_of!(VM_OBJECT_CACHED_LOCK)).unlock() };
 }
 
-/// `vm_object_cache_add()` of the C.
+/// Puts an unreferenced, persistent object on the cached list.
 ///
 /// # Safety
 ///
@@ -195,7 +189,7 @@ unsafe fn cache_add(object: *mut VmObject) {
     }
 }
 
-/// `vm_object_cache_remove()` of the C.
+/// Takes `object` off the cached list.
 ///
 /// # Safety
 ///
@@ -208,7 +202,7 @@ unsafe fn cache_remove(object: *mut VmObject) {
     }
 }
 
-/// `IP_VALID()` of <`ipc/ipc_object.h`>.
+/// Whether `port` is neither null nor dead.
 fn port_valid(port: *mut c_void) -> bool {
     !port.is_null() && port as usize != usize::MAX
 }
@@ -223,7 +217,7 @@ const fn event_ptr(object: *const VmObject, event: u32) -> *mut c_void {
         .cast::<c_void>()
 }
 
-/// `atop()` of `<vm/vm_page.h>`.
+/// The page number of `address`.
 const fn atop(address: VmOffset) -> usize {
     address >> PAGE_SHIFT
 }
@@ -249,7 +243,7 @@ pub(crate) unsafe fn next_page(
     }
 }
 
-/// `vm_object_wait()` of <`vm/vm_object.h`>.
+/// Waits for `event` on `object`, releasing the object lock.
 ///
 /// # Safety
 ///
@@ -265,7 +259,7 @@ unsafe fn wait(object: *mut VmObject, event: u32, interruptible: bool) {
     }
 }
 
-/// `vm_object_assert_wait()` of <`vm/vm_object.h`>.
+/// Declares that the current thread waits for `event` on `object`.
 ///
 /// # Safety
 ///
@@ -284,7 +278,8 @@ pub(crate) unsafe fn assert_wait_event(
     }
 }
 
-/// `vm_object_absent_assert_wait()` of <`vm/vm_object.h`>.
+/// Declares that the current thread waits for the object's absent-page count
+/// to drop.
 ///
 /// # Safety
 ///
@@ -296,7 +291,7 @@ pub(crate) unsafe fn absent_assert_wait(
     unsafe { assert_wait_event(object, EVENT_ABSENT_COUNT, interruptible) };
 }
 
-/// `vm_object_wakeup()` of <`vm/vm_object.h`>.
+/// Wakes the threads waiting for `event` on `object`.
 ///
 /// # Safety
 ///
@@ -310,7 +305,8 @@ pub(crate) unsafe fn wakeup(object: *mut VmObject, event: u32) {
     }
 }
 
-/// `vm_object_wakeup(object, VM_OBJECT_EVENT_ABSENT_COUNT)` of the C.
+/// Drops one absent page from the object's count and wakes the threads waiting
+/// for it to drop.
 ///
 /// # Safety
 ///
@@ -322,7 +318,7 @@ pub(crate) unsafe fn absent_release(object: *mut VmObject) {
     }
 }
 
-/// `vm_object_wakeup(object, VM_OBJECT_EVENT_PAGER_READY)` of the C.
+/// Wakes the threads waiting for the object's pager to be ready.
 ///
 /// # Safety
 ///
@@ -331,7 +327,7 @@ pub(crate) unsafe fn wakeup_pager_ready(object: *mut VmObject) {
     unsafe { wakeup(object, EVENT_PAGER_READY) };
 }
 
-/// `vm_object_paging_begin()` of <`vm/vm_object.h`>.
+/// Takes a paging reference on `object`.
 ///
 /// # Safety
 ///
@@ -342,7 +338,8 @@ pub(crate) unsafe fn paging_begin(object: *mut VmObject) {
     };
 }
 
-/// `vm_object_paging_end()` of <`vm/vm_object.h`>.
+/// Drops a paging reference on `object`, waking the threads waiting for paging
+/// to finish.
 ///
 /// # Safety
 ///
@@ -357,7 +354,7 @@ pub(crate) unsafe fn paging_end(object: *mut VmObject) {
     }
 }
 
-/// `vm_object_paging_wait()` of <`vm/vm_object.h`>.
+/// Waits until no paging is in progress on `object`.
 ///
 /// # Safety
 ///
@@ -371,7 +368,8 @@ unsafe fn paging_wait(object: *mut VmObject, interruptible: bool) {
     }
 }
 
-/// `vm_map_glue_object_make_shared()` in C.
+/// Marks `object` as shared through a copy and takes a reference for the
+/// sharer.
 ///
 /// # Safety
 ///
@@ -385,7 +383,7 @@ pub(crate) unsafe fn make_shared(object: *mut VmObject) {
     }
 }
 
-/// `VM_PAGE_FREE()` of <`vm/vm_page.h`>.
+/// Frees `page` under the page-queues lock.
 ///
 /// # Safety
 ///
@@ -399,7 +397,7 @@ pub(crate) unsafe fn page_free(page: *mut VmPage) {
     }
 }
 
-/// `PAGE_WAKEUP()` of <`vm/vm_page.h`>.
+/// Wakes anything waiting for `page`, when something is.
 ///
 /// # Safety
 ///
@@ -413,7 +411,7 @@ pub(crate) unsafe fn page_wakeup(page: *mut VmPage) {
     }
 }
 
-/// `PAGE_WAKEUP_DONE()` of <`vm/vm_page.h`>.
+/// Clears `page`'s busy bit and wakes anything waiting for it.
 ///
 /// # Safety
 ///
@@ -425,7 +423,7 @@ pub(crate) unsafe fn page_wakeup_done(page: *mut VmPage) {
     }
 }
 
-/// `_vm_object_setup()` of the C: stamp the template on a fresh object.
+/// Stamps the template on a fresh object.
 ///
 /// # Safety
 ///
@@ -440,12 +438,12 @@ unsafe fn setup(object: *mut VmObject, size: VmSize) {
     }
 }
 
-/// `_vm_object_allocate()` of the C.
+/// Allocates an object of `size` bytes from the cache and stamps the template
+/// on it.
 ///
 /// # Safety
 ///
-/// The caller must run after `vm_object_bootstrap()`, as [`cache_alloc()`]
-/// requires.
+/// The caller must run after [`bootstrap()`], as [`cache_alloc()`] requires.
 unsafe fn allocate_internal(size: VmSize) -> *mut VmObject {
     let object = unsafe { cache_alloc() };
     if object.is_null() {
@@ -456,7 +454,7 @@ unsafe fn allocate_internal(size: VmSize) -> *mut VmObject {
     object
 }
 
-/// `vm_object_allocate()` of the C.
+/// Allocates an anonymous object of `size` bytes, with one reference.
 ///
 /// # Safety
 ///
@@ -480,7 +478,7 @@ pub(crate) unsafe fn allocate(size: VmSize) -> NonNull<VmObject> {
     object
 }
 
-/// `vm_object_allocate()` of the C.
+/// [`allocate`] over a raw pointer.
 ///
 /// # Safety
 ///
@@ -489,7 +487,8 @@ pub(crate) unsafe fn vm_object_allocate(size: VmSize) -> *mut VmObject {
     unsafe { allocate(size) }.as_ptr()
 }
 
-/// `vm_object_bootstrap()` of the C.
+/// Sets up the object cache, the template, the kernel object and the submap
+/// placeholder.
 pub(crate) fn bootstrap() {
     // SAFETY: the call runs once in the bootstrap sequence, after the slab
     // package is up and before any allocation from the cache.
@@ -547,7 +546,7 @@ pub(crate) fn bootstrap() {
     unsafe { vm_external::vm_external_module_initialize() };
 }
 
-/// `vm_object_init()` of the C.
+/// Finishes the object package once ports can be allocated.
 pub(crate) fn init() {
     // SAFETY: the kernel object is the boot storage, live and unshared at
     // this point in the sequence.
@@ -560,7 +559,8 @@ pub(crate) fn init() {
     }
 }
 
-/// `vm_object_collect()` of the C.
+/// Frees `object` when it holds neither references nor pages, or leaves it to
+/// the caller otherwise.
 ///
 /// # Safety
 ///
@@ -581,7 +581,7 @@ pub(crate) unsafe fn collect(object: *mut VmObject) {
     }
 }
 
-/// `vm_object_reference()` of the C.
+/// Takes a reference on `object`, when it is not null.
 ///
 /// # Safety
 ///
@@ -597,7 +597,8 @@ pub(crate) unsafe fn reference(object: *mut VmObject) {
     }
 }
 
-/// `vm_object_deallocate()` of the C.
+/// Drops a reference on `object`, caching or terminating it on the last one
+/// and walking down its shadow chain.
 ///
 /// # Safety
 ///
@@ -643,7 +644,8 @@ pub(crate) unsafe fn deallocate(object: *mut VmObject) {
     }
 }
 
-/// `vm_object_terminate()` of the C.
+/// Frees an object out of references: cleans its pages, tells its pager, and
+/// frees the record.
 ///
 /// # Safety
 ///
@@ -738,7 +740,8 @@ pub(crate) unsafe fn terminate(object: *mut VmObject) {
     unsafe { cache_free(object) };
 }
 
-/// `vm_object_pager_wakeup()` of the C.
+/// Wakes the threads waiting for the object of the memory-object port `pager`
+/// to be set up.
 ///
 /// # Safety
 ///
@@ -761,7 +764,8 @@ pub(crate) unsafe fn pager_wakeup(pager: *mut c_void) {
     }
 }
 
-/// `memory_object_release()` of the C.
+/// Sends the manager of `pager` its termination and gives up the object's
+/// three ports.
 ///
 /// # Safety
 ///
@@ -784,7 +788,8 @@ pub(crate) unsafe fn memory_object_release(
     }
 }
 
-/// `vm_object_abort_activity()` of the C.
+/// Frees the object's pages that are neither busy nor absent, and marks the
+/// absent ones as failed, once its pager is gone.
 ///
 /// # Safety
 ///
@@ -814,7 +819,8 @@ unsafe fn abort_activity(object: *mut VmObject) {
     }
 }
 
-/// `memory_object_destroy()` of the C.
+/// Shuts `object` down at its manager's request: drops its pager and aborts
+/// the activity waiting for it.
 ///
 /// # Safety
 ///
@@ -854,7 +860,7 @@ pub(crate) unsafe fn memory_object_destroy(object: *mut VmObject) {
     }
 }
 
-/// `vm_object_pmap_protect()` of the C.
+/// Write-protects the mappings of a range of an object's pages in `pmap`.
 ///
 /// # Safety
 ///
@@ -941,7 +947,7 @@ pub(crate) unsafe fn pmap_protect(
     unsafe { (*object).lock.unlock() };
 }
 
-/// `vm_object_pmap_protect()` of the C.
+/// [`pmap_protect`] over raw pointers.
 ///
 /// # Safety
 ///
@@ -967,7 +973,7 @@ pub(crate) unsafe fn vm_object_pmap_protect(
     };
 }
 
-/// `vm_object_pmap_remove()` of the C.
+/// Removes every mapping of a range of an object's pages.
 ///
 /// # Safety
 ///
@@ -1017,8 +1023,8 @@ pub(crate) unsafe fn pmap_remove(
     unsafe { (*object).lock.unlock() };
 }
 
-/// Copy the fault's result page into `new_page`, wake the waiters and clean
-/// the fault up: the success arm of `vm_object_copy_slowly()`.
+/// Copies the fault's result page into `new_page`, wakes the waiters and
+/// cleans the fault up: the success arm of [`copy_slowly`].
 ///
 /// # Safety
 ///
@@ -1049,7 +1055,8 @@ unsafe fn copy_slowly_done(
     }
 }
 
-/// `vm_object_copy_slowly()` of the C.
+/// Copies a range of an object into a new object page by page, faulting each
+/// page in.
 ///
 /// # Safety
 ///
@@ -1168,8 +1175,7 @@ pub(crate) unsafe fn copy_slowly(
     Ok(new_object)
 }
 
-/// What `vm_object_copy_temporary()` hands back when it can copy without
-/// blocking.
+/// What [`copy_temporary`] hands back when it can copy without blocking.
 pub(crate) struct TemporaryCopy {
     /// The object the caller's slot becomes.
     pub object: *mut VmObject,
@@ -1179,7 +1185,8 @@ pub(crate) struct TemporaryCopy {
     pub dst_needs_copy: bool,
 }
 
-/// `vm_object_copy_temporary()` of the C.
+/// Copies a temporary object by sharing it copy-on-write, when that needs no
+/// blocking.
 ///
 /// # Safety
 ///
@@ -1228,7 +1235,8 @@ pub(crate) unsafe fn copy_temporary(
     None
 }
 
-/// `vm_object_copy_call()` of the C.
+/// Copies a range through the manager's copy call: the new object's pager is
+/// the copy the manager provides.
 ///
 /// # Safety
 ///
@@ -1307,7 +1315,8 @@ unsafe fn copy_call(
     Ok(new_object)
 }
 
-/// `vm_object_copy_delayed()` of the C.
+/// Copies an object copy-on-write through a copy object that stands between it
+/// and its copies.
 ///
 /// # Safety
 ///
@@ -1399,7 +1408,7 @@ pub(crate) enum StrategicResult {
     Unchanged,
 }
 
-/// `vm_object_copy_strategically()` of the C.
+/// Copies a range of an object with the strategy its manager chose.
 ///
 /// # Safety
 ///
@@ -1465,7 +1474,8 @@ pub(crate) unsafe fn copy_strategically(
     }
 }
 
-/// `vm_object_shadow()` of the C.
+/// Makes a new object of `length` bytes that shadows `source` at `offset`,
+/// moving the caller's reference to it.
 ///
 /// # Safety
 ///
@@ -1487,7 +1497,7 @@ pub(crate) unsafe fn shadow(
     result
 }
 
-/// `vm_object_shadow()` of the C.
+/// [`shadow`] over raw pointers.
 ///
 /// # Safety
 ///
@@ -1543,7 +1553,7 @@ unsafe fn lookup_kotype(
     }
 }
 
-/// `vm_object_lookup()` of the C.
+/// The object the pager request port `port` names, with a reference.
 ///
 /// # Safety
 ///
@@ -1552,7 +1562,7 @@ pub(crate) unsafe fn lookup(port: *mut c_void) -> Option<NonNull<VmObject>> {
     unsafe { lookup_kotype(port, IKOT_PAGING_REQUEST) }
 }
 
-/// `vm_object_lookup_name()` of the C.
+/// The object the pager name port `port` names, with a reference.
 ///
 /// # Safety
 ///
@@ -1563,7 +1573,8 @@ pub(crate) unsafe fn lookup_name(
     unsafe { lookup_kotype(port, IKOT_PAGING_NAME) }
 }
 
-/// `vm_object_destroy()` of the C.
+/// Detaches the object of the memory-object port `pager` from its manager and
+/// aborts the activity waiting for it.
 ///
 /// # Safety
 ///
@@ -1686,7 +1697,8 @@ unsafe fn enter_init(
     }
 }
 
-/// `vm_object_enter()` of the C.
+/// The object of the memory-object port `pager`, set up and referenced, or a
+/// fresh anonymous object when `pager` is not valid.
 ///
 /// # Safety
 ///
@@ -1777,7 +1789,7 @@ pub(crate) unsafe fn enter(
     }
 }
 
-/// `vm_object_pager_create()` of the C.
+/// Gives a temporary object a pager from the default memory manager.
 ///
 /// # Safety
 ///
@@ -1826,7 +1838,7 @@ pub(crate) unsafe fn pager_create(object: *mut VmObject) {
     }
 }
 
-/// `vm_object_remove()` of the C.
+/// Drops the port associations of `object`.
 ///
 /// # Safety
 ///
@@ -2081,7 +2093,8 @@ unsafe fn collapse_bypass(
     }
 }
 
-/// `vm_object_collapse()` of the C.
+/// Collapses `object`'s shadow chain into it where no one else uses the
+/// shadow.
 ///
 /// # Safety
 ///
@@ -2178,7 +2191,7 @@ unsafe fn collapse_print(
     );
 }
 
-/// `vm_object_page_remove()` of the C.
+/// Frees the resident pages of `object` in `start..end`.
 ///
 /// # Safety
 ///
@@ -2230,7 +2243,8 @@ pub(crate) unsafe fn page_remove(
     }
 }
 
-/// `vm_object_coalesce()` of the C.
+/// Extends `prev_object` to cover the next range instead of making a new
+/// object, when nothing else uses it.
 ///
 /// # Safety
 ///
@@ -2316,7 +2330,7 @@ pub(crate) unsafe fn coalesce(
     }
 }
 
-/// `vm_object_name()` of the C.
+/// A send right for the name port of `object`, or null.
 ///
 /// # Safety
 ///
@@ -2349,7 +2363,8 @@ pub(crate) unsafe fn name(object: Option<NonNull<VmObject>>) -> *mut c_void {
     }
 }
 
-/// `vm_object_page_map()` of the C.
+/// Fills a range of `object` with fictitious pages at the physical addresses
+/// `map_fn` names.
 ///
 /// # Safety
 ///

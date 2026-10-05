@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The console-print trap and the scheduling entries of `kern/syscall_subr.c`,
-//! declared in <`kern/syscall_subr.h`>.
+//! The console-print trap and the scheduling traps.
 
 use crate::arch::x86_64::per_cpu;
 use crate::arch::x86_64::spl;
@@ -26,18 +25,17 @@ use crate::kern::thread::Thread;
 use crate::mig::code::{KERN_SUCCESS, kern_return};
 use core::ffi::{c_char, c_int, c_uint, c_void};
 
-/// `SWITCH_OPTION_NONE` of <`mach/thread_switch.h`>.
+/// The thread-switch option that leaves the priority alone.
 const SWITCH_OPTION_NONE: c_int = 0;
-/// `SWITCH_OPTION_DEPRESS` of <`mach/thread_switch.h`>.
+/// The thread-switch option that depresses the caller's priority.
 const SWITCH_OPTION_DEPRESS: c_int = 1;
-/// `SWITCH_OPTION_WAIT` of <`mach/thread_switch.h`>.
+/// The thread-switch option that waits for the timeout.
 const SWITCH_OPTION_WAIT: c_int = 2;
 
-/// `MACH_PORT_RIGHT_SEND` of <mach/port.h>: the right
-/// `ipc_port_translate_send()` looks up.
+/// The send right [`thread_switch`] translates its hint name to.
 const MACH_PORT_RIGHT_SEND: c_uint = 0;
 
-/// `mach_print()` in C: write a kernel string to the console.
+/// Writes a kernel string to the console.
 ///
 /// # Safety
 ///
@@ -48,7 +46,7 @@ pub(crate) unsafe fn print(s: *const c_char) {
     kprint!("{}", s);
 }
 
-/// `mach_print()` of <`kern/syscall_subr.h>`: the `mach_print` trap entry.
+/// The `mach_print` trap entry.
 ///
 /// # Safety
 ///
@@ -58,7 +56,8 @@ pub(crate) unsafe extern "C" fn mach_print(s: *const c_char) {
     unsafe { print(s) };
 }
 
-/// `thread_depress_priority()` in C.
+/// Depresses `thread`'s priority to the lowest, for `depress_time`
+/// milliseconds.
 ///
 /// # Safety
 ///
@@ -94,7 +93,8 @@ pub(crate) unsafe fn depress_priority(
     }
 }
 
-/// `thread_depress_timeout()` in C, in the shape the timer callback calls.
+/// Restores the depressed priority of the thread `param` names, from the timer
+/// callback.
 ///
 /// # Safety
 ///
@@ -118,7 +118,7 @@ pub(crate) unsafe fn depress_timeout(param: *mut c_void) {
     }
 }
 
-/// `thread_depress_abort()` in C.
+/// Ends `thread`'s priority depression early.
 ///
 /// # Errors
 ///
@@ -156,7 +156,7 @@ pub(crate) unsafe fn depress_abort(thread: *mut Thread) -> Result<(), Error> {
     Ok(())
 }
 
-/// `swtch_continue()` of `kern/syscall_subr.c`.
+/// The continuation of [`swtch`]: returns whether another thread is runnable.
 unsafe extern "C" fn swtch_continue() {
     let runnable = per_cpu::processor().has_runnable();
     // SAFETY: the machine's syscall return never comes back, and the C
@@ -168,8 +168,7 @@ unsafe extern "C" fn swtch_continue() {
     };
 }
 
-/// `swtch()` in C: yield the processor, and return whether another thread
-/// is still runnable.
+/// Yields the processor, and returns whether another thread is still runnable.
 ///
 /// # Safety
 ///
@@ -184,7 +183,7 @@ pub(crate) unsafe fn swtch() -> bool {
     per_cpu::processor().has_runnable()
 }
 
-/// `swtch()` of <`kern/syscall_subr.h>`: the `swtch` trap entry.
+/// The `swtch` trap entry.
 ///
 /// # Safety
 ///
@@ -193,7 +192,8 @@ pub(crate) unsafe extern "C" fn swtch_entry() -> c_int {
     c_int::from(unsafe { swtch() })
 }
 
-/// `swtch_pri_continue()` of `kern/syscall_subr.c`.
+/// The continuation of [`swtch_pri`]: ends the depression and returns whether
+/// another thread is runnable.
 unsafe extern "C" fn swtch_pri_continue() {
     let thread = per_cpu::thread();
     // SAFETY: the continuation runs on its own thread, whose lock it takes.
@@ -212,9 +212,8 @@ unsafe extern "C" fn swtch_pri_continue() {
     };
 }
 
-/// `swtch_pri()` in C: yield the processor at a depressed priority, and
-/// return whether another thread is still runnable.  The C ignores its
-/// priority argument.
+/// Yields the processor at a depressed priority, and returns whether another
+/// thread is still runnable.  The priority argument is unused.
 ///
 /// # Safety
 ///
@@ -238,7 +237,7 @@ pub(crate) unsafe fn swtch_pri() -> bool {
     per_cpu::processor().has_runnable()
 }
 
-/// `swtch_pri()` of <`kern/syscall_subr.h>`: the `swtch_pri` trap entry.
+/// The `swtch_pri` trap entry.
 ///
 /// # Safety
 ///
@@ -247,7 +246,8 @@ pub(crate) unsafe extern "C" fn swtch_pri_entry(_pri: c_int) -> c_int {
     c_int::from(unsafe { swtch_pri() })
 }
 
-/// `thread_switch_continue()` of `kern/syscall_subr.c`.
+/// The continuation of [`thread_switch`]: ends a pending depression and
+/// returns success.
 unsafe extern "C" fn thread_switch_continue() {
     let cur_thread = per_cpu::thread();
     // SAFETY: the continuation runs on its own thread, whose lock it takes.
@@ -262,7 +262,8 @@ unsafe extern "C" fn thread_switch_continue() {
     }
 }
 
-/// `thread_switch()` in C.
+/// Yields the processor, to the thread `thread_name` names when it can run,
+/// with the priority change or wait `option` asks for.
 ///
 /// # Errors
 ///
@@ -322,8 +323,7 @@ pub(crate) unsafe fn thread_switch(
     Ok(())
 }
 
-/// `thread_switch()` of <`kern/syscall_subr.h>`: the `thread_switch` trap
-/// entry.
+/// The `thread_switch` trap entry.
 ///
 /// # Safety
 ///

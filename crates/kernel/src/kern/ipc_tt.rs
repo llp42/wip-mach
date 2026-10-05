@@ -3,8 +3,7 @@
 //   Copyright (c) 1991,1990,1989,1988,1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The task- and thread-related IPC operations, which `kern/ipc_tt.c` used to
-//! define and `kern/ipc_tt.h` declares.
+//! The task- and thread-related IPC operations.
 
 use crate::arch::types::VmOffset;
 use crate::arch::x86_64::per_cpu;
@@ -22,29 +21,26 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::mem::size_of;
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 
-/// `IKOT_THREAD` and `IKOT_TASK` of <`kern/ipc_kobject.h`>.
+/// The kernel-object types of a thread port and a task port.
 const IKOT_THREAD: c_uint = 1;
 const IKOT_TASK: c_uint = 2;
-/// `IKOT_NONE` of <`kern/ipc_kobject.h>`: the type of a port bound to no kernel
-/// object.
+/// The type of a port bound to no kernel object.
 const IKOT_NONE: c_uint = 0;
-/// `IKO_NULL` of <`kern/ipc_kobject.h>`: the value that clears a port's
-/// `ip_kobject`.
+/// The value that clears a port's kernel object.
 const IKO_NULL: VmOffset = 0;
 
-/// `TASK_KERNEL_PORT`, `TASK_EXCEPTION_PORT` and `TASK_BOOTSTRAP_PORT` of
-/// <`mach/task_special_ports.h>`: the `which` values `task_*_special_port()`
-/// accepts.
+/// `TASK_KERNEL_PORT`, `TASK_EXCEPTION_PORT` and `TASK_BOOTSTRAP_PORT`: the
+/// `which` values the task special-port calls accept.
 const TASK_KERNEL_PORT: c_int = 1;
 const TASK_EXCEPTION_PORT: c_int = 3;
 const TASK_BOOTSTRAP_PORT: c_int = 4;
 
-/// `THREAD_KERNEL_PORT` and `THREAD_EXCEPTION_PORT` of
-/// <`mach/thread_special_ports.h`>.
+/// `THREAD_KERNEL_PORT` and `THREAD_EXCEPTION_PORT`: the `which` values the
+/// thread special-port calls accept.
 const THREAD_KERNEL_PORT: c_int = 1;
 const THREAD_EXCEPTION_PORT: c_int = 3;
 
-/// `MACH_PORT_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NULL: c_uint = 0;
 
 /// The `which` domain of `task_get_special_port()` and
@@ -92,7 +88,7 @@ impl ThreadSpecialPort {
     }
 }
 
-/// `ipc_space_create()` of <`ipc/ipc_space.h`>.
+/// Creates an IPC space for a new task.
 fn create_space() -> Result<*mut c_void, Error> {
     Ok(ipc_space::create()?.as_ptr())
 }
@@ -102,7 +98,7 @@ fn init_panic(fun: &'static str) -> ! {
     kpanic!(fun, "{}", fun)
 }
 
-/// The `if (IP_VALID(port)) ipc_port_release_send(port);` the C repeats.
+/// Releases the send right `port` when it is neither null nor dead.
 ///
 /// # Safety
 ///
@@ -113,7 +109,8 @@ unsafe fn release_send_if_valid(port: *mut c_void) {
     }
 }
 
-/// `ipc_task_init()` in C.
+/// Gives `task` its IPC space and kernel port, and inherits the special ports
+/// of `parent`.
 ///
 /// # Safety
 ///
@@ -129,8 +126,8 @@ pub(crate) unsafe fn ipc_task_init(
         init_panic("ipc_task_init")
     };
 
-    // SAFETY: the kernel's space is live for the life of the kernel; this
-    // is the C's `ipc_port_alloc_kernel()`.
+    // SAFETY: the kernel's space is live for the life of the kernel, so its
+    // special ports can be allocated in it.
     let kport = unsafe { ipc_port::alloc_special(ipc_space::kernel()) };
     let Some(kport) = kport else {
         init_panic("ipc_task_init")
@@ -168,7 +165,7 @@ pub(crate) unsafe fn ipc_task_init(
     }
 }
 
-/// `ipc_task_enable()` in C.
+/// Names `task` in its kernel port, so the port translates to it.
 ///
 /// # Safety
 ///
@@ -185,7 +182,7 @@ pub(crate) unsafe fn ipc_task_enable(task: *mut Task) {
     }
 }
 
-/// `ipc_task_disable()` in C.
+/// Clears `task` from its kernel port, so the port translates to nothing.
 ///
 /// # Safety
 ///
@@ -202,7 +199,7 @@ pub(crate) unsafe fn ipc_task_disable(task: *mut Task) {
     }
 }
 
-/// `ipc_task_terminate()` in C.
+/// Releases `task`'s special ports and destroys its kernel port.
 ///
 /// # Safety
 ///
@@ -233,15 +230,15 @@ pub(crate) unsafe fn ipc_task_terminate(task: *mut Task) {
     }
 }
 
-/// `ipc_thread_init()` in C.
+/// Gives `thread` its kernel port.
 ///
 /// # Safety
 ///
 /// `thread` must be a fresh thread whose IPC fields this call is the first to
 /// write, and the caller must hold no locks: the allocation may block.
 pub(crate) unsafe fn ipc_thread_init(thread: *mut Thread) {
-    // SAFETY: the kernel's space is live for the life of the kernel; this
-    // is the C's `ipc_port_alloc_kernel()`.
+    // SAFETY: the kernel's space is live for the life of the kernel, so its
+    // special ports can be allocated in it.
     let kport = unsafe { ipc_port::alloc_special(ipc_space::kernel()) };
     let Some(kport) = kport else {
         init_panic("ipc_thread_init")
@@ -261,7 +258,7 @@ pub(crate) unsafe fn ipc_thread_init(thread: *mut Thread) {
     }
 }
 
-/// `ipc_thread_enable()` in C.
+/// Names `thread` in its kernel port, so the port translates to it.
 ///
 /// # Safety
 ///
@@ -278,7 +275,7 @@ pub(crate) unsafe fn ipc_thread_enable(thread: *mut Thread) {
     }
 }
 
-/// `ipc_thread_disable()` in C.
+/// Clears `thread` from its kernel port, so the port translates to nothing.
 ///
 /// # Safety
 ///
@@ -295,7 +292,7 @@ pub(crate) unsafe fn ipc_thread_disable(thread: *mut Thread) {
     }
 }
 
-/// `ipc_thread_terminate()` in C.
+/// Releases `thread`'s special ports and destroys its kernel port.
 ///
 /// # Safety
 ///
@@ -321,7 +318,8 @@ pub(crate) unsafe fn ipc_thread_terminate(thread: *mut Thread) {
     }
 }
 
-/// `retrieve_task_self_fast()` in C.
+/// A send right for `task`'s self port, made directly on the port when nothing
+/// interposes on it.
 ///
 /// # Safety
 ///
@@ -353,7 +351,8 @@ pub(crate) unsafe fn retrieve_task_self_fast(
     }
 }
 
-/// `retrieve_thread_self_fast()` in C.
+/// A send right for `thread`'s self port, made directly on the port when
+/// nothing interposes on it.
 ///
 /// # Safety
 ///
@@ -385,7 +384,7 @@ pub(crate) unsafe fn retrieve_thread_self_fast(
     }
 }
 
-/// `mach_task_self()` in C, the mach trap.
+/// Returns the name of the caller's task port in its own space.
 ///
 /// # Safety
 ///
@@ -405,8 +404,7 @@ pub(crate) unsafe fn mach_task_self() -> c_uint {
     }
 }
 
-/// `mach_task_self()` of <`mach/mach_traps.h>`: the `mach_task_self` trap
-/// entry.
+/// The `mach_task_self` trap entry.
 ///
 /// # Safety
 ///
@@ -415,7 +413,7 @@ pub(crate) unsafe extern "C" fn mach_task_self_entry() -> c_uint {
     unsafe { mach_task_self() }
 }
 
-/// `mach_thread_self()` in C, the mach trap.
+/// Returns the name of the caller's thread port in its task's space.
 ///
 /// # Safety
 ///
@@ -436,8 +434,7 @@ pub(crate) unsafe fn mach_thread_self() -> c_uint {
     }
 }
 
-/// `mach_thread_self()` of <`mach/mach_traps.h>`: the `mach_thread_self` trap
-/// entry.
+/// The `mach_thread_self` trap entry.
 ///
 /// # Safety
 ///
@@ -446,7 +443,7 @@ pub(crate) unsafe extern "C" fn mach_thread_self_entry() -> c_uint {
     unsafe { mach_thread_self() }
 }
 
-/// `mach_reply_port()` in C, the mach trap.
+/// Allocates a reply port in the caller's space and returns its name.
 ///
 /// # Safety
 ///
@@ -458,11 +455,11 @@ pub(crate) unsafe fn mach_reply_port() -> c_uint {
         return MACH_PORT_NULL;
     };
 
-    // SAFETY: the space is live, as `ipc_port_alloc` needs.
+    // SAFETY: the space is live, as `ipc_port::alloc` needs.
     match ipc_port::alloc(space) {
         Ok((name, port)) => {
-            // SAFETY: `ipc_port_alloc` returns the port live and locked, and
-            // the C's `ip_unlock` released it.
+            // SAFETY: `ipc_port::alloc` returns the port live and locked, and
+            // only the unlock is left.
             unsafe { port.unlock() };
             name
         }
@@ -470,8 +467,7 @@ pub(crate) unsafe fn mach_reply_port() -> c_uint {
     }
 }
 
-/// `mach_reply_port()` of <`mach/mach_traps.h>`: the `mach_reply_port` trap
-/// entry.
+/// The `mach_reply_port` trap entry.
 ///
 /// # Safety
 ///
@@ -523,7 +519,7 @@ unsafe fn thread_port_field(
     }
 }
 
-/// `task_get_special_port()` in C.
+/// A send right for `task`'s special port `which`.
 ///
 /// # Safety
 ///
@@ -550,7 +546,7 @@ pub(crate) unsafe fn task_get_special_port(
     }
 }
 
-/// `task_set_special_port()` in C.
+/// Sets `task`'s special port `which` to `port`, releasing the previous one.
 ///
 /// # Safety
 ///
@@ -583,7 +579,7 @@ pub(crate) unsafe fn task_set_special_port(
     Ok(())
 }
 
-/// `thread_get_special_port()` in C.
+/// A send right for `thread`'s special port `which`.
 ///
 /// # Safety
 ///
@@ -611,7 +607,7 @@ pub(crate) unsafe fn thread_get_special_port(
     }
 }
 
-/// `thread_set_special_port()` in C.
+/// Sets `thread`'s special port `which` to `port`, releasing the previous one.
 ///
 /// # Safety
 ///
@@ -644,7 +640,8 @@ pub(crate) unsafe fn thread_set_special_port(
     Ok(())
 }
 
-/// `mach_ports_register()` in C.
+/// Registers up to `TASK_PORT_REGISTER_MAX` ports with `task`, for its
+/// children to look up.
 ///
 /// # Safety
 ///
@@ -688,7 +685,7 @@ pub(crate) unsafe fn ports_register(
     Ok(())
 }
 
-/// `mach_ports_lookup()` in C.
+/// Send rights for the ports registered with `task`.
 ///
 /// # Safety
 ///
@@ -729,7 +726,7 @@ pub(crate) unsafe fn ports_lookup(
     Ok((ports, TASK_PORT_REGISTER_MAX as c_uint))
 }
 
-/// `convert_port_to_task()` in C.
+/// The task `port` names, with a reference.
 ///
 /// # Safety
 ///
@@ -755,7 +752,7 @@ pub(crate) unsafe fn convert_port_to_task(
     }
 }
 
-/// `convert_port_to_space()` in C.
+/// The IPC space of the task `port` names, with a reference.
 ///
 /// # Safety
 ///
@@ -784,7 +781,7 @@ pub(crate) unsafe fn convert_port_to_space(
     }
 }
 
-/// `convert_port_to_map()` in C.
+/// The address map of the task `port` names, with a reference.
 ///
 /// # Safety
 ///
@@ -812,7 +809,7 @@ pub(crate) unsafe fn convert_port_to_map(
     }
 }
 
-/// `convert_port_to_thread()` in C.
+/// The thread `port` names, with a reference.
 ///
 /// # Safety
 ///
@@ -840,7 +837,7 @@ pub(crate) unsafe fn convert_port_to_thread(
     }
 }
 
-/// `convert_task_to_port()` in C.
+/// A send right for `task`'s port, consuming the caller's task reference.
 ///
 /// # Safety
 ///
@@ -865,7 +862,7 @@ pub(crate) unsafe fn convert_task_to_port(task: *mut Task) -> Option<IpcPort> {
     port
 }
 
-/// `convert_thread_to_port()` in C.
+/// A send right for `thread`'s port, consuming the caller's thread reference.
 ///
 /// # Safety
 ///
@@ -892,8 +889,7 @@ pub(crate) unsafe fn convert_thread_to_port(
     port
 }
 
-/// `space_deallocate()` in C: the `is_release()` of a space ref a
-/// [`convert_port_to_space()`] produced.
+/// Drops the space reference a [`convert_port_to_space()`] produced.
 ///
 /// # Safety
 ///

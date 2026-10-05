@@ -5,7 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! Resident memory management, which `vm/vm_resident.c` used to define.
+//! Resident memory management.
 
 use crate::arch::types::{AtomicVmOffset, VmOffset, VmSize};
 use crate::arch::vm_param::{PAGE_SHIFT, PAGE_SIZE};
@@ -29,105 +29,90 @@ use core::pin::Pin;
 use core::ptr::{NonNull, addr_of_mut, null_mut};
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-/// `VM_PAGE_HIGHMEM` of <`vm/vm_page.h>`: the page may come from high physical
-/// memory.
+/// The allocation flag that lets the page come from high physical memory.
 const VM_PAGE_HIGHMEM: c_uint = 0x08;
 
-/// `VM_PAGE_DMA32` and `VM_PAGE_DIRECTMAP` of <`vm/vm_page.h>`: the flags that
-/// ask for those segments.
+/// The allocation flags that ask for the 32-bit DMA segment and the
+/// direct-mapped segment.
 pub(crate) const VM_PAGE_DMA32: c_uint = 0x04;
 pub(crate) const VM_PAGE_DIRECTMAP: c_uint = 0x02;
 
-/// `VM_PAGE_SEL_*` of <`vm/vm_page.h>`: the segment selectors
-/// `vm_page_alloc_pa()` takes, ordered by physical reach.
+/// The segment selectors [`vm_page::alloc_pa`] takes, ordered by physical
+/// reach.
 const VM_PAGE_SEL_DMA: c_uint = 0;
 const VM_PAGE_SEL_DIRECTMAP: c_uint = 1;
 const VM_PAGE_SEL_DMA32: c_uint = 2;
 const VM_PAGE_SEL_HIGHMEM: c_uint = 3;
 
-/// `VM_PT_KERNEL` of <`vm/vm_page.h>`: the type for generic kernel
-/// allocations.
+/// The page type of generic kernel allocations.
 const VM_PT_KERNEL: c_ushort = 3;
 
-/// `vm_page_fictitious_quantum` of `vm/vm_resident.c`.
+/// How many fictitious pages [`more_fictitious`] adds at a time.
 const VM_PAGE_FICTITIOUS_QUANTUM: c_int = 5;
 
-/// `virtual_space_start` of `vm/vm_resident.c`: the first kernel virtual
-/// address `pmap_steal_memory()` hands out.
+/// The first kernel virtual address [`pmap_steal_memory`] hands out.
 static VIRTUAL_SPACE_START: AtomicVmOffset = AtomicVmOffset::new(0);
 
-/// `virtual_space_end` of `vm/vm_resident.c`: the end of the range
-/// `pmap_steal_memory()` hands out.
+/// The end of the range [`pmap_steal_memory`] hands out.
 static VIRTUAL_SPACE_END: AtomicVmOffset = AtomicVmOffset::new(0);
 
-/// `vm_page_queue_free_lock` of `vm/vm_resident.c`: the lock on the free page
-/// queue and the fictitious-page list.
+/// The lock on the free page queue and the fictitious-page list.
 pub(crate) static VM_PAGE_QUEUE_FREE_LOCK: SimpleLock = SimpleLock::new();
 
-/// `vm_page_queue_lock` of `vm/vm_resident.c`: the lock on the active and
-/// inactive page queues.
+/// The lock on the active and inactive page queues.
 pub(crate) static VM_PAGE_QUEUE_LOCK: SimpleLock = SimpleLock::new();
 
-/// `vm_page_fictitious_addr` of `vm/vm_resident.c`: the fake physical address
-/// of a fictitious page.
+/// The fake physical address of a fictitious page.
 pub(crate) const VM_PAGE_FICTITIOUS_ADDR: VmOffset = VmOffset::MAX;
 
-/// `vm_page_fictitious_count` of `vm/vm_resident.c`: how many fictitious pages
-/// are free.  `vm_page_queue_free_lock` serializes every access, so the
-/// atomic only has to make each one indivisible.
+/// How many fictitious pages are free.  `VM_PAGE_QUEUE_FREE_LOCK` serializes
+/// every access, so the atomic only has to make each one indivisible.
 pub(crate) static VM_PAGE_FICTITIOUS_COUNT: AtomicI32 = AtomicI32::new(0);
 
-/// `vm_object_external_count` of `vm/vm_object.h`: how many objects are paged
-/// externally.  Locked like `VM_PAGE_ACTIVE_COUNT`.
+/// How many objects are paged externally.  Locked like `VM_PAGE_ACTIVE_COUNT`.
 pub(crate) static VM_OBJECT_EXTERNAL_COUNT: AtomicI32 = AtomicI32::new(0);
 
-/// `vm_object_external_pages` of `vm/vm_object.h`: how many resident pages of
-/// external objects there are.  Locked like `VM_PAGE_ACTIVE_COUNT`.
+/// How many resident pages of external objects there are.  Locked like
+/// `VM_PAGE_ACTIVE_COUNT`.
 pub(crate) static VM_OBJECT_EXTERNAL_PAGES: AtomicI32 = AtomicI32::new(0);
 
-/// `vm_page_active_count` of `vm/vm_resident.c`: how many pages are active.
-/// Every update holds `vm_page_queue_lock`, so the atomic only has to make
-/// each access indivisible.
+/// How many pages are active. Every update holds `VM_PAGE_QUEUE_LOCK`, so the
+/// atomic only has to make each access indivisible.
 pub(crate) static VM_PAGE_ACTIVE_COUNT: AtomicI32 = AtomicI32::new(0);
 
-/// `vm_page_inactive_count` of `vm/vm_resident.c`: how many pages are
-/// inactive.
+/// How many pages are inactive.
 pub(crate) static VM_PAGE_INACTIVE_COUNT: AtomicI32 = AtomicI32::new(0);
 
-/// `vm_page_wire_count` of `vm/vm_resident.c`: how many pages are wired.
+/// How many pages are wired.
 pub(crate) static VM_PAGE_WIRE_COUNT: AtomicI32 = AtomicI32::new(0);
 
-/// `vm_page_laundry_count` of `vm/vm_resident.c`: how many pages are being
-/// cleaned.  `vm_page_queue_lock` serializes every access.
+/// How many pages are being cleaned.  `VM_PAGE_QUEUE_LOCK` serializes every
+/// access.
 pub(crate) static VM_PAGE_LAUNDRY_COUNT: AtomicI32 = AtomicI32::new(0);
 
-/// `vm_page_external_laundry_count` of `vm/vm_resident.c`: the same for
-/// external pagers.
+/// How many pages are being cleaned by external pagers.
 pub(crate) static VM_PAGE_EXTERNAL_LAUNDRY_COUNT: AtomicI32 =
     AtomicI32::new(0);
 
-/// `vm_page_deactivate_behind` of `vm/vm_resident.c`: whether a page inserted
-/// right after the last allocation deactivates that last page.
+/// Whether a page inserted right after the last allocation deactivates that
+/// last page.
 pub(crate) static VM_PAGE_DEACTIVATE_BEHIND: AtomicBool =
     AtomicBool::new(true);
 
-/// `vm_page_deactivate_hint` of `vm/vm_resident.c`: whether a clean request
-/// deactivates the cleaned pages.
+/// Whether a clean request deactivates the cleaned pages.
 pub(crate) static VM_PAGE_DEACTIVATE_HINT: AtomicBool = AtomicBool::new(true);
 
-/// `vm_page_cache` of `vm/vm_resident.c`: the `struct vm_page` slab cache.
+/// The slab cache of [`VmPage`] records.
 static mut VM_PAGE_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `vm_page_bucket_t` of `vm/vm_resident.c`: one head of the
-/// object/offset-to-page hash table.  File-private after this port.
+/// One head of the object/offset-to-page hash table.
 struct PageBucket {
     lock: SimpleLock,
     pages: *mut VmPage,
 }
 
-/// The hash table and the fictitious-page list, the file-private state of
-/// `vm/vm_resident.c`.  The bucket locks and `vm_page_queue_free_lock` serialize
-/// access, as in the C.
+/// The hash table and the fictitious-page list.  The bucket locks and
+/// `VM_PAGE_QUEUE_FREE_LOCK` serialize access.
 struct ResidentState {
     buckets: *mut PageBucket,
     bucket_count: usize,
@@ -153,12 +138,12 @@ fn state() -> *mut ResidentState {
     RESIDENT_STATE.0.get()
 }
 
-/// `panic()` of `vm/vm_resident.c`.
+/// Halts the kernel with `message`, under the `func` tag.
 fn die(func: &'static str, message: &'static str) -> ! {
     kpanic!(func, "{}", message)
 }
 
-/// `vm_page_hash()` of `vm/vm_resident.c` at the given key.
+/// The hash bucket of the `object`/`offset` key.
 ///
 /// # Safety
 ///
@@ -184,8 +169,8 @@ unsafe fn bucket_ptr(
     unsafe { (*state()).buckets.add(bucket_index(object, offset)) }
 }
 
-/// `pmap_steal_memory()` in C: reserve `size` of kernel virtual space and map
-/// fresh physical pages into it.
+/// Reserves `size` of kernel virtual space and maps fresh physical pages into
+/// it.
 ///
 /// On failure the error is the page-rounded size the C passed to its
 /// exhaustion panic, in bytes.
@@ -214,8 +199,8 @@ pub(crate) fn pmap_steal_memory(size: VmSize) -> Result<VmOffset, VmSize> {
     let mut vaddr = round_page(addr);
     while vaddr < limit {
         let paddr = vm_page::bootalloc(PAGE_SIZE);
-        // SAFETY: `kernel_pmap` is the boot pmap and `vaddr` is inside the
-        // range just reserved; the C maps the page without wiring it.
+        // SAFETY: `kernel_pmap_ptr()` is the boot pmap and `vaddr` is inside
+        // the range just reserved; the page is mapped without being wired.
         unsafe {
             pmap_enter(
                 NonNull::new(kernel_pmap_ptr()),
@@ -231,8 +216,8 @@ pub(crate) fn pmap_steal_memory(size: VmSize) -> Result<VmOffset, VmSize> {
     Ok(addr)
 }
 
-/// `vm_page_bootstrap()` in C: initialize the page queues and the
-/// object/offset hash table, then report the kernel virtual range.
+/// Initializes the page queues and the object/offset hash table, then reports
+/// the kernel virtual range.
 pub(crate) fn bootstrap() -> (VmOffset, VmOffset) {
     // SAFETY: the bootstrap runs once, before any other user of the two
     // locks, and the fictitious list is not yet linked.
@@ -303,13 +288,12 @@ pub(crate) fn bootstrap() -> (VmOffset, VmOffset) {
     (start, end)
 }
 
-/// `vm_page_insert()` in C: put `mem` in the object/offset hash table and the
-/// object's page list.
+/// Puts `mem` in the object/offset hash table and the object's page list.
 ///
 /// # Safety
 ///
 /// `mem` must be a live page and `object` a live, locked object, and the
-/// caller must hold `vm_page_queue_lock`, as the C required.
+/// caller must hold `VM_PAGE_QUEUE_LOCK`.
 pub(crate) unsafe fn insert(
     mem: NonNull<VmPage>,
     object: NonNull<VmObject>,
@@ -374,13 +358,12 @@ pub(crate) unsafe fn insert(
     }
 }
 
-/// `vm_page_replace()` in C: insert `mem`, first removing any page already at
-/// the key.
+/// Inserts `mem`, first removing any page already at the key.
 ///
 /// # Safety
 ///
 /// `mem` must be a live page and `object` a live, locked object, and the
-/// caller must hold `vm_page_queue_lock`, as the C required.
+/// caller must hold `VM_PAGE_QUEUE_LOCK`.
 pub(crate) unsafe fn replace(
     mem: NonNull<VmPage>,
     object: NonNull<VmObject>,
@@ -455,8 +438,8 @@ pub(crate) unsafe fn replace(
     }
 }
 
-/// `vm_page_remove()` in C: unlink `mem` from the hash table, its object's
-/// page list and the page queues.
+/// Unlinks `mem` from the hash table, its object's page list and the page
+/// queues.
 ///
 /// # Safety
 ///
@@ -499,7 +482,7 @@ pub(crate) unsafe fn remove(mem: NonNull<VmPage>) {
     }
 }
 
-/// `vm_page_lookup()` in C: the page at `object`/`offset`, when tabled.
+/// The page at `object`/`offset`, when tabled.
 ///
 /// # Safety
 ///
@@ -530,7 +513,7 @@ pub(crate) unsafe fn lookup(
 ///
 /// # Safety
 ///
-/// The caller must hold `vm_page_queue_free_lock` for as long as it uses the
+/// The caller must hold `VM_PAGE_QUEUE_FREE_LOCK` for as long as it uses the
 /// list.
 unsafe fn fictitious_list() -> Pin<&'static mut NodeList> {
     // SAFETY: `RESIDENT_STATE` is a static, so the list never moves, and the
@@ -538,12 +521,11 @@ unsafe fn fictitious_list() -> Pin<&'static mut NodeList> {
     unsafe { Pin::new_unchecked(&mut (*state()).fictitious) }
 }
 
-/// `vm_page_grab_fictitious()` in C: take a fictitious page off the free
-/// list.
+/// Takes a fictitious page off the free list.
 ///
 /// # Safety
 ///
-/// The caller must not hold `vm_page_queue_free_lock`.
+/// The caller must not hold `VM_PAGE_QUEUE_FREE_LOCK`.
 pub(crate) unsafe fn grab_fictitious() -> Option<NonNull<VmPage>> {
     VM_PAGE_QUEUE_FREE_LOCK.lock();
 
@@ -564,13 +546,12 @@ pub(crate) unsafe fn grab_fictitious() -> Option<NonNull<VmPage>> {
     page
 }
 
-/// `vm_page_release_fictitious()` in C: return a fictitious page to the free
-/// list.
+/// Returns a fictitious page to the free list.
 ///
 /// # Safety
 ///
 /// `mem` must be a live fictitious page the caller owns, and the caller must
-/// not hold `vm_page_queue_free_lock`.
+/// not hold `VM_PAGE_QUEUE_FREE_LOCK`.
 unsafe fn release_fictitious(mem: NonNull<VmPage>) {
     let page = mem.as_ptr();
 
@@ -591,8 +572,7 @@ unsafe fn release_fictitious(mem: NonNull<VmPage>) {
     VM_PAGE_QUEUE_FREE_LOCK.unlock();
 }
 
-/// `vm_page_more_fictitious()` in C: allocate more fictitious pages into the
-/// free list.
+/// Allocates more fictitious pages into the free list.
 ///
 /// # Safety
 ///
@@ -621,8 +601,8 @@ pub(crate) unsafe fn more_fictitious() {
     }
 }
 
-/// `vm_page_convert()` in C: turn a fictitious page into a real one, or
-/// report that no page was available.
+/// Turns a fictitious page into a real one, or reports that no page was
+/// available.
 ///
 /// # Safety
 ///
@@ -653,15 +633,14 @@ pub(crate) unsafe fn convert(
     Some(real)
 }
 
-/// `vm_page_order()` of <`vm/vm_page.h>`: the power of two that holds `size`
-/// bytes.
+/// The power of two that holds `size` bytes.
 pub(crate) const fn page_order(size: VmSize) -> c_uint {
     let pages = round_page(size) >> PAGE_SHIFT;
     if pages == 1 {
         return 0;
     }
-    // The C's `iorder2()`: the bit length of `pages - 1`, which wraps to the
-    // word width for a zero size, as the C's unsigned shift did.
+    // The bit length of `pages - 1`, which wraps to the word width for a zero
+    // size, as an unsigned shift does.
     usize::BITS - pages.wrapping_sub(1).leading_zeros()
 }
 
@@ -671,13 +650,12 @@ const fn contig_pages(size: VmSize) -> u32 {
     1u32.wrapping_shl(page_order(size))
 }
 
-/// `vm_page_grab_contig()` in C: remove a block of contiguous pages from the
-/// free list.
+/// Removes a block of contiguous pages from the free list.
 ///
 /// # Safety
 ///
-/// The caller must not hold `vm_page_queue_free_lock` and must be in a
-/// context where the allocator may spin, as the C required.
+/// The caller must not hold `VM_PAGE_QUEUE_FREE_LOCK` and must be in a context
+/// where the allocator may spin.
 pub(crate) unsafe fn grab_contig(
     size: VmSize,
     selector: c_uint,
@@ -705,8 +683,7 @@ pub(crate) unsafe fn grab_contig(
     Some(page)
 }
 
-/// `vm_page_free()` in C: return a page to the free list, disassociating it
-/// from any object.
+/// Returns a page to the free list, disassociating it from any object.
 ///
 /// # Safety
 ///
@@ -761,8 +738,7 @@ pub(crate) unsafe fn free(mem: NonNull<VmPage>) {
     }
 }
 
-/// `vm_page_info()` in C: fill `info` with the counts of the first `count`
-/// hash buckets.
+/// Fills `info` with the counts of the first `count` hash buckets.
 ///
 /// # Safety
 ///
@@ -805,7 +781,7 @@ pub(crate) unsafe fn info(info: *mut HashInfoBucket, count: c_uint) -> c_uint {
     bucket_count as c_uint
 }
 
-/// `vm_page_rename()` in C: move a page to another object and offset.
+/// Moves a page to another object and offset.
 ///
 /// # Safety
 ///
@@ -826,7 +802,7 @@ pub(crate) unsafe fn rename(
     }
 }
 
-/// `vm_page_alloc_flags()` in C: grab a free page and table it in `object`.
+/// Grabs a free page and tables it in `object`.
 ///
 /// # Safety
 ///
@@ -851,7 +827,7 @@ pub(crate) unsafe fn alloc_flags(
     Some(page)
 }
 
-/// `vm_page_alloc()` in C: `vm_page_alloc_flags()` with `VM_PAGE_HIGHMEM`.
+/// Like [`alloc_flags`], with the page allowed to come from high memory.
 ///
 /// # Safety
 ///
@@ -863,9 +839,7 @@ pub(crate) unsafe fn alloc(
     unsafe { alloc_flags(object, offset, VM_PAGE_HIGHMEM) }
 }
 
-/// `vm_page_init()` in C: initialize the fields of a page whose storage holds
-/// random values.  The C kept the body in a `vm_page_init_template()` static
-/// with this one caller.
+/// Initializes the fields of a page whose storage holds random values.
 pub(crate) const fn init(page: &mut VmPage) {
     page.object = null_mut();
     page.offset = 0;
@@ -890,7 +864,7 @@ pub(crate) const fn init(page: &mut VmPage) {
     page.set_unlock_request(VmProt::NONE);
 }
 
-/// `vm_page_module_init()` in C: create the `vm_page` slab cache.
+/// Creates the [`VmPage`] slab cache.
 ///
 /// # Safety
 ///
@@ -907,8 +881,8 @@ pub(crate) unsafe fn module_init() {
     };
 }
 
-/// The selector `vm_page_grab()` computes from its flags, the widest
-/// requested segment first.
+/// The selector [`grab`] computes from its flags, the widest requested segment
+/// first.
 const fn alloc_selector(flags: c_uint) -> c_uint {
     if flags & VM_PAGE_HIGHMEM != 0 {
         VM_PAGE_SEL_HIGHMEM
@@ -921,11 +895,11 @@ const fn alloc_selector(flags: c_uint) -> c_uint {
     }
 }
 
-/// `vm_page_grab()` in C: take a page out of the free list.
+/// Takes a page out of the free list.
 ///
 /// # Safety
 ///
-/// The caller must not hold `vm_page_queue_free_lock`, and must be in a
+/// The caller must not hold `VM_PAGE_QUEUE_FREE_LOCK`, and must be in a
 /// context where the allocator's spinning is allowed.
 pub(crate) unsafe fn grab(flags: c_uint) -> Option<NonNull<VmPage>> {
     let page =
@@ -938,20 +912,20 @@ pub(crate) unsafe fn grab(flags: c_uint) -> Option<NonNull<VmPage>> {
         unsafe { (*page.as_ptr()).set_free(false) };
     }
 
-    // `vm_page_alloc_pa()` returns with the free lock held, on both
-    // the found and the exhausted path.
+    // `vm_page::alloc_pa` returns with the free lock held, on both the found
+    // and the exhausted path.
     VM_PAGE_QUEUE_FREE_LOCK.unlock();
 
     page
 }
 
-/// `vm_page_release()` in C: return a page to the free list, resuming the
-/// pageout daemon when the last laundered page is gone.
+/// Returns a page to the free list, resuming the pageout daemon when the last
+/// laundered page is gone.
 ///
 /// # Safety
 ///
-/// `page` must be a live page that no one else holds, and the caller must
-/// not hold `vm_page_queue_free_lock`.
+/// `page` must be a live page that no one else holds, and the caller must not
+/// hold `VM_PAGE_QUEUE_FREE_LOCK`.
 pub(crate) unsafe fn release(
     page: NonNull<VmPage>,
     laundry: bool,
@@ -968,8 +942,7 @@ pub(crate) unsafe fn release(
 
     // SAFETY: the free lock is held and guards the flag.
     unsafe { (*ptr).set_free(true) };
-    // SAFETY: the free lock is held; `vm_page_free_pa()` is the real backend
-    // and order zero is the C's.
+    // SAFETY: the free lock is held, and a single page is order zero.
     unsafe { vm_page::free_pa(ptr, 0) };
 
     if laundry {
@@ -994,7 +967,7 @@ pub(crate) unsafe fn release(
     VM_PAGE_QUEUE_FREE_LOCK.unlock();
 }
 
-/// `vm_page_zero_fill()` in C: zero the page's physical memory.
+/// Zeroes the page's physical memory.
 ///
 /// # Safety
 ///
@@ -1005,7 +978,7 @@ pub(crate) unsafe fn zero_fill(page: NonNull<VmPage>) {
     unsafe { phys::zero_page((*page.as_ptr()).phys_addr) };
 }
 
-/// `vm_page_copy()` in C: copy one page's physical memory to another.
+/// Copies one page's physical memory to another.
 ///
 /// # Safety
 ///

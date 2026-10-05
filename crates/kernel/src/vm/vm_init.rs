@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The virtual memory bootstrap, which `vm/vm_init.c` used to define and
-//! `vm/vm_init.h` declares.
+//! The virtual memory bootstrap.
 
 use crate::arch::x86_64::pmap::kernel_pmap_ptr;
 use crate::arch::x86_64::pmap::pmap_init;
@@ -22,7 +21,9 @@ use crate::vm::vm_page;
 use crate::vm::vm_resident;
 use core::ptr::NonNull;
 
-/// `vm_mem_bootstrap()` in C.
+/// Brings up the VM packages in boot order: the resident pages, the slab
+/// allocator, objects, maps, the kernel map, the physical maps, `kalloc`,
+/// faults and the default manager.
 fn bootstrap() {
     let (start, end) = vm_resident::bootstrap();
 
@@ -49,7 +50,8 @@ fn bootstrap() {
     }
 }
 
-/// `vm_mem_init()` in C.
+/// Starts the parts of the VM system that need the scheduler: the object
+/// cache, the page statistics and the proxies.
 fn init() {
     // The boot caller runs this after `bootstrap`, once, when the scheduler
     // is alive; each callee requires the state it left.
@@ -58,7 +60,7 @@ fn init() {
     memory_object_proxy::init();
 }
 
-/// `vm_mem_bootstrap()` in C.
+/// Brings up the virtual memory system at boot.
 ///
 /// # Safety
 ///
@@ -68,7 +70,7 @@ pub(crate) unsafe fn vm_mem_bootstrap() {
     bootstrap();
 }
 
-/// `vm_mem_init()` in C.
+/// Finishes the virtual memory bring-up once the scheduler runs.
 ///
 /// # Safety
 ///

@@ -4,11 +4,10 @@
 //   Copyright (C) 2020 Free Software Foundation, Inc
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The interrupt vector accessors and the per-line disable counts, which
-//! `i386/i386/irq.c` used to define and `i386/i386/irq.h` declares.
+//! The interrupt vector accessors and the per-line disable counts.
 //!
-//! The `struct irqdev` table and the `user_intr_t` entries come from
-//! <device/intr.h>.
+//! The [`IrqDev`] table and the [`UserIntr`] entries are the device interrupt
+//! layer's.
 
 use crate::arch::x86_64::ioapic::{self, InterruptHandler};
 use crate::arch::x86_64::platform::MachPlatform;
@@ -18,7 +17,7 @@ use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::mem::{align_of, offset_of, size_of};
 use lock::IrqSpinLock;
 
-/// `struct irqdev` of <device/intr.h>: one interrupt controller's table.
+/// One interrupt controller's table.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct IrqDev {
@@ -33,7 +32,7 @@ pub struct IrqDev {
     pub irq: [c_uint; NINTR],
 }
 
-/// `user_intr_t` of <device/intr.h>: one userland interrupt registration.
+/// One userland interrupt registration.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct UserIntr {
@@ -52,7 +51,7 @@ simple_queue::adapter!(
 /// A queue of registrations, in the order they were made.
 pub type UserIntrQueue = SimpleQueue<'static, UserIntrAdapter>;
 
-// The offsets below pin the layout of `struct irqdev` and `user_intr_t`.
+// The offsets below pin the layout of `IrqDev` and `UserIntr`.
 const _: () = {
     assert!(size_of::<IrqDev>() == 288);
     assert!(align_of::<IrqDev>() == 8);
@@ -71,10 +70,8 @@ const _: () = {
     assert!(offset_of!(UserIntr, id) == 24);
 };
 
-/// `struct nested_irq` of `i386/i386/irq.c`: one line's disable count in its
-/// own lock.  The C gave each entry a whole cache line, which the alignment
-/// preserves.  An irq spin lock, since an interrupt handler may disable its
-/// line.
+/// One line's disable count in its own lock.  Each entry takes a whole cache
+/// line.  An irq spin lock, since an interrupt handler may disable its line.
 #[repr(C, align(64))]
 #[allow(missing_docs)]
 struct NestedIrq {
@@ -89,20 +86,19 @@ static NESTED_IRQS: [NestedIrq; NINTR] = [const {
     }
 }; NINTR];
 
-/// The `irqtab.irq` initializer of `i386/i386/irq.c`: each line maps to
-/// itself.
+/// The line map of [`IRQTAB`]: each line maps to itself.
 const fn irq_map() -> [c_uint; NINTR] {
     let mut table = [0; NINTR];
     let mut irq = 0;
     while irq < NINTR {
-        // NINTR is 64, so the narrowing to `irq_t` loses nothing.
+        // NINTR is 64, so the narrowing loses nothing.
         table[irq] = irq as c_uint;
         irq += 1;
     }
     table
 }
 
-/// `irq_eoi()` of `i386/i386/irq.c`: acknowledge the line behind `dev`.
+/// Acknowledges the line behind `dev`.
 ///
 /// # Safety
 ///
@@ -111,7 +107,7 @@ unsafe fn irq_eoi(dev: *mut IrqDev, id: c_int) {
     let Ok(index) = usize::try_from(id) else {
         return;
     };
-    // SAFETY: `dev` is the live `irqtab`, and `index` addresses one of its
+    // SAFETY: `dev` is the live `IRQTAB`, and `index` addresses one of its
     // NINTR `irq` entries.
     let Some(irq) = (unsafe { (*dev).irq.get(index) }) else {
         return;
@@ -122,7 +118,7 @@ unsafe fn irq_eoi(dev: *mut IrqDev, id: c_int) {
     ioapic::irq_eoi(pin);
 }
 
-/// `irqtab` of `i386/i386/irq.c`, which <i386/irq.h> declares.
+/// The interrupt controller table of the I/O APIC lines.
 pub static mut IRQTAB: IrqDev = IrqDev {
     name: c"irq".as_ptr().cast_mut(),
     irqdev_ack: Some(irq_eoi),
@@ -137,11 +133,11 @@ fn index_of(irq: c_int) -> Option<usize> {
     if index < NINTR { Some(index) } else { None }
 }
 
-/// `irq_get_handler()` of `i386/i386/irq.c`.
+/// The handler of the line `irq`.
 pub(crate) fn handler(irq: c_int) -> InterruptHandler {
     let index = index_of(irq)?;
-    // SAFETY: `index` is inside `ivect`, which the interrupt stubs and
-    // `device/intr.c` read through the symbol C declares.
+    // SAFETY: `index` is inside `IVECT`, which the interrupt entry reads by
+    // its symbol.
     unsafe {
         *(&raw const ioapic::IVECT)
             .cast::<InterruptHandler>()
@@ -149,7 +145,7 @@ pub(crate) fn handler(irq: c_int) -> InterruptHandler {
     }
 }
 
-/// `irq_set_handler()` of `i386/i386/irq.c`.
+/// Sets the handler of the line `irq`.
 pub(crate) fn set_handler(irq: c_int, handler: InterruptHandler) {
     let Some(index) = index_of(irq) else {
         return;
@@ -164,7 +160,7 @@ pub(crate) fn set_handler(irq: c_int, handler: InterruptHandler) {
     };
 }
 
-/// `irq_get_unit()` of `i386/i386/irq.c`.
+/// The unit the handler of the line `irq` is called with.
 pub(crate) fn unit(irq: c_int) -> c_int {
     let Some(index) = index_of(irq) else {
         return 0;
@@ -174,7 +170,7 @@ pub(crate) fn unit(irq: c_int) -> c_int {
     unsafe { *(&raw const ioapic::IUNIT).cast::<c_int>().add(index) }
 }
 
-/// `irq_set_unit()` of `i386/i386/irq.c`.
+/// Sets the unit the handler of the line `irq` is called with.
 pub(crate) fn set_unit(irq: c_int, unit: c_int) {
     let Some(index) = index_of(irq) else {
         return;
@@ -183,8 +179,7 @@ pub(crate) fn set_unit(irq: c_int, unit: c_int) {
     unsafe { *(&raw mut ioapic::IUNIT).cast::<c_int>().add(index) = unit };
 }
 
-/// `__disable_irq()` of `i386/i386/irq.c`: raise the line's disable count and
-/// mask it on the first disable.
+/// Raises the line's disable count and masks it on the first disable.
 fn disable(irq: c_uint) {
     let Ok(pin) = c_int::try_from(irq) else {
         return;
@@ -203,8 +198,7 @@ fn disable(irq: c_uint) {
     }
 }
 
-/// `__enable_irq()` of `i386/i386/irq.c`: lower the line's disable count and
-/// unmask it on the last enable.
+/// Lowers the line's disable count and unmasks it on the last enable.
 fn enable(irq: c_uint) {
     let Ok(pin) = c_int::try_from(irq) else {
         return;
@@ -223,18 +217,18 @@ fn enable(irq: c_uint) {
     }
 }
 
-/// `init_irqs()` of `i386/i386/irq.c`.
+/// Sets up nothing: the tables are statically initialized.
 ///
 /// The C zeroed each entry's lock and count; the constructor above already
 /// leaves every `NESTED_IRQS` entry in that state, so nothing is left to do.
 pub(crate) const fn init_irqs() {}
 
-/// `__disable_irq()` of `i386/i386/irq.c`.
+/// Disables the line `irq`, counting nested disables.
 pub(crate) fn __disable_irq(irq: c_uint) {
     disable(irq);
 }
 
-/// `__enable_irq()` of `i386/i386/irq.c`.
+/// Enables the line `irq` once every disable is undone.
 pub(crate) fn __enable_irq(irq: c_uint) {
     enable(irq);
 }

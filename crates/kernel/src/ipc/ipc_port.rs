@@ -5,8 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The port manipulation routines, which `ipc/ipc_port.c` used to define and
-//! `ipc/ipc_port.h` declares.
+//! The port manipulation routines.
 
 use crate::ipc::error::Error;
 use crate::ipc::ipc_kmsg;
@@ -28,8 +27,7 @@ use core::ffi::{c_uint, c_void};
 use core::ptr::{self, NonNull, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// `ipc_port_timestamp_lock_data` of `ipc/ipc_port.c`: serializes the counter's
-/// read and post-increment.
+/// Serializes the timestamp counter's read and post-increment.
 static TIMESTAMP_LOCK: SimpleLock = SimpleLock::new();
 
 /// `ipc_bootstrap()` writes the initial zero before any other thread can reach
@@ -38,34 +36,31 @@ static TIMESTAMP_LOCK: SimpleLock = SimpleLock::new();
 /// other callers.
 static TIMESTAMP_DATA: AtomicU32 = AtomicU32::new(0);
 
-/// `ipc_port_multiple_lock_data` of `ipc/ipc_port.c`: the lock that grants the
-/// holder the privilege to lock several ports at once.
+/// The lock that grants the holder the privilege to lock several ports at
+/// once.
 static MULTIPLE_LOCK: SimpleLock = SimpleLock::new();
 
-/// `IOT_PORT` as the `io_bits` object-type field spells it; it is also the
-/// index of the port cache.
+/// The port object type as the object bits spell it; also the index of the
+/// port cache.
 const IOT_PORT_TYPE: c_uint = 0;
-/// `IO_BITS_ACTIVE` of <`ipc/ipc_object.h`>.
+/// The object bit of an active object.
 const IO_BITS_ACTIVE: c_uint = 0x8000_0000;
-/// `MACH_PORT_TYPE_RECEIVE` of <mach/port.h>: `1 << (right + 16)` for the
-/// receive right.
+/// The type bit of a receive right: `1 << (right + 16)`.
 const MACH_PORT_TYPE_RECEIVE: c_uint = 1 << 17;
-/// `MACH_PORT_QLIMIT_DEFAULT` of <mach/port.h>.
+/// The default queue limit.
 const MACH_PORT_QLIMIT_DEFAULT: c_uint = 5;
-/// `MACH_PORT_NULL` and `MACH_PORT_NULL` of <mach/port.h>.
+/// The null port name.
 const MACH_PORT_NULL: c_uint = 0;
-/// `MACH_PORT_NAME_DEAD` of <mach/port.h>.
+/// The dead port name.
 const MACH_PORT_NAME_DEAD: c_uint = c_uint::MAX;
-/// `MACH_MSG_TYPE_PORT_SEND` of <mach/message.h>, an alias of
-/// `MACH_MSG_TYPE_MOVE_SEND`.
+/// The send right disposition, an alias of `MACH_MSG_TYPE_MOVE_SEND`.
 const MACH_MSG_TYPE_PORT_SEND: c_uint = 17;
-/// `IKOT_NONE` of <`kern/ipc_kobject.h>`: the type of a port bound to no kernel
-/// object.
+/// The type of a port bound to no kernel object.
 const IKOT_NONE: c_uint = 0;
-/// `IP_DEAD` of <`ipc/ipc_port.h`>, the port image of `IO_DEAD`.
+/// The dead port value.
 const IP_DEAD: *mut c_void = usize::MAX as *mut c_void;
 
-/// `ipc_port_timestamp()` in C.
+/// Hands out the next port timestamp.
 pub(crate) fn timestamp() -> c_uint {
     TIMESTAMP_LOCK.lock();
 
@@ -77,14 +72,14 @@ pub(crate) fn timestamp() -> c_uint {
     timestamp
 }
 
-/// The `simple_lock_init()` calls `ipc_bootstrap()` makes on this file's
-/// statics.
+/// Initializes the timestamp and multiple-port locks at boot.
 pub(crate) fn init_static_locks() {
     MULTIPLE_LOCK.init();
     TIMESTAMP_LOCK.init();
 }
 
-/// `ipc_port_alloc()` in C.
+/// Allocates a port with a receive right in `space` under a fresh name,
+/// returned locked.
 pub(crate) fn alloc(space: IpcSpace) -> Result<(c_uint, IpcPort), Error> {
     // SAFETY: the caller promises a live space; a successful allocation
     // returns the object locked, which `init` needs and keeps.
@@ -102,7 +97,8 @@ pub(crate) fn alloc(space: IpcSpace) -> Result<(c_uint, IpcPort), Error> {
     Ok((name, port))
 }
 
-/// `ipc_port_alloc_name()` in C.
+/// Allocates a port with a receive right in `space` under `name`, returned
+/// locked.
 pub(crate) fn alloc_name(
     space: IpcSpace,
     name: c_uint,
@@ -129,7 +125,7 @@ pub(crate) fn alloc_name(
     Ok(port)
 }
 
-/// `it_dnrequests_alloc()` of <`ipc/ipc_table.h`>.
+/// Allocates a dead-name request table of the size `its` describes.
 fn dnrequests_alloc(its: *mut IpcTableSize) -> Option<*mut IpcPortRequest> {
     // SAFETY: the caller promises `its` points at a live size record.  The C
     // widens `its_size` to the `vm_size_t` the multiplication runs in.
@@ -140,7 +136,7 @@ fn dnrequests_alloc(its: *mut IpcTableSize) -> Option<*mut IpcPortRequest> {
         .map(NonNull::as_ptr)
 }
 
-/// `it_dnrequests_free()` of <`ipc/ipc_table.h`>.
+/// Frees the dead-name request table `table` of the size `its` describes.
 ///
 /// # Safety
 ///
@@ -151,7 +147,8 @@ unsafe fn dnrequests_free(its: *mut IpcTableSize, table: *mut IpcPortRequest) {
     unsafe { ipc_table::ipc_table_free(size, table.addr()) };
 }
 
-/// `ipc_port_dnrequest()` in C.
+/// Registers `soright` for a dead-name notification of `name`, returning its
+/// table index.
 ///
 /// # Safety
 ///
@@ -186,7 +183,7 @@ pub(crate) unsafe fn dnrequest(
     Ok(index)
 }
 
-/// `ipc_port_dngrow()` in C.
+/// Grows the port's dead-name request table to the next size.
 ///
 /// # Safety
 ///
@@ -194,9 +191,9 @@ pub(crate) unsafe fn dnrequest(
 /// caller must hold a reference.
 pub(crate) unsafe fn dngrow(port: IpcPort) -> Result<(), Error> {
     let old = unsafe { port.dnrequests() };
-    // SAFETY: `ipc_table_dnrequests` is the table `ipc_table_init()` built,
-    // whose last entry is the zero terminator.  `ipr_size + 1` is the next
-    // entry when the port already has a table.
+    // SAFETY: `IPC_TABLE_DNREQUESTS` is the table `ipc_table_init()` built,
+    // whose last entry is the zero terminator.  The entry after the size of
+    // the port's table is the next size when the port already has one.
     let its = unsafe {
         if old.is_null() {
             ipc_table::IPC_TABLE_DNREQUESTS.load(Ordering::Relaxed)
@@ -284,7 +281,7 @@ pub(crate) unsafe fn dngrow(port: IpcPort) -> Result<(), Error> {
     Ok(())
 }
 
-/// `ipc_port_dncancel()` in C.  Its `name` argument is unused.
+/// Cancels the dead-name request at `index` and returns its send-once right.
 ///
 /// # Safety
 ///
@@ -304,8 +301,7 @@ pub(crate) unsafe fn dncancel(port: IpcPort, index: c_uint) -> *mut c_void {
     }
 }
 
-/// `ipc_port_dnrename()` of <`ipc/ipc_port.h>`: rename the dead-name request a
-/// table index holds.
+/// Renames the dead-name request a table index holds.
 ///
 /// # Safety
 ///
@@ -319,7 +315,7 @@ pub(crate) unsafe fn dnrename(port: IpcPort, index: c_uint, name: c_uint) {
     }
 }
 
-/// `ipc_port_pdrequest()` in C: installs `notify`, consuming its reference,
+/// Installs `notify` as the port-destroyed request, consuming its reference,
 /// and returns the previous request with its own reference.
 ///
 /// # Safety
@@ -338,8 +334,8 @@ pub(crate) unsafe fn pdrequest(
     }
 }
 
-/// `ipc_port_nsrequest()` in C: installs `notify`, consuming its reference,
-/// and returns the previous request with its own reference.
+/// Installs `notify` as the no-senders request, consuming its reference, and
+/// returns the previous request with its own reference.
 ///
 /// # Safety
 ///
@@ -370,7 +366,8 @@ pub(crate) unsafe fn nsrequest(
     }
 }
 
-/// `ipc_port_set_qlimit()` in C.
+/// Sets the port's queue limit and wakes the senders a larger limit lets
+/// through.
 ///
 /// # Safety
 ///
@@ -404,8 +401,8 @@ pub(crate) unsafe fn set_qlimit(port: IpcPort, qlimit: c_uint) {
     unsafe { port.set_qlimit(qlimit) };
 }
 
-/// `ipc_port_lock_mqueue()` in C: locks and returns the message queue the
-/// port is using, which may be in the port or in its port set.
+/// Locks and returns the message queue the port is using, which may be in the
+/// port or in its port set.
 ///
 /// # Safety
 ///
@@ -436,7 +433,7 @@ pub(crate) unsafe fn lock_mqueue(port: IpcPort) -> *mut IpcMqueue {
     mqueue
 }
 
-/// `ipc_port_set_seqno()` in C.
+/// Sets the port's sequence number.
 ///
 /// # Safety
 ///
@@ -452,7 +449,7 @@ pub(crate) unsafe fn set_seqno(port: IpcPort, seqno: c_uint) {
     }
 }
 
-/// `ipc_port_set_protected_payload()` in C.
+/// Sets the port's protected payload.
 ///
 /// # Safety
 ///
@@ -469,7 +466,7 @@ pub(crate) unsafe fn set_protected_payload(port: IpcPort, payload: usize) {
     }
 }
 
-/// `ipc_port_clear_protected_payload()` in C.
+/// Clears the port's protected payload.
 ///
 /// # Safety
 ///
@@ -485,7 +482,8 @@ pub(crate) unsafe fn clear_protected_payload(port: IpcPort) {
     }
 }
 
-/// `ipc_port_clear_receiver()` in C.
+/// Detaches the port from its receiver: takes it out of its port set, or wakes
+/// its waiting receivers with the port dead.
 ///
 /// # Safety
 ///
@@ -521,7 +519,7 @@ pub(crate) unsafe fn clear_receiver(port: IpcPort) {
     }
 }
 
-/// `ipc_port_init()` in C.
+/// Initializes a fresh port owned by `space` under `name`.
 ///
 /// # Safety
 ///
@@ -552,7 +550,8 @@ pub(crate) unsafe fn init(port: IpcPort, space: *mut c_void, name: c_uint) {
     }
 }
 
-/// `ipc_port_destroy()` in C.
+/// Destroys a port: hands its receive right to its port-destroyed request, or
+/// kills it and cleans up its requests and messages.
 ///
 /// # Safety
 ///
@@ -651,7 +650,9 @@ pub(crate) unsafe fn destroy(port: IpcPort) {
     }
 }
 
-/// `ipc_port_check_circularity()` in C.
+/// Whether moving the receive right for `port` into a message bound for `dest`
+/// would make a cycle of ports; when it would not, `port` is now in transit to
+/// `dest`.
 ///
 /// # Safety
 ///
@@ -747,11 +748,12 @@ pub(crate) unsafe fn check_circularity(
     false
 }
 
-/// `ipc_port_lookup_notify()` in C.
+/// The port of the receive right `name` names in `space`, with a send-once
+/// right made for it, or `None`.
 ///
 /// # Safety
 ///
-/// `space` must be live, active, and locked, as `ipc_entry_lookup()` needs.
+/// `space` must be live, active, and locked, as `entry_lookup()` needs.
 pub(crate) unsafe fn lookup_notify(
     space: IpcSpace,
     name: c_uint,
@@ -776,7 +778,7 @@ pub(crate) unsafe fn lookup_notify(
     Some(port)
 }
 
-/// `ipc_port_make_send()` in C.
+/// Makes a naked send right from the receive right of `port`.
 ///
 /// # Safety
 ///
@@ -793,8 +795,8 @@ pub(crate) unsafe fn make_send(port: IpcPort) -> IpcPort {
     port
 }
 
-/// `ipc_port_copy_send()` in C: `IP_NULL` maps to `IP_NULL`, `IP_DEAD` and a
-/// dead port to `IP_DEAD`, and a live port to itself plus a reference.
+/// Copies a naked send right: null stays null, a dead value or a dead port
+/// becomes the dead value, and a live port gains a send right and a reference.
 ///
 /// # Safety
 ///
@@ -820,7 +822,8 @@ pub(crate) unsafe fn copy_send(port: *mut c_void) -> *mut c_void {
     }
 }
 
-/// `ipc_port_copyout_send()` in C.
+/// Copies a naked send right out into `space`, returning its name, or destroys
+/// it when that fails.
 ///
 /// # Safety
 ///
@@ -861,7 +864,7 @@ pub(crate) unsafe fn copyout_send(
     )
 }
 
-/// `invalid_name_to_port()` of <ipc/port.h>.
+/// The port value an invalid name stands for: null or dead.
 ///
 /// # Panics
 ///
@@ -883,7 +886,7 @@ pub(crate) unsafe fn invalid_name_to_port(name: c_uint) -> *mut c_void {
     }
 }
 
-/// `invalid_port_to_name()` of <ipc/port.h>.
+/// The name an invalid port value stands for: null or dead.
 ///
 /// # Panics
 ///
@@ -904,7 +907,7 @@ pub(crate) unsafe fn invalid_port_to_name(port: *mut c_void) -> c_uint {
     }
 }
 
-/// `ipc_port_release_send()` in C.  Consumes a reference.
+/// Releases a naked send right.  Consumes a reference.
 ///
 /// # Safety
 ///
@@ -940,7 +943,7 @@ pub(crate) unsafe fn release_send(port: IpcPort) {
     }
 }
 
-/// `ipc_port_make_sonce()` in C.
+/// Makes a naked send-once right from the receive right of `port`.
 ///
 /// # Safety
 ///
@@ -956,7 +959,7 @@ pub(crate) unsafe fn make_sonce(port: IpcPort) -> IpcPort {
     port
 }
 
-/// `ipc_port_release_sonce()` in C.  Consumes a reference.
+/// Releases a naked send-once right.  Consumes a reference.
 ///
 /// # Safety
 ///
@@ -977,7 +980,7 @@ pub(crate) unsafe fn release_sonce(port: IpcPort) {
     }
 }
 
-/// `ipc_port_release_receive()` in C.  Consumes a reference and destroys the
+/// Releases a naked receive right.  Consumes a reference and destroys the
 /// port.
 ///
 /// # Safety
@@ -998,7 +1001,7 @@ pub(crate) unsafe fn release_receive(port: IpcPort) {
     }
 }
 
-/// `ipc_port_alloc_special()` in C.
+/// Allocates a port in the special space `space`, with one reference.
 ///
 /// # Safety
 ///
@@ -1010,8 +1013,7 @@ pub(crate) unsafe fn alloc_special(space: IpcSpace) -> Option<IpcPort> {
             .get_mut(IOT_PORT)?
             .alloc()?
     };
-    // SAFETY: the cache's buffers are `struct ipc_port` sized, as its init
-    // recorded from the C size.
+    // SAFETY: the cache's buffers are port-record sized, as its init recorded.
     let port = IpcPort(unsafe {
         NonNull::new_unchecked(object.as_ptr().cast::<c_void>())
     });
@@ -1029,7 +1031,7 @@ pub(crate) unsafe fn alloc_special(space: IpcSpace) -> Option<IpcPort> {
     Some(port)
 }
 
-/// `ipc_port_dealloc_special()` in C.  Consumes one reference and destroys
+/// Deallocates a port of a special space.  Consumes one reference and destroys
 /// the port.
 ///
 /// # Safety

@@ -14,8 +14,7 @@
 //   ANY DAMAGES WHATSOEVER RESULTING FROM THE USE OF THIS SOFTWARE.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The context switch, which `i386/i386/cswitch.S` and
-//! `x86_64/cswitch.S` used to define.
+//! The context switch.
 
 use crate::arch::vm_param::KERNEL_STACK_SIZE;
 use crate::arch::x86_64::mp_desc::{INT_STACK_BASE, INTSTACK_SIZE};
@@ -59,14 +58,13 @@ const TH_KERNEL_STACK_OFFSET: usize = offset_of!(Thread, kernel_stack);
 /// The offset of `swap_func` within a [`Thread`].
 const TH_SWAP_FUNC_OFFSET: usize = offset_of!(Thread, swap_func);
 
-/// `Load_context()` of `x86_64/cswitch.S`: resume `new` on this CPU, with
-/// no old thread.
+/// Resumes `new` on this CPU, with no old thread.
 ///
 /// # Safety
 ///
-/// `new` must be a live thread whose kernel stack and saved context are
-/// ready to resume, and no other CPU may be running it.  The caller must
-/// be in kernel mode with `%gs` based at this CPU's `struct percpu`.
+/// `new` must be a live thread whose kernel stack and saved context are ready
+/// to resume, and no other CPU may be running it.  The caller must be in
+/// kernel mode with `%gs` based at this CPU's per-CPU block.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn load_context(new: *mut Thread) -> ! {
     naked_asm!(
@@ -102,18 +100,18 @@ pub(crate) unsafe extern "C" fn load_context(new: *mut Thread) -> ! {
     );
 }
 
-/// `Switch_context()` of `x86_64/cswitch.S`: save the running thread's
-/// kernel context, resume `new`, and return `old` in `%rax`.
+/// Saves the running thread's kernel context, resumes `new`, and returns `old`
+/// in `%rax`.
 ///
 /// The register saves only matter when a thread later resumes with no
 /// explicit continuation; it then lands on the return PC saved here.
 ///
 /// # Safety
 ///
-/// `old` must be the running thread and `new` the thread about to run,
-/// both live and not running on any other CPU, and `continuation` must be
-/// where `old` resumes when it has one.  The caller must be in kernel mode
-/// with `%gs` based at this CPU's `struct percpu`.
+/// `old` must be the running thread and `new` the thread about to run, both
+/// live and not running on any other CPU, and `continuation` must be where
+/// `old` resumes when it has one.  The caller must be in kernel mode with
+/// `%gs` based at this CPU's per-CPU block.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn switch_context(
     old: *mut Thread,
@@ -168,8 +166,7 @@ pub(crate) unsafe extern "C" fn switch_context(
     );
 }
 
-/// `Thread_continue()` of `x86_64/cswitch.S`: call the continuation in
-/// `%rbx` with the thread in `%rax` as its argument.
+/// Calls the continuation in `%rbx` with the thread in `%rax` as its argument.
 ///
 /// # Safety
 ///
@@ -185,19 +182,18 @@ pub(crate) unsafe extern "C" fn thread_continue() {
     );
 }
 
-/// `switch_to_shutdown_context()` of `x86_64/cswitch.S`: save `thread`'s
-/// kernel context, switch to its CPU's interrupt stack, dispatch `thread`,
-/// and run `routine(processor)` there.
+/// Saves `thread`'s kernel context, switches to its CPU's interrupt stack,
+/// dispatches `thread`, and runs `routine(processor)` there.
 ///
 /// The stack switch leaves both calls 16-byte aligned, as the assembly
 /// did, and `thread` is a kernel thread, so it has no FPU state to save.
 ///
 /// # Safety
 ///
-/// `thread` must be a live kernel thread whose processor is being shut
-/// down, `routine` must be callable on the interrupt stack, and `processor`
-/// must be the argument it expects.  The caller must be in kernel mode with
-/// `%gs` based at this CPU's `struct percpu`.
+/// `thread` must be a live kernel thread whose processor is being shut down,
+/// `routine` must be callable on the interrupt stack, and `processor` must be
+/// the argument it expects.  The caller must be in kernel mode with `%gs`
+/// based at this CPU's per-CPU block.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn switch_to_shutdown_context(
     thread: *mut Thread,

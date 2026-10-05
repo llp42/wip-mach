@@ -73,7 +73,7 @@ impl HostLoadInfo {
 impl From<&Host> for HostBasicInfo {
     fn from(_host: &Host) -> Self {
         // SAFETY: `boot_processor` is the live processor
-        // `pset_sys_bootstrap()` initialized; its machine slot is one the
+        // `processor::bootstrap` initialized; its machine slot is one the
         // probe filled, and the two fields read are plain integers.
         let (cpu_type, cpu_subtype) = unsafe {
             let processor = boot_processor();

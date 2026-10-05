@@ -5,9 +5,7 @@
 //   Systems Laboratory (CSL).
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The user-space system call emulation module, which
-//! `kern/syscall_emulation.h` declares and `kern/syscall_emulation.c` used
-//! to define.
+//! The user-space system call emulation module.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::ipc::ipc_init;
@@ -26,15 +24,14 @@ use core::ptr::{self, NonNull};
 pub(crate) struct EmulationVector {
     /// `*vector_start`.
     pub(crate) start: c_int,
-    /// `*emulation_vector`: a `vm_map_copy_t` the server returns out of
-    /// line.
+    /// The emulation vector, a map copy the server returns out of line.
     pub(crate) vector: *mut VmOffset,
     /// `*emulation_vector_count`.
     pub(crate) count: u32,
 }
 
-/// `struct eml_dispatch` of <`kern/syscall_emulation.h>`: one task's dispatch
-/// table, whose `disp_vector` follows the header in one allocation.
+/// One task's dispatch table, whose vector follows the header in one
+/// allocation.
 ///
 /// The `x86_64` system-call entry reads `disp_min`, `disp_count` and
 /// `disp_vector` at the C header's offsets, so the field order here is the
@@ -63,13 +60,12 @@ const _: () = {
     assert!(core::mem::offset_of!(EmlDispatch, disp_vector) == 16);
 };
 
-/// `count_to_size()` of `kern/syscall_emulation.c`: the allocation size of a
-/// dispatch table holding `count` entries.
+/// The allocation size of a dispatch table holding `count` entries.
 const fn count_to_size(count: usize) -> usize {
     size_of::<EmlDispatch>() + size_of::<VmOffset>() * count
 }
 
-/// `eml->disp_vector` of <`kern/syscall_emulation.h`>.
+/// The vector that follows the table's header.
 ///
 /// # Safety
 ///
@@ -80,8 +76,7 @@ unsafe fn vector(eml: *mut EmlDispatch) -> *mut VmOffset {
     unsafe { ptr::addr_of_mut!((*eml).disp_vector).cast::<VmOffset>() }
 }
 
-/// `eml_task_reference()` in C: give `task` a reference to `parent`'s
-/// emulation vector.
+/// Gives `task` a reference to `parent`'s emulation vector.
 ///
 /// # Safety
 ///
@@ -106,8 +101,8 @@ pub(crate) unsafe fn task_reference(
     unsafe { (*task).eml_dispatch = eml };
 }
 
-/// `eml_task_deallocate()` in C: drop one reference to a task's emulation
-/// vector, freeing it with the last one.
+/// Drops one reference to a task's emulation vector, freeing it with the last
+/// one.
 ///
 /// # Safety
 ///
@@ -160,7 +155,8 @@ const fn merge_range(
     (start, end)
 }
 
-/// `task_set_emulation_vector_internal()` of `kern/syscall_emulation.c`.
+/// Installs `emulation_vector_count` entries of `emulation_vector` from
+/// `vector_start` in `task`'s emulation vector, growing it as needed.
 ///
 /// # Errors
 ///
@@ -306,8 +302,7 @@ pub(crate) unsafe fn set_vector_internal(
     Ok(())
 }
 
-/// `task_get_emulation_vector()` in C: copy a task's emulation vector into
-/// an out-of-line `vm_map_copy_t`.
+/// Copies a task's emulation vector into an out-of-line map copy.
 ///
 /// # Errors
 ///
@@ -415,8 +410,7 @@ pub(crate) unsafe fn get_vector(
     }
 }
 
-/// The `task_set_emulation_vector()` body of `kern/syscall_emulation.c`: map
-/// the out-of-line vector into the kernel map, install it, and free the
+/// Maps the out-of-line vector into the kernel map, installs it, and frees the
 /// mapping.
 ///
 /// # Errors
@@ -426,8 +420,8 @@ pub(crate) unsafe fn get_vector(
 ///
 /// # Safety
 ///
-/// `task` must be null or a live task, and `emulation_vector` a live
-/// `vm_map_copy_t` or null.
+/// `task` must be null or a live task, and `emulation_vector` a live map copy
+/// or null.
 pub(crate) unsafe fn set_vector(
     task: *mut Task,
     vector_start: c_int,

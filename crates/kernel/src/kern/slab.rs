@@ -4,8 +4,7 @@
 //   Copyright (c) 2010, 2011 Richard Braun.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The object-caching memory allocator, which `kern/slab.c` used to define,
-//! and the `struct kmem_cache` mirror of `kern/slab.h`.
+//! The object-caching memory allocator and its cache record.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::vm_param::PAGE_SIZE;
@@ -34,59 +33,57 @@ use core::pin::{Pin, pin};
 use core::ptr::{self, NonNull, addr_of_mut, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-/// `KMEM_CACHE_NAME_SIZE` of <kern/slab.h>: the length of a cache name,
-/// chosen so the mirror fits in two 64-byte cache lines.
+/// The length of a cache name, chosen so the mirror fits in two 64-byte cache
+/// lines.
 pub const KMEM_CACHE_NAME_SIZE: usize = 24;
 
-/// `CACHE_NAME_MAX_LEN` of <`mach_debug/slab_info.h`>.
+/// The length of a cache name in the slab report.
 const CACHE_NAME_MAX_LEN: usize = 32;
 
-/// `KMEM_ALIGN_MIN` of kern/slab.c: the alignment every [`kalloc`] buffer
-/// has, whatever its size.
+/// The alignment every [`kalloc`] buffer has, whatever its size.
 pub(crate) const KMEM_ALIGN_MIN: usize = 8;
 
-/// `KMEM_BUF_SIZE_THRESHOLD` of kern/slab.c.
+/// The buffer size below which a cache keeps its slab data on the slab.
 const KMEM_BUF_SIZE_THRESHOLD: usize = PAGE_SIZE / 8;
 
-/// `KALLOC_FIRST_SHIFT` of kern/slab.c.
+/// The shift of the smallest [`kalloc`] cache: 32 bytes.
 const KALLOC_FIRST_SHIFT: usize = 5;
 
-/// `KALLOC_NR_CACHES` of kern/slab.c.
+/// The number of [`kalloc`] caches.
 const KALLOC_NR_CACHES: usize = 13;
 
-/// `KMEM_GC_INTERVAL` of kern/slab.c: the multiplier of the `hz` tick rate.
+/// How many seconds of ticks pass between two garbage collections.
 const KMEM_GC_TICKS: usize = 5;
 
-/// `KMEM_REDZONE_BYTE` of kern/slab.c.
+/// The byte a verify cache fills redzones with.
 const KMEM_REDZONE_BYTE: u8 = 0xbb;
 
-/// `KMEM_REDZONE_WORD` of kern/slab.c, little-endian.
+/// The word a verify cache stamps in a buffer's redzone, little-endian.
 const KMEM_REDZONE_WORD: c_ulong = 0xcefa_edfe_cefa_edfe;
 
-/// `KMEM_FREE_PATTERN` of kern/slab.c, little-endian.
+/// The pattern a verify cache fills free buffers with, little-endian.
 const KMEM_FREE_PATTERN: u64 = 0xefbe_adde_efbe_adde;
 
-/// `KMEM_UNINIT_PATTERN` of kern/slab.c, little-endian.
+/// The pattern a verify cache fills unconstructed buffers with, little-endian.
 const KMEM_UNINIT_PATTERN: u64 = 0xfeca_ddba_feca_ddba;
 
-/// `KMEM_BUFTAG_ALLOC` of kern/slab.c, little-endian.
+/// The buffer tag of an allocated buffer, little-endian.
 const KMEM_BUFTAG_ALLOC: c_ulong = 0xedc8_10a1_edc8_10a1;
 
-/// `KMEM_BUFTAG_FREE` of kern/slab.c, little-endian.
+/// The buffer tag of a free buffer, little-endian.
 const KMEM_BUFTAG_FREE: c_ulong = 0x0cb1_eef4_0cb1_eef4;
 
-/// The `KMEM_CACHE_*` flags of <kern/slab.h> that reach
-/// [`KmemCache::init`].
+/// The flags that reach [`KmemCache::init`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct CacheInitFlags(c_int);
 
 impl CacheInitFlags {
-    /// `KMEM_CACHE_NOOFFSLAB`: don't allocate external slab data.
+    /// Do not allocate external slab data.
     pub const NOOFFSLAB: Self = Self(0x1);
-    /// `KMEM_CACHE_PHYSMEM`: allocate from physical memory.
+    /// Allocate from physical memory.
     pub const PHYSMEM: Self = Self(0x2);
-    /// `KMEM_CACHE_VERIFY`: use the debugging facilities.
+    /// Use the debugging facilities.
     pub const VERIFY: Self = Self(0x4);
     /// The C callers' literal `0`.
     pub const EMPTY: Self = Self(0);
@@ -109,23 +106,23 @@ impl ops::BitOr for CacheInitFlags {
     }
 }
 
-/// The `KMEM_CF_*` flags of kern/slab.c, the `flags` field of a cache.
+/// The flags a cache records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 struct CacheFlags(c_int);
 
 impl CacheFlags {
-    /// `KMEM_CF_SLAB_EXTERNAL`.
+    /// The slab data is off the slab.
     const SLAB_EXTERNAL: Self = Self(0x01);
-    /// `KMEM_CF_PHYSMEM`.
+    /// The slabs come from physical memory.
     const PHYSMEM: Self = Self(0x02);
-    /// `KMEM_CF_DIRECT`.
+    /// The buffers map to their slab by address alone.
     const DIRECT: Self = Self(0x04);
-    /// `KMEM_CF_USE_PAGE`: every page of a slab carries the slab in its
-    /// `priv_` field (see [`tag_pages`]).  Bit 0x08 is reserved:
-    /// `host_slab_info()` reports `flags`, so the other values do not move.
+    /// Every page of a slab carries the slab in its `priv_` field (see
+    /// [`tag_pages`]).  Bit 0x08 is reserved: `host_slab_info()` reports the
+    /// flags, so the other values do not move.
     const USE_PAGE: Self = Self(0x10);
-    /// `KMEM_CF_VERIFY`.
+    /// The cache uses the debugging facilities.
     const VERIFY: Self = Self(0x20);
 
     const fn contains(self, other: Self) -> bool {
@@ -140,20 +137,20 @@ impl CacheFlags {
 /// The `KMEM_ERR_*` codes `kmem_cache_error()` reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CacheError {
-    /// `KMEM_ERR_INVALID`.
+    /// The buffer is not one the cache handed out.
     Invalid,
-    /// `KMEM_ERR_DOUBLEFREE`.
+    /// The buffer was freed twice.
     DoubleFree,
-    /// `KMEM_ERR_BUFTAG`.
+    /// The buffer tag is corrupt.
     Buftag,
-    /// `KMEM_ERR_MODIFIED`.
+    /// A free buffer was written after its free.
     Modified,
-    /// `KMEM_ERR_REDZONE`.
+    /// A buffer's redzone was overwritten.
     Redzone,
 }
 
-/// `union kmem_bufctl` of <kern/slab.h>: the free-list link a free buffer
-/// carries, or the redzone word of a verify-mode buffer.
+/// The free-list link a free buffer carries, or the redzone word of a
+/// verify-mode buffer.
 #[repr(C)]
 #[allow(missing_docs)]
 union KmemBufctl {
@@ -166,8 +163,7 @@ const _: () = {
     assert!(align_of::<KmemBufctl>() == align_of::<*mut KmemBufctl>());
 };
 
-/// `struct kmem_buftag` of <kern/slab.h>: the allocated/free state a verify
-/// cache stamps on each buffer.
+/// The allocated/free state a verify cache stamps on each buffer.
 #[repr(C)]
 #[allow(missing_docs)]
 struct KmemBuftag {
@@ -180,8 +176,7 @@ const _: () = {
     assert!(offset_of!(KmemBuftag, state) == 0);
 };
 
-/// `struct kmem_slab` of <kern/slab.h>: a page-aligned collection of
-/// unconstructed buffers.
+/// A page-aligned collection of unconstructed buffers.
 #[repr(C)]
 #[allow(missing_docs)]
 pub(crate) struct KmemSlab {
@@ -226,16 +221,16 @@ const _: () = assert!(size_of::<simple_queue::Link>() == 8);
 const _: () = assert!(size_of::<SlabList>() == 16);
 const _: () = assert!(size_of::<CacheList>() == 16);
 
-/// The constructor a cache may hold; `kmem_cache_ctor_t` of <kern/slab.h>.
+/// The constructor a cache may hold.
 ///
 /// [`KmemCache::alloc`] invokes it with a fresh, otherwise-uninitialized
 /// buffer of the cache's `buf_size`, on every allocation; it must build the
 /// object in place and never fail.
 pub type KmemCacheCtor = Option<unsafe fn(*mut c_void)>;
 
-/// `struct kmem_cache` of <kern/slab.h>: a cache of objects.
+/// A cache of objects.
 ///
-/// The record is `__cacheline_aligned` (`1 << CPU_L1_SHIFT`, 64 bytes).
+/// The record is cache-line aligned, at 64 bytes.
 #[repr(C, align(64))]
 #[allow(missing_docs)]
 pub struct KmemCache {
@@ -288,8 +283,7 @@ const _: () = {
     assert!(offset_of!(KmemCache, redzone_pad) == 192);
 };
 
-/// `cache_info_t` of <`mach_debug/slab_info.h`>, the record `host_slab_info()`
-/// copies out.
+/// `cache_info_t`: the record `host_slab_info()` copies out for each cache.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct CacheInfo {
@@ -325,31 +319,31 @@ const _: () = {
     assert!(offset_of!(CacheInfo, name) == 88);
 };
 
-/// `kmem_slab_cache` of kern/slab.c: the cache for off-slab data.
+/// The cache for off-slab data.
 static KMEM_SLAB_CACHE: SyncCell<KmemCache> =
     SyncCell(UnsafeCell::new(KmemCache::zeroed()));
 
-/// `kalloc_caches` of kern/slab.c: the general-purpose caches, from 32 bytes
-/// to 128 KiB, one doubling per entry.
+/// The general-purpose caches, from 32 bytes to 128 KiB, one doubling per
+/// entry.
 static KALLOC_CACHES: SyncCell<[KmemCache; KALLOC_NR_CACHES]> = SyncCell(
     UnsafeCell::new([const { KmemCache::zeroed() }; KALLOC_NR_CACHES]),
 );
 
-/// `kmem_cache_list` of kern/slab.c: every cache, in initialization order.
+/// Every cache, in initialization order.
 static KMEM_CACHE_LIST: SyncCell<CacheList> =
     SyncCell(UnsafeCell::new(CacheList::new()));
 
-/// `kmem_nr_caches` of kern/slab.c.
+/// How many caches [`KMEM_CACHE_LIST`] holds.
 static KMEM_NR_CACHES: AtomicU32 = AtomicU32::new(0);
 
-/// `kmem_cache_list_lock` of kern/slab.c.
+/// Serializes the cache list.
 static KMEM_CACHE_LIST_LOCK: SimpleLock = SimpleLock::new();
 
 /// Whether `kalloc_init()` has built the general-purpose caches, so
 /// [`kalloc`] may be called.
 static KALLOC_READY: AtomicBool = AtomicBool::new(false);
 
-/// `kmem_gc_last_tick` of kern/slab.c.
+/// The tick of the last garbage collection.
 static KMEM_GC_LAST_TICK: AtomicUsize = AtomicUsize::new(0);
 
 /// The global cache list head.
@@ -369,7 +363,7 @@ fn slab_cache() -> *mut KmemCache {
     KMEM_SLAB_CACHE.0.get()
 }
 
-/// `P2ROUND()` of <kern/macros.h>.
+/// Rounds `value` up to a multiple of the power of two `align`.
 const fn round_up(value: usize, align: usize) -> usize {
     value.wrapping_add(align - 1) & !(align - 1)
 }
@@ -426,7 +420,8 @@ impl KmemCache {
         }
     }
 
-    /// `kmem_cache_init()` in C.
+    /// Initializes the cache for objects of `obj_size` bytes aligned to
+    /// `align`, built by `ctor`.
     pub(crate) fn init(
         &mut self,
         name: &[u8],
@@ -445,7 +440,7 @@ impl KmemCache {
         let mut buf_size = round_up(obj_size, align);
 
         self.lock.init();
-        // The C's `list_init()` calls: empty heads.
+        // Empty slab lists.
         self.partial_slabs = SlabList::new();
         self.free_slabs = SlabList::new();
         self.obj_size = obj_size;
@@ -488,7 +483,7 @@ impl KmemCache {
         KMEM_CACHE_LIST_LOCK.unlock();
     }
 
-    /// `kmem_cache_compute_properties()` in C.
+    /// Chooses the cache's slab size, buffer layout and slab-data placement.
     fn compute_properties(&mut self, flags: CacheInitFlags) {
         let flags = if self.buf_size < KMEM_BUF_SIZE_THRESHOLD {
             flags | CacheInitFlags::NOOFFSLAB
@@ -559,21 +554,21 @@ impl KmemCache {
         }
     }
 
-    /// `kmem_buf_to_bufctl()` in C.
+    /// The free-list link of the buffer `buf`.
     const fn bufctl_of(&self, buf: *mut u8) -> *mut KmemBufctl {
         // SAFETY: the bufctl of a buffer of this cache lies inside the
         // buffer's `buf_size` bytes.
         unsafe { buf.add(self.bufctl_dist).cast() }
     }
 
-    /// `kmem_buf_to_buftag()` in C.
+    /// The buffer tag of the buffer `buf`.
     const fn buftag_of(&self, buf: *mut u8) -> *mut KmemBuftag {
         // SAFETY: the buftag of a buffer of this cache lies inside the
         // buffer's `buf_size` bytes.
         unsafe { buf.add(self.buftag_dist).cast() }
     }
 
-    /// `kmem_bufctl_to_buf()` in C.
+    /// The buffer a free-list link belongs to.
     const fn buf_of(&self, bufctl: *mut KmemBufctl) -> NonNull<u8> {
         // SAFETY: the bufctl lies inside a buffer of this cache, so the
         // subtraction stays inside that allocation.
@@ -582,12 +577,13 @@ impl KmemCache {
         }
     }
 
-    /// `kmem_cache_empty()` in C.
+    /// Whether the cache has no free buffer left.
     const fn is_empty(&self) -> bool {
         self.nr_objs == self.nr_bufs
     }
 
-    /// `kmem_cache_alloc()` in C.
+    /// Allocates a buffer from the cache, growing it when it is empty, and
+    /// constructs it.
     pub(crate) fn alloc(&mut self) -> Option<NonNull<u8>> {
         loop {
             self.lock.lock();
@@ -615,7 +611,8 @@ impl KmemCache {
         }
     }
 
-    /// `kmem_cache_alloc_from_slab()` in C; the cache lock must be held.
+    /// Takes a buffer off the cache's first partial or free slab; the cache
+    /// lock must be held.
     fn alloc_from_slab(&mut self) -> Option<NonNull<u8>> {
         let (slab, from_free) =
             match self.partial_slabs.cursor_front().current_ptr() {
@@ -664,7 +661,7 @@ impl KmemCache {
         Some(self.buf_of(bufctl))
     }
 
-    /// `kmem_cache_grow()` in C.
+    /// Adds a slab to the cache, returning whether it could.
     fn grow(&mut self) -> bool {
         self.lock.lock();
 
@@ -702,7 +699,7 @@ impl KmemCache {
         !empty
     }
 
-    /// `kmem_cache_free()` in C.
+    /// Returns the buffer `obj` to the cache.
     ///
     /// # Safety
     ///
@@ -748,7 +745,7 @@ impl KmemCache {
         }
     }
 
-    /// `kmem_cache_free_to_slab()` in C; the cache lock must be held.
+    /// Returns the buffer `buf` to its slab; the cache lock must be held.
     ///
     /// # Safety
     ///
@@ -800,12 +797,12 @@ impl KmemCache {
         }
     }
 
-    /// `kmem_cache_reap()` in C.
+    /// Moves the cache's free slabs to `dead_slabs`, for the caller to
+    /// destroy.
     fn reap(&mut self, dead_slabs: Pin<&mut SlabList>) {
         self.lock.lock();
 
-        // The nodes of `free_slabs` move to `dead_slabs` at its tail, as the
-        // C's `list_concat()` did.
+        // The free slabs move to the tail of `dead_slabs`.
         // SAFETY: the cache lock is held.
         dead_slabs.append(unsafe { self.free_list() });
 
@@ -816,10 +813,10 @@ impl KmemCache {
         self.lock.unlock();
     }
 
-    /// `kmem_cache_alloc_verify()` in C.
+    /// Checks a buffer the cache is handing out, and stamps it allocated.
     ///
-    /// The C's `construct` argument was `KMEM_AV_NOCONSTRUCT` at its only
-    /// call site, so [`KmemCache::alloc`] calls the constructor itself.
+    /// [`KmemCache::alloc`] calls the constructor itself, so this check does
+    /// not.
     fn alloc_verify(&mut self, buf: NonNull<u8>) {
         let buftag = self.buftag_of(buf.as_ptr());
 
@@ -865,7 +862,7 @@ impl KmemCache {
         }
     }
 
-    /// `kmem_cache_free_verify()` in C.
+    /// Checks a buffer coming back to the cache, and stamps it free.
     ///
     /// # Safety
     ///
@@ -949,7 +946,7 @@ impl KmemCache {
         unsafe { (*buftag).state = KMEM_BUFTAG_FREE };
     }
 
-    /// `kmem_cache_error()` in C: report and halt.
+    /// Reports a buffer error and halts the kernel.
     fn error(&self, buf: *mut u8, error: CacheError, arg: *mut c_void) -> ! {
         // SAFETY: the name is NUL-terminated by `init()`.
         let name = unsafe { CStrArg::from_ptr(self.name.as_ptr()) };
@@ -1020,7 +1017,8 @@ impl KmemCache {
 }
 
 impl KmemSlab {
-    /// `kmem_slab_create()` in C; the caller holds no cache lock.
+    /// Allocates and lays out a new slab for `cache`, at the `color` offset;
+    /// the caller holds no cache lock.
     fn create(cache: &mut KmemCache, color: usize) -> Option<NonNull<Self>> {
         let slab_buf = pagealloc(cache.slab_size, cache.align, cache.flags)?;
 
@@ -1099,7 +1097,8 @@ impl KmemSlab {
         Some(slab)
     }
 
-    /// `kmem_slab_create_verify()` in C.
+    /// Fills the buffers of a new verify-mode slab with the free pattern and
+    /// stamps them free.
     ///
     /// # Safety
     ///
@@ -1121,7 +1120,7 @@ impl KmemSlab {
         }
     }
 
-    /// `kmem_slab_destroy()` in C; the caller holds no cache lock.
+    /// Frees a slab of `cache`; the caller holds no cache lock.
     ///
     /// # Safety
     ///
@@ -1152,7 +1151,8 @@ impl KmemSlab {
         unsafe { pagefree(slab_buf, cache.slab_size, cache.flags) };
     }
 
-    /// `kmem_slab_destroy_verify()` in C.
+    /// Checks that every buffer of a verify-mode slab is free and untouched
+    /// before the slab is freed.
     ///
     /// # Safety
     ///
@@ -1252,8 +1252,8 @@ fn page_of(addr: VmOffset) -> NonNull<vm_page::VmPage> {
     page
 }
 
-/// The slab at the end of the `slab_size` block holding `buf`, the C's
-/// `P2END(buf, slab_size) - 1` for a direct-mapped cache.
+/// The slab at the end of the `slab_size` block holding `buf`, for a
+/// direct-mapped cache.
 ///
 /// # Safety
 ///
@@ -1267,7 +1267,7 @@ unsafe fn slab_from_direct(
     with_exposed_provenance_mut(end + slab_size - size_of::<KmemSlab>())
 }
 
-/// `kmem_buf_verify_bytes()` in C.
+/// The first byte of `buf` that differs from `pattern`, or `None`.
 ///
 /// # Safety
 ///
@@ -1285,7 +1285,8 @@ unsafe fn verify_bytes(buf: *const u8, pattern: &[u8]) -> Option<NonNull<u8>> {
     None
 }
 
-/// `kmem_buf_verify()` in C.
+/// The first word of the `size` bytes at `buf` that differs from `pattern`, or
+/// `None`.
 ///
 /// # Safety
 ///
@@ -1310,7 +1311,7 @@ unsafe fn verify(
     None
 }
 
-/// `kmem_buf_fill()` in C.
+/// Fills the `size` bytes at `buf` with `pattern`.
 ///
 /// # Safety
 ///
@@ -1325,7 +1326,8 @@ unsafe fn fill(buf: *mut u8, pattern: u64, size: usize) {
     }
 }
 
-/// `kmem_buf_verify_fill()` in C.
+/// Checks that the `size` bytes at `buf` hold `old` and refills them with
+/// `new`, returning the first word that differs, or `None`.
 ///
 /// # Safety
 ///
@@ -1350,8 +1352,7 @@ unsafe fn verify_fill(
     None
 }
 
-/// `kmem_pagealloc_physmem()` in C: a direct-mapped page, blocking until one
-/// is free.
+/// A direct-mapped page, blocking until one is free.
 fn pagealloc_physmem(_size: VmSize) -> NonNull<u8> {
     loop {
         // SAFETY: no cache lock is held, so the allocation may block on the
@@ -1369,12 +1370,12 @@ fn pagealloc_physmem(_size: VmSize) -> NonNull<u8> {
             };
         }
 
-        // SAFETY: the continuation is the C's `NULL`.
+        // SAFETY: the wait takes no continuation, so it returns here.
         unsafe { vm_page::wait(None) };
     }
 }
 
-/// `kmem_pagealloc_virtual()` in C.
+/// Allocates `size` bytes of wired kernel virtual memory aligned to `align`.
 fn pagealloc_virtual(size: VmSize, align: VmSize) -> Option<NonNull<u8>> {
     let size = round_page(size);
     // SAFETY: `kernel_map` is the live kernel map.
@@ -1390,7 +1391,7 @@ fn pagealloc_virtual(size: VmSize, align: VmSize) -> Option<NonNull<u8>> {
     Some(unsafe { NonNull::new_unchecked(with_exposed_provenance_mut(addr)) })
 }
 
-/// `kmem_pagefree_physmem()` in C.
+/// Frees a direct-mapped page.
 ///
 /// # Safety
 ///
@@ -1411,7 +1412,7 @@ unsafe fn pagefree_physmem(addr: VmOffset, _size: VmSize) {
     unsafe { vm_resident::release(page, false, false) };
 }
 
-/// `kmem_pagefree_virtual()` in C.
+/// Frees `size` bytes of kernel virtual memory.
 ///
 /// # Safety
 ///
@@ -1438,7 +1439,8 @@ unsafe fn pagefree_virtual(addr: VmOffset, size: VmSize) {
     }
 }
 
-/// `kmem_pagealloc()` in C.
+/// Allocates a slab's memory, from physical or virtual memory as the cache's
+/// flags say.
 fn pagealloc(
     size: VmSize,
     align: VmSize,
@@ -1451,7 +1453,8 @@ fn pagealloc(
     }
 }
 
-/// `kmem_pagefree()` in C.
+/// Frees a slab's memory, to physical or virtual memory as the cache's flags
+/// say.
 ///
 /// # Safety
 ///
@@ -1464,7 +1467,8 @@ unsafe fn pagefree(addr: VmOffset, size: VmSize, flags: CacheFlags) {
     }
 }
 
-/// `kalloc_get_index()` in C; the caller passes a size greater than zero.
+/// The index of the [`kalloc`] cache for `size` bytes; the caller passes a
+/// size greater than zero.
 const fn kalloc_index(size: usize) -> usize {
     let size = (size - 1) >> KALLOC_FIRST_SHIFT;
 
@@ -1484,7 +1488,8 @@ fn kalloc_cache(index: usize) -> *mut KmemCache {
     unsafe { caches.add(index) }
 }
 
-/// `kalloc_verify()` in C.
+/// Fills the slack past the requested `size` of a buffer [`kalloc`] hands out
+/// with the redzone byte.
 ///
 /// # Safety
 ///
@@ -1499,7 +1504,7 @@ const unsafe fn kalloc_verify(
     unsafe { ptr::write_bytes(redzone, KMEM_REDZONE_BYTE, redzone_size) };
 }
 
-/// `kfree_verify()` in C.
+/// Checks the redzone past `size` of a buffer [`kfree`] gets back.
 ///
 /// # Safety
 ///
@@ -1521,7 +1526,8 @@ unsafe fn kfree_verify(cache: &KmemCache, buf: NonNull<u8>, size: usize) {
     }
 }
 
-/// `kalloc()` in C.
+/// Allocates `size` bytes from the general-purpose caches, or from the kernel
+/// map past the largest one.
 pub(crate) fn kalloc(size: usize) -> Option<NonNull<u8>> {
     if size == 0 {
         return None;
@@ -1550,7 +1556,7 @@ pub(crate) fn kalloc(size: usize) -> Option<NonNull<u8>> {
     }
 }
 
-/// `kfree()` in C.
+/// Frees `size` bytes [`kalloc`] allocated.
 ///
 /// # Safety
 ///
@@ -1580,7 +1586,7 @@ pub(crate) unsafe fn kfree(data: NonNull<u8>, size: usize) {
     }
 }
 
-/// `kmem_cache_init()` in C.
+/// [`KmemCache::init`] over raw pointers.
 ///
 /// # Safety
 ///
@@ -1614,7 +1620,7 @@ pub(crate) unsafe fn kmem_cache_init(
     };
 }
 
-/// `kmem_cache_alloc()` in C.
+/// [`KmemCache::alloc`] over a raw pointer: the buffer address, or 0.
 ///
 /// # Safety
 ///
@@ -1629,7 +1635,7 @@ pub(crate) unsafe fn kmem_cache_alloc(cache: *mut KmemCache) -> VmOffset {
     buf.map_or(0, |buf| buf.as_ptr().addr())
 }
 
-/// `kmem_cache_free()` in C.
+/// [`KmemCache::free`] over a raw pointer and address.
 ///
 /// # Safety
 ///
@@ -1647,12 +1653,12 @@ pub(crate) unsafe fn kmem_cache_free(cache: *mut KmemCache, obj: VmOffset) {
     unsafe { (*cache.as_ptr()).free(obj) };
 }
 
-/// `slab_bootstrap()` in C.
+/// Initializes the cache-list lock.
 pub(crate) fn slab_bootstrap() {
     KMEM_CACHE_LIST_LOCK.init();
 }
 
-/// `slab_init()` in C.
+/// Initializes the cache of off-slab data.
 pub(crate) fn slab_init() {
     // SAFETY: `slab_bootstrap()` ran, and this is the off-slab cache's only
     // initializer.
@@ -1667,7 +1673,7 @@ pub(crate) fn slab_init() {
     };
 }
 
-/// `kalloc_init()` in C.
+/// Initializes the general-purpose caches.
 pub(crate) fn kalloc_init() {
     let mut size = 1 << KALLOC_FIRST_SHIFT;
 
@@ -1692,7 +1698,7 @@ pub(crate) fn kalloc_ready() -> bool {
     KALLOC_READY.load(Ordering::Acquire)
 }
 
-/// The `sprintf(name, "kalloc_%lu", size)` of `kalloc_init()`, in place.
+/// The name of the [`kalloc`] cache for `value` bytes, `kalloc_<value>`.
 fn kalloc_name(mut value: usize) -> [u8; KMEM_CACHE_NAME_SIZE] {
     const PREFIX: &[u8] = b"kalloc_";
 
@@ -1718,13 +1724,13 @@ fn kalloc_name(mut value: usize) -> [u8; KMEM_CACHE_NAME_SIZE] {
     name
 }
 
-/// `slab_collect()` in C.
+/// Returns the free slabs of every cache to the system, at most once per
+/// collection interval.
 pub(crate) fn slab_collect() {
     // SAFETY: `elapsed_ticks` is the live clock global, an `unsigned long`
     // the C kept in the target's `usize`.
     let now = host_time::elapsed_ticks();
-    // The C read `hz` for `KMEM_GC_INTERVAL`, an `int` that is positive
-    // after the probe sets it.
+    // The tick rate is positive once the clock is probed.
     let interval =
         usize::try_from(machine::CLOCK_HZ).unwrap_or(0) * KMEM_GC_TICKS;
 
@@ -1757,8 +1763,7 @@ pub(crate) fn slab_collect() {
     }
 }
 
-/// The number of caches on the global list, the C's unsynchronized read of
-/// `kmem_nr_caches`.
+/// The number of caches on the global list, read without synchronization.
 pub(crate) fn nr_caches() -> u32 {
     KMEM_NR_CACHES.load(Ordering::Relaxed)
 }

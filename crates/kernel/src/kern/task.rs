@@ -5,8 +5,7 @@
 //   Copyright (c) 1993-1987 Carnegie Mellon University.
 // SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
 
-//! The task module's cores, which `kern/task.c` used to define and
-//! `kern/task.h` declares, and the `struct task` mirror of `kern/task.h`.
+//! The task module's cores and the task record.
 
 use crate::arch::types::{VmOffset, VmSize};
 use crate::arch::x86_64::machine_task::{self, MachineTask};
@@ -52,28 +51,26 @@ use core::ptr::{
 };
 use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, Ordering};
 
-/// `TASK_PORT_REGISTER_MAX` of <`mach/mach_param.h>`: the registered send
-/// rights a task holds.
+/// The registered send rights a task holds.
 pub(crate) const TASK_PORT_REGISTER_MAX: usize = 4;
 
-/// `TASK_NAME_SIZE` of <kern/task.h>.
+/// The length of a task's name, with its NUL.
 const TASK_NAME_SIZE: usize = 32;
 
-/// `BASEPRI_USER` of <kern/sched.h>: a fresh user task's priority.
+/// A fresh user task's priority.
 pub(crate) const BASEPRI_USER: c_int = 25;
 
-/// `VM_MIN_USER_ADDRESS` and `VM_MAX_USER_ADDRESS` of <`i386/vm_param.h>`:
-/// the bounds of a fresh user map.
+/// The bounds of a fresh user map.
 const VM_MIN_USER_ADDRESS: VmOffset = 0;
 const VM_MAX_USER_ADDRESS: VmOffset = 0x8000_0000_0000;
 
-/// `IKOT_NONE`, `IKOT_HOST` and `IKOT_HOST_PRIV` of <`kern/ipc_kobject.h`>.
+/// The kernel-object types of a plain port, the host name port and the
+/// privileged host port.
 const IKOT_NONE: c_uint = 0;
 const IKOT_HOST: c_uint = 3;
 const IKOT_HOST_PRIV: c_uint = 4;
 
-/// `IP_DEAD` of <`ipc/ipc_port.h>`: the one non-null pointer `IP_VALID()`
-/// rejects.
+/// The dead port value: the one non-null pointer a valid port check rejects.
 const IP_DEAD: usize = usize::MAX;
 
 /// `TASK_ACTIVE`, `TASK_MAY_ASSIGN` and `TASK_ESSENTIAL`: the three
@@ -82,9 +79,8 @@ const TASK_ACTIVE: u8 = 1 << 0;
 const TASK_MAY_ASSIGN: u8 = 1 << 1;
 const TASK_ESSENTIAL: u8 = 1 << 2;
 
-/// `struct task` of <kern/task.h>: the task record itself.  The C packs the
-/// three boolean flags into one `unsigned char`: `active` in bit 0,
-/// `may_assign` in bit 1 and `essential` in bit 2.
+/// The task record itself.  The three boolean flags pack into one byte:
+/// `active` in bit 0, `may_assign` in bit 1 and `essential` in bit 2.
 #[repr(C)]
 #[allow(missing_docs)]
 pub struct Task {
@@ -230,7 +226,7 @@ impl Task {
     }
 }
 
-/// `struct pmap_statistics` of <`mach/vm_statistics.h`>.
+/// `struct pmap_statistics`: a physical map's page counts.
 #[repr(C)]
 #[allow(missing_docs)]
 struct PmapStatistics {
@@ -238,8 +234,8 @@ struct PmapStatistics {
     wired_count: c_int,
 }
 
-/// The `struct pmap` prefix through `stats`, whose `resident_count` the C
-/// `pmap_resident_count()` macro of <i386/intel/pmap.h> reads.
+/// The physical map's prefix through `stats`, whose `resident_count`
+/// [`resident_count`] reads.
 #[repr(C)]
 #[allow(missing_docs)]
 struct PmapPrefix {
@@ -259,42 +255,40 @@ const _: () = {
     assert!(size_of::<PmapStatistics>() == 8);
 };
 
-/// `kernel_task` of <kern/task.h>: the kernel's own task, the first created.
+/// The kernel's own task, the first created.
 static KERNEL_TASK: AtomicPtr<Task> = AtomicPtr::new(null_mut());
 
-/// The kernel's own task, live from `task_init` on.
+/// The kernel's own task, live from [`init`] on.
 #[must_use]
 pub(crate) fn kernel_task() -> *mut Task {
     KERNEL_TASK.load(Ordering::Relaxed)
 }
 
-/// The kernel task's self port, live from `task_init` on.
+/// The kernel task's self port, live from [`init`] on.
 #[must_use]
 pub(crate) fn kernel_task_self_port() -> *mut c_void {
-    // SAFETY: `task_init` created the kernel task before any caller.
+    // SAFETY: `init` created the kernel task before any caller.
     unsafe { (*kernel_task()).itk_self }
 }
 
-/// `task_cache` of kern/task.c: the `struct task` slab cache.
+/// The slab cache of [`Task`] records.
 static mut TASK_CACHE: KmemCache = KmemCache::zeroed();
 
-/// `new_task_notification` of kern/task.c: the port new-task notifications
-/// go to, or null.  Set at most once, by `register_new_task_notification`.
+/// The port new-task notifications go to, or null.  Set at most once, by
+/// `register_new_task_notification`.
 pub static NEW_TASK_NOTIFICATION: AtomicPtr<c_void> =
     AtomicPtr::new(null_mut());
 
-/// `task_collect_allowed` of kern/task.c: whether the collector may run, a
-/// switch a debugger sets.
+/// Whether the collector may run, a switch a debugger sets.
 static TASK_COLLECT_ALLOWED: AtomicI32 = AtomicI32::new(1);
 
-/// `task_collect_last_tick` and `task_collect_max_rate` of kern/task.c: the
-/// last tick the collector ran and the minimum interval, in ticks.  Only the
-/// pageout daemon writes them, so a load and a later store need no
+/// The last tick the collector ran and the minimum interval, in ticks.  Only
+/// the pageout daemon writes them, so a load and a later store need no
 /// read-modify-write between them.
 static TASK_COLLECT_LAST_TICK: AtomicU32 = AtomicU32::new(0);
 static TASK_COLLECT_MAX_RATE: AtomicU32 = AtomicU32::new(0);
 
-/// `current_task()` of <kern/thread.h>: the running thread's task.
+/// The running thread's task.
 ///
 /// # Safety
 ///
@@ -304,17 +298,16 @@ pub(crate) unsafe fn current_task() -> *mut Task {
     unsafe { (*per_cpu::thread()).task }
 }
 
-/// `pmap_resident_count()` of <i386/intel/pmap.h>: the pages the pmap has
-/// resident.
+/// The pages the pmap has resident.
 ///
 /// # Safety
 ///
-/// `pmap` must point at a live `struct pmap`.
+/// `pmap` must point at a live physical map.
 pub(crate) unsafe fn resident_count(pmap: *mut Pmap) -> c_int {
     unsafe { (*pmap.cast::<PmapPrefix>()).stats.resident_count }
 }
 
-/// The `time_value64_add()` macro of <`mach/time_value.h`>.
+/// Adds `addend` to `result`, carrying nanoseconds into seconds.
 pub(crate) const fn add_time64(result: &mut TimeValue64, addend: TimeValue64) {
     result.seconds = result.seconds.wrapping_add(addend.seconds);
     result.nanoseconds = result.nanoseconds.wrapping_add(addend.nanoseconds);
@@ -336,7 +329,7 @@ pub(crate) enum MapSource {
     Fresh,
 }
 
-/// `task_init()` of kern/task.c.
+/// Sets up the task cache and creates the kernel task.
 ///
 /// # Safety
 ///
@@ -453,7 +446,7 @@ unsafe fn task_processor_set(
     pset
 }
 
-/// `task_create_kernel()` of kern/task.c.
+/// Creates a task as a child of `parent`, with the map `source` asks for.
 ///
 /// # Safety
 ///
@@ -504,7 +497,7 @@ pub(crate) unsafe fn create_kernel_task(
     unsafe {
         addr_of_mut!((*task).map).write(map.cast());
         if source != MapSource::Kernel {
-            // `vm_map_set_name()` of <vm/vm_map.h>, the C's inline.
+            // The map takes the task's name.
             (*map).name = addr_of!((*task).name).cast();
         }
         addr_of_mut!((*task).flags).write(TASK_ACTIVE);
@@ -590,7 +583,7 @@ pub(crate) unsafe fn create_kernel_task(
     Ok(task)
 }
 
-/// `task_deallocate()` of kern/task.c.
+/// Drops a reference on `task`, freeing it on the last one.
 ///
 /// # Safety
 ///
@@ -619,7 +612,7 @@ pub(crate) unsafe fn deallocate(task: *mut Task) {
         crate::kern::syscall_emulation::task_deallocate(task);
     }
 
-    // SAFETY: a live task's processor-set field was set by `pset_add_task()`.
+    // SAFETY: a live task's processor-set field was set when the set added it.
     let pset = unsafe { (*task).processor_set };
     // SAFETY: the set is live; its lock serializes the removal.
     unsafe {
@@ -647,7 +640,7 @@ pub(crate) unsafe fn deallocate(task: *mut Task) {
     }
 }
 
-/// `task_reference()` of kern/task.c.
+/// Takes a reference on `task`, when it is not null.
 ///
 /// # Safety
 ///
@@ -664,7 +657,8 @@ pub(crate) unsafe fn reference(task: *mut Task) {
     }
 }
 
-/// `task_terminate()` of kern/task.c.
+/// Terminates `task`: stops its threads, releases its rights and its address
+/// space, and drops the reference its life held.
 ///
 /// # Safety
 ///
@@ -806,8 +800,7 @@ unsafe fn next_task(
     cursor.current_ptr()
 }
 
-/// Drain and force-terminate every thread on `task`'s list, as the C's
-/// `while (!queue_empty(&task->thread_list))` loop did.
+/// Drains and force-terminates every thread on `task`'s list.
 ///
 /// # Safety
 ///
@@ -847,7 +840,8 @@ unsafe fn terminate_threads(task: *mut Task) {
     }
 }
 
-/// `task_hold_locked()` of kern/task.c.
+/// Holds every thread of `task` but the current one, counting one more
+/// suspension.
 ///
 /// # Safety
 ///
@@ -870,7 +864,7 @@ pub(crate) unsafe fn hold_locked(task: *mut Task) {
     }
 }
 
-/// `task_hold()` of kern/task.c.
+/// Holds every thread of `task` but the current one.
 ///
 /// # Safety
 ///
@@ -889,7 +883,7 @@ pub(crate) unsafe fn hold(task: *mut Task) -> Result<(), Error> {
     Ok(())
 }
 
-/// `task_dowait()` of kern/task.c.
+/// Waits for the held threads of `task` to stop, when `must_wait` is set.
 ///
 /// # Safety
 ///
@@ -940,7 +934,7 @@ pub(crate) unsafe fn dowait(
     result
 }
 
-/// `task_release()` of kern/task.c.
+/// Releases one hold on every thread of `task`.
 ///
 /// # Safety
 ///
@@ -970,8 +964,7 @@ pub(crate) unsafe fn release(task: *mut Task) -> Result<(), Error> {
     Ok(())
 }
 
-/// `task_threads()` of kern/task.c: the live threads of `task`, each
-/// converted to a port name the caller owns.
+/// The live threads of `task`, each converted to a port name the caller owns.
 ///
 /// # Safety
 ///
@@ -1102,7 +1095,7 @@ pub(crate) unsafe fn threads(
     }
 }
 
-/// `task_suspend()` of kern/task.c.
+/// Suspends `task`: holds its threads and waits for them to stop.
 ///
 /// # Safety
 ///
@@ -1144,7 +1137,7 @@ pub(crate) unsafe fn suspend(task: *mut Task) -> Result<(), Error> {
     Ok(())
 }
 
-/// `task_resume()` of kern/task.c.
+/// Resumes `task`: releases the hold of its last suspension.
 ///
 /// # Safety
 ///
@@ -1240,8 +1233,8 @@ unsafe fn assign_task_threads(
     }
 }
 
-/// `task_assign()` of kern/task.c, the `MACH_HOST` arm both configured
-/// builds take.
+/// Moves `task` into `new_pset`, with its threads when `assign_threads` is
+/// set.
 ///
 /// # Safety
 ///
@@ -1352,7 +1345,7 @@ pub(crate) unsafe fn assign(
     result
 }
 
-/// `task_get_assignment()` of kern/task.c.
+/// The processor set `task` is assigned to, with a reference.
 ///
 /// # Safety
 ///
@@ -1374,7 +1367,7 @@ pub(crate) unsafe fn get_assignment(
     }
 }
 
-/// `task_priority()` of kern/task.c.
+/// Sets `task`'s priority, and its threads' when `change_threads` is set.
 ///
 /// # Safety
 ///
@@ -1414,7 +1407,7 @@ pub(crate) unsafe fn priority(
     }
 }
 
-/// `task_set_name()` of kern/task.c.
+/// Sets `task`'s name.
 ///
 /// # Safety
 ///
@@ -1439,7 +1432,7 @@ pub(crate) unsafe fn set_name(
     Ok(())
 }
 
-/// `task_set_essential()` of kern/task.c.
+/// Marks `task` essential or not.
 ///
 /// # Safety
 ///
@@ -1456,12 +1449,12 @@ pub(crate) unsafe fn set_essential(
     Ok(())
 }
 
-/// `task_collect_scan()` of kern/task.c: walk every processor set's tasks
-/// and let the machine layer release what it can.
+/// Walks every processor set's tasks and lets the machine layer release what
+/// it can.
 ///
 /// # Safety
 ///
-/// `kern/task.c`'s collector calls this with nothing locked, as the C did.
+/// The collector calls this with nothing locked.
 unsafe fn collect_scan() {
     let mut prev_task: *mut Task = null_mut();
     let mut prev_pset: *mut ProcessorSet = null_mut();
@@ -1520,7 +1513,7 @@ unsafe fn collect_scan() {
     }
 }
 
-/// `consider_task_collect()` of kern/task.c.
+/// Runs the collector, when it is allowed and its last run is long enough ago.
 ///
 /// # Safety
 ///
@@ -1546,7 +1539,8 @@ pub(crate) unsafe fn consider_collect() {
     }
 }
 
-/// `thread_override_max_priority()` of kern/task.c.
+/// Sets `thread`'s maximum priority, and lowers its priority to it when
+/// `set_priority` is set.
 ///
 /// # Safety
 ///
@@ -1557,8 +1551,7 @@ unsafe fn override_max_priority(
     max_priority: c_int,
     set_priority: bool,
 ) {
-    // SAFETY: `splsched()` is the real asm routine of <machine/spl.h>; the
-    // thread lock is taken under it.
+    // SAFETY: the thread lock is taken under `splsched()`.
     let s = unsafe { spl::splsched() };
     unsafe {
         (*thread).lock.lock();
@@ -1579,8 +1572,8 @@ unsafe fn override_max_priority(
     }
 }
 
-/// `extract_host_type()` of kern/task.c: the kobject type of `port` when it
-/// is a host or host-privilege port, `IKOT_NONE` otherwise.
+/// The kernel-object type of `port` when it is a host or privileged host port,
+/// `IKOT_NONE` otherwise.
 ///
 /// # Safety
 ///
@@ -1590,7 +1583,7 @@ unsafe fn extract_host_type(port: *mut c_void) -> c_uint {
         return IKOT_NONE;
     }
 
-    // SAFETY: the checks above are `IP_VALID()`'s, so the pointer is live.
+    // SAFETY: the checks above rule out null and dead, so the pointer is live.
     let port = unsafe { IpcPort::from_raw(port) };
     // SAFETY: the port is live; the lock is held over the fields the C read.
     let ikot = unsafe {
@@ -1611,7 +1604,8 @@ unsafe fn extract_host_type(port: *mut c_void) -> c_uint {
     }
 }
 
-/// `task_max_priority()` of kern/task.c.
+/// Sets `task`'s maximum priority with the privilege the host port `host`
+/// carries, and its threads' when `change_threads` is set.
 ///
 /// # Safety
 ///
