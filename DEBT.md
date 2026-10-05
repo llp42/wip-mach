@@ -19,7 +19,8 @@ deletes its entry; a change that opens one adds it.
   fails with `Error::NotImplemented` and moves no waiter. The call is a
   simple routine, so its caller never sees the error.
 - **Done when**: `gsync_requeue` moves the waiters as GNU Mach does,
-  holding at most one bucket lock at a time (ADR 0036).
+  holding at most one bucket lock at a time (ADR 0036), and
+  `README.md` no longer lists it.
 
 ## A waker cancels the sleeper's timeout
 

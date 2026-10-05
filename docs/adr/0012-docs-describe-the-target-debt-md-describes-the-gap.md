@@ -1,10 +1,12 @@
 # Docs describe the target; `DEBT.md` describes the gap
 
 ADRs, glossaries, READMEs and `AGENTS.md` files describe the kernel as
-it is meant to be, never as it is. The one document that describes
-the present is `DEBT.md` at the repository root, the debt register:
-one register for every crate, holding one entry per gap between the
-code and an ADR:
+it is meant to be, never as it is. The one exception is the top-level
+`README.md`, which names the GNU Mach calls the kernel does not
+implement: a user of the kernel meets those before any rule. Apart
+from that list, the one document that describes the present is
+`DEBT.md` at the repository root, the debt register: one register for
+every crate, holding one entry per gap between the code and an ADR:
 
 ```
 ## <the gap>
@@ -33,6 +35,10 @@ worth remembering. ADRs carry no status.
 
 ## Considered Options
 
+- **Unimplemented calls in `DEBT.md` only**: someone running software
+  on the kernel would have to read the developers' register to learn
+  that a GNU Mach call fails, and a failing simple routine reports
+  nothing at run time.
 - **As-is notes inside ADRs** (the earlier practice): every ADR mixed
   its rule with a running account of how far the code had got, and a
   reader could not tell which sentences bind.
@@ -53,6 +59,9 @@ worth remembering. ADRs carry no status.
 
 - Code that contradicts an ADR is either listed in `DEBT.md` or a
   defect.
+- An unimplemented call is listed twice: in the README for the
+  kernel's users, and as a `DEBT.md` entry for its developers. The
+  change that implements it deletes both.
 - Plans are not kept as documents: their decided parts become ADRs and
   the rest become entries.
 - Numbers have gaps where ADRs were deleted; `CONTRIBUTING.md` lists
