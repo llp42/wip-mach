@@ -1,1 +1,8 @@
 /target
+/abi-test
+/debug
+mise.local.toml
+
+# Python rebuilds these beside the script that imports it.
+__pycache__/
+*.pyc

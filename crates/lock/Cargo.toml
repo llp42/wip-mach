@@ -1,0 +1,60 @@
+[package]
+name = "lock"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Spin, ticket and irq spin locks, a handoff mutex and a fair reader-writer lock, free of spl"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+collections.workspace = true
+lock_api.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+libc.workspace = true
+x86_64.workspace = true
+
+[[test]]
+name = "interrupt"
+harness = false
+
+[[bench]]
+name = "spin"
+harness = false
+
+[[bench]]
+name = "mutex"
+harness = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unfulfilled_lint_expectations = "deny"
+missing_docs = "deny"
+elided_lifetimes_in_paths = "deny"
+unused_qualifications = "deny"
+trivial_numeric_casts = "deny"
+non_ascii_idents = "deny"
+meta_variable_misuse = "deny"
+let_underscore_drop = "deny"
+macro_use_extern_crate = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+unused_results = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unexpected_cfgs = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+missing_safety_doc = "deny"
+redundant_pub_crate = "allow"  # conflicts with rustc's unreachable_pub

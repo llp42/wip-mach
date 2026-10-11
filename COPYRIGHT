@@ -1,0 +1,651 @@
+wip-mach
+========
+
+wip-mach is a new kernel, written from scratch in Rust. It is free
+software under the GNU General Public License, version 2 or, at your
+option, any later version (LICENCES/GPL-2.0.txt).
+
+It is inspired by GNU Mach, the microkernel of the GNU Hurd, at commit
+c5701c1c1c8f330f7a790a4a0bc6b3434213722b of
+<https://git.savannah.gnu.org/git/hurd/gnumach.git>. wip-mach
+reproduces GNU Mach's interface to user space, and much of its code
+was written by reading GNU Mach's: its algorithms, its data structures
+and its behaviour.
+
+wip-mach is a fully new implementation, but it was not made in a clean
+room. Its files were written, split, merged and rewritten with GNU
+Mach's sources open, so no file of wip-mach corresponds to one file of
+GNU Mach, and it is not possible to say that a file of one is directly
+related to a file of the other. The work as a whole is therefore
+treated as derived from GNU Mach, and the respect owed to GNU Mach's
+authors is kept here, in this single file, rather than in each source
+file. A source file that draws on an upstream says so in one line,
+
+    // Inspired by GNU Mach; see COPYRIGHT.
+
+and carries the copyright of its own authors only.
+
+
+GNU Mach
+--------
+
+Upstream: <https://git.savannah.gnu.org/git/hurd/gnumach.git>,
+commit c5701c1c1c8f330f7a790a4a0bc6b3434213722b.
+
+GNU Mach descends from Mach 3.0 of Carnegie Mellon University, through
+Mach 4 of the University of Utah. The GNU Mach files wip-mach drew on,
+as a whole, are below, each with the copyright lines, authors and
+licence it carries at that commit. The licence texts are in LICENCES/,
+named by their identifiers; GPL-2.0-or-later is GPL-2.0.txt.
+
+SPDX-FileName: kern/ast.c
+SPDX-FileName: kern/syscall_subr.c
+SPDX-FileName: kern/syscall_sw.c
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/ast.h
+SPDX-FileName: kern/processor.h
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/boot_script.c
+SPDX-FileContributor: Shantanu Goel <goel@cs.columbia.edu>
+
+SPDX-FileName: kern/bootstrap.c
+SPDX-FileCopyrightText: 1992-1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1995-1993 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/debug.c
+SPDX-FileCopyrightText: 1993 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/debug.h
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Bryan Ford
+SPDX-License-Identifier: LicenseRef-Utah-CSL
+
+SPDX-FileName: kern/eventcount.c
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Alessandro Forin
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/exception.c
+SPDX-FileCopyrightText: 1993, 1992, 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/gsync.c
+SPDX-FileCopyrightText: 2016 Free Software Foundation, Inc.
+SPDX-FileContributor: Agustina Arzille <avarzille@riseup.net>
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: kern/host.c
+SPDX-FileCopyrightText: 1993, 1992, 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/ipc_host.c
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/ipc_kobject.c
+SPDX-FileName: ipc/ipc_kmsg.h
+SPDX-FileName: ipc/ipc_mqueue.h
+SPDX-FileName: ipc/ipc_notify.c
+SPDX-FileName: ipc/ipc_object.c
+SPDX-FileName: ipc/ipc_object.h
+SPDX-FileName: ipc/ipc_right.c
+SPDX-FileName: ipc/ipc_right.h
+SPDX-FileName: ipc/ipc_table.c
+SPDX-FileName: ipc/ipc_table.h
+SPDX-FileName: ipc/ipc_thread.h
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileContributor: Rich Draves
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/ipc_kobject.h
+SPDX-FileName: ipc/ipc_entry.c
+SPDX-FileName: ipc/ipc_entry.h
+SPDX-FileName: ipc/ipc_init.c
+SPDX-FileName: ipc/ipc_kmsg.c
+SPDX-FileName: ipc/ipc_marequest.c
+SPDX-FileName: ipc/ipc_mqueue.c
+SPDX-FileName: ipc/ipc_port.c
+SPDX-FileName: ipc/ipc_port.h
+SPDX-FileName: ipc/ipc_pset.h
+SPDX-FileName: ipc/ipc_space.c
+SPDX-FileName: ipc/ipc_space.h
+SPDX-FileName: ipc/ipc_thread.c
+SPDX-FileName: ipc/mach_msg.c
+SPDX-FileName: ipc/mach_port.c
+SPDX-FileName: ipc/port.h
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Rich Draves
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/ipc_mig.c
+SPDX-FileName: i386/i386/ast_check.c
+SPDX-FileName: i386/i386/cpu_number.h
+SPDX-FileName: i386/i386/cswitch.S
+SPDX-FileName: i386/i386/idt_inittab.S
+SPDX-FileName: i386/i386/ktss.c
+SPDX-FileName: i386/i386/ldt.c
+SPDX-FileName: i386/i386/lock.h
+SPDX-FileName: i386/i386/mp_desc.c
+SPDX-FileName: i386/i386/pcb.c
+SPDX-FileName: i386/i386/proc_reg.h
+SPDX-FileName: x86_64/cswitch.S
+SPDX-FileName: x86_64/idt_inittab.S
+SPDX-FileCopyrightText: 1991, 1990 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/ipc_sched.c
+SPDX-FileName: i386/i386/db_interface.c
+SPDX-FileCopyrightText: 1993, 1992, 1991, 1990 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/ipc_tt.c
+SPDX-FileName: kern/syscall_emulation.c
+SPDX-FileName: kern/syscall_sw.h
+SPDX-FileName: kern/timer.c
+SPDX-FileName: kern/timer.h
+SPDX-FileName: include/mach/port.h
+SPDX-FileName: include/mach/task_special_ports.h
+SPDX-FileName: include/mach/thread_special_ports.h
+SPDX-FileName: include/mach/time_value.h
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/lock.c
+SPDX-FileName: vm/vm_init.c
+SPDX-FileName: vm/vm_kern.c
+SPDX-FileName: vm/vm_map.c
+SPDX-FileName: vm/vm_map.h
+SPDX-FileName: vm/vm_object.c
+SPDX-FileName: vm/vm_pageout.c
+SPDX-FileName: vm/vm_resident.c
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/lock.h
+SPDX-FileName: vm/vm_object.h
+SPDX-FileCopyrightText: 1993-1987 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/mach_clock.c
+SPDX-FileCopyrightText: 1994-1988 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/mach_clock.h
+SPDX-FileCopyrightText: 2006, 2007 Free Software Foundation, Inc.
+SPDX-FileContributor: Barry deFreese
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: kern/mach_factor.c
+SPDX-FileName: kern/sched.h
+SPDX-FileName: kern/thread_swap.c
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/machine.c
+SPDX-FileName: kern/priority.c
+SPDX-FileName: vm/pmap.h
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: kern/printf.c
+SPDX-FileCopyrightText: 1993 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-CMU-Printf
+
+SPDX-FileName: kern/printf.h
+SPDX-FileCopyrightText: 2006, 2007 Free Software Foundation
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: kern/processor.c
+SPDX-FileCopyrightText: 1993-1988 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/rdxtree.c
+SPDX-FileName: kern/rdxtree.h
+SPDX-FileName: kern/rdxtree_i.h
+SPDX-FileCopyrightText: 2011-2015 Richard Braun
+SPDX-License-Identifier: LicenseRef-BSD-2-Clause-Author
+
+SPDX-FileName: kern/sched_prim.c
+SPDX-FileName: kern/thread.h
+SPDX-FileCopyrightText: 1993-1987 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/sched_prim.h
+SPDX-FileCopyrightText: 1992, 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileContributor: David Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/slab.c
+SPDX-FileCopyrightText: 2011 Free Software Foundation
+SPDX-FileCopyrightText: 2010, 2011 Richard Braun
+SPDX-License-Identifier: GPL-2.0-or-later AND LicenseRef-BSD-2-Clause-Author
+
+SPDX-FileName: kern/smp.c
+SPDX-FileName: i386/i386/apic.c
+SPDX-FileName: i386/i386/smp.c
+SPDX-FileName: i386/i386/smp.h
+SPDX-FileCopyrightText: 2020 Free Software Foundation, Inc.
+SPDX-FileContributor: Almudena Garcia Jurado-Centurion
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: kern/startup.c
+SPDX-FileName: include/mach/policy.h
+SPDX-FileName: i386/i386/trap.c
+SPDX-FileName: x86_64/include/syscall_sw.h
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/task.c
+SPDX-FileCopyrightText: 1993-1988 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-FileContributor: David Golub
+SPDX-FileContributor: David Black
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/task.h
+SPDX-FileCopyrightText: 1993-1988 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: kern/thread.c
+SPDX-FileCopyrightText: 1994-1987 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-FileContributor: David Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: ipc/copy_user.c
+SPDX-FileName: ipc/copy_user.h
+SPDX-FileName: i386/i386/msr.h
+SPDX-FileCopyrightText: 2023 Free Software Foundation
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: ipc/ipc_pset.c
+SPDX-FileCopyrightText: 1991, 1990, 1989Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Rich Draves
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: ipc/ipc_target.c
+SPDX-FileName: ipc/ipc_target.h
+SPDX-FileCopyrightText: 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-License-Identifier: LicenseRef-Utah-CSL
+
+SPDX-FileName: ipc/mach_debug.c
+SPDX-FileName: vm/vm_debug.c
+SPDX-FileCopyrightText: 1991, 1990 Carnegie Mellon University
+SPDX-FileContributor: Rich Draves
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: vm/memory_object.c
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Michael Wayne Young
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: vm/memory_object_proxy.c
+SPDX-FileCopyrightText: 2005 Free Software Foundation, Inc.
+SPDX-FileContributor: Marcus Brinkmann
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: vm/vm_external.c
+SPDX-FileName: vm/vm_external.h
+SPDX-FileName: include/mach/thread_switch.h
+SPDX-FileName: i386/i386/loose_ends.c
+SPDX-FileName: i386/i386/phys.c
+SPDX-FileName: i386/i386/thread.h
+SPDX-FileName: i386/i386/tss.h
+SPDX-FileName: i386/i386at/mem.c
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: vm/vm_fault.c
+SPDX-FileCopyrightText: 1994, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileCopyrightText: 1993, 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-License-Identifier: LicenseRef-CMU-Utah
+
+SPDX-FileName: vm/vm_page.c
+SPDX-FileName: i386/i386at/biosmem.c
+SPDX-FileCopyrightText: 2010-2014 Richard Braun
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: vm/vm_page.h
+SPDX-FileCopyrightText: 1993-1988 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-License-Identifier: CMU-Mach AND GPL-2.0-or-later
+
+SPDX-FileName: vm/vm_user.c
+SPDX-FileName: i386/intel/pmap.c
+SPDX-FileName: i386/intel/pmap.h
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/chario.c
+SPDX-FileCopyrightText: 1993-1988 Carnegie Mellon University
+SPDX-FileContributor: David B. Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/cirbuf.c
+SPDX-FileCopyrightText: 1992, 1991, 1990 Carnegie Mellon University
+SPDX-FileContributor: David B. Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/conf.h
+SPDX-FileCopyrightText: 1993, 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileContributor: David B. Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/cons.c
+SPDX-FileCopyrightText: 1988-1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-License-Identifier: LicenseRef-CSL
+
+SPDX-FileName: device/dev_hdr.h
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1996 The University of Utah and the Computer Systems Laboratory at the University of Utah (CSL)
+SPDX-FileContributor: David B. Golub
+SPDX-FileContributor: Shantanu Goel
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-CSL
+
+SPDX-FileName: device/dev_lookup.c
+SPDX-FileName: device/io_req.h
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-FileContributor: David B. Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/dev_name.c
+SPDX-FileName: device/device_init.c
+SPDX-FileName: include/device/net_status.h
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileContributor: David B. Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/dev_pager.c
+SPDX-FileCopyrightText: 1993-1989 Carnegie Mellon University
+SPDX-FileContributor: David B. Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/ds_routines.c
+SPDX-FileCopyrightText: 1993, 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1996 The University of Utah and the Computer Systems Laboratory at the University of Utah (CSL)
+SPDX-FileContributor: David B. Golub
+SPDX-FileContributor: Shantanu Goel
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-CSL
+
+SPDX-FileName: device/input.h
+SPDX-FileName: i386/i386/percpu.c
+SPDX-FileName: i386/i386/percpu.h
+SPDX-FileCopyrightText: 2023 Free Software Foundation, Inc.
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: device/intr.c
+SPDX-FileCopyrightText: 2010, 2011, 2016, 2019 Free Software Foundation, Inc.
+SPDX-License-Identifier: LicenseRef-CMU-FSF-no-space
+
+SPDX-FileName: device/kmsg.c
+SPDX-FileCopyrightText: 1998, 1999, 2007 Free Software Foundation, Inc.
+SPDX-FileContributor: OKUJI Yoshinori
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: device/param.h
+SPDX-FileCopyrightText: 1991, 1990 Carnegie Mellon University
+SPDX-FileContributor: David B. Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/subrs.c
+SPDX-FileCopyrightText: 1993, 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: device/tty.h
+SPDX-FileCopyrightText: 1993-1990 Carnegie Mellon University
+SPDX-FileContributor: David B. Golub
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: include/mach/message.h
+SPDX-FileCopyrightText: 1992-1987 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: include/mach/vm_param.h
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988, 1987 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: include/sys/reboot.h
+SPDX-FileCopyrightText: 1993, 1991, 1990 Carnegie Mellon University
+SPDX-FileCopyrightText: 1982, 1986, 1988 Regents of the University of California
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-BSD-3-Clause-Laboratory
+
+SPDX-FileName: i386/i386/apic.h
+SPDX-FileName: i386/i386/debug_i386.c
+SPDX-FileName: i386/i386/idt-gen.h
+SPDX-FileName: i386/i386/idt.c
+SPDX-FileName: i386/i386/vm_param.h
+SPDX-FileName: i386/i386at/int_init.c
+SPDX-FileCopyrightText: 1994 The University of Utah and the Computer Systems Laboratory at the University of Utah (CSL)
+SPDX-FileContributor: Bryan Ford
+SPDX-License-Identifier: LicenseRef-CSL
+
+SPDX-FileName: i386/i386/fpu.c
+SPDX-FileCopyrightText: 1992-1990 Carnegie Mellon University
+SPDX-FileCopyrightText: 1994 Linus Torvalds
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: i386/i386/fpu.h
+SPDX-FileCopyrightText: 1991 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: i386/i386/gdt.c
+SPDX-FileName: i386/i386/hardclock.c
+SPDX-FileName: i386/i386/seg.h
+SPDX-FileCopyrightText: 1991, 1990 Carnegie Mellon University
+SPDX-FileCopyrightText: 1991 IBM Corporation
+SPDX-License-Identifier: LicenseRef-CMU-IBM
+
+SPDX-FileName: i386/i386/gdt.h
+SPDX-FileName: i386/i386/ldt.h
+SPDX-FileCopyrightText: 1991, 1990 Carnegie Mellon University
+SPDX-FileCopyrightText: 1991 IBM Corporation
+SPDX-FileCopyrightText: 1994 The University of Utah and the Computer Systems Laboratory (CSL)
+SPDX-License-Identifier: LicenseRef-CMU-IBM-CSL
+
+SPDX-FileName: i386/i386/io_perm.c
+SPDX-FileCopyrightText: 2002, 2007 Free Software Foundation, Inc.
+SPDX-FileCopyrightText: 1993, 1992, 1991, 1990 Carnegie Mellon University
+SPDX-FileContributor: Marcus Brinkmann
+SPDX-FileContributor: Thomas Schwinge
+SPDX-License-Identifier: GPL-2.0-or-later AND CMU-Mach
+
+SPDX-FileName: i386/i386/irq.c
+SPDX-FileCopyrightText: 1995 Shantanu Goel
+SPDX-FileCopyrightText: 2020 Free Software Foundation, Inc
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: i386/i386/locore.h
+SPDX-FileCopyrightText: 2006, 2011 Free Software Foundation
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: i386/i386/machine_task.c
+SPDX-FileCopyrightText: 2002, 2007 Free Software Foundation, Inc.
+SPDX-FileContributor: Marcus Brinkmann
+SPDX-FileContributor: Thomas Schwinge
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: i386/i386/pit.c
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1991 IBM Corporation
+SPDX-FileCopyrightText: 1988, 1989 Intel Corporation, Santa Clara, California
+SPDX-License-Identifier: LicenseRef-CMU-IBM AND LicenseRef-Intel
+
+SPDX-FileName: i386/i386/spl.S
+SPDX-FileName: i386/i386at/interrupt.S
+SPDX-FileName: x86_64/interrupt.S
+SPDX-FileName: x86_64/spl.S
+SPDX-FileCopyrightText: 1995 Shantanu Goel
+SPDX-License-Identifier: LicenseRef-Mach-Author
+
+SPDX-FileName: i386/i386/user_ldt.c
+SPDX-FileCopyrightText: 1994, 1993, 1992, 1991 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: i386/i386at/acpi_parse_apic.c
+SPDX-FileCopyrightText: 2018 Juan Bosco Garcia
+SPDX-FileCopyrightText: 2019 2020 Almudena Garcia Jurado-Centurion
+SPDX-FileContributor: Juan Bosco Garcia
+SPDX-FileContributor: Almudena Garcia Jurado-Centurion
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: i386/i386at/autoconf.c
+SPDX-FileCopyrightText: 1993, 1992, 1991, 1990, 1989 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: i386/i386at/com.c
+SPDX-FileCopyrightText: 1994, 1993, 1991, 1990 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: i386/i386at/comreg.h
+SPDX-FileCopyrightText: 1991, 1990 Carnegie Mellon University
+SPDX-FileCopyrightText: 1988, 1989 Ing. C. Olivetti & C. S.p.A.
+SPDX-FileCopyrightText: 1988, 1989 Olivetti Advanced Technology Center, Inc., Cupertino, California
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-Olivetti
+
+SPDX-FileName: i386/i386at/conf.c
+SPDX-FileCopyrightText: 1993-1989 Carnegie Mellon University
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: i386/i386at/cons_conf.c
+SPDX-FileCopyrightText: 1988-1994 The University of Utah and the Computer Systems Laboratory at the University of Utah (CSL)
+SPDX-License-Identifier: LicenseRef-CSL
+
+SPDX-FileName: i386/i386at/ioapic.c
+SPDX-FileCopyrightText: 2019 Free Software Foundation, Inc.
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: i386/i386at/kd.c
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1988, 1989 Ing. C. Olivetti & C. S.p.A.
+SPDX-FileCopyrightText: 1988, 1989 Olivetti Advanced Technology Center, Inc., Cupertino, California
+SPDX-FileCopyrightText: 1988, 1989 Intel Corporation, Santa Clara, California
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-Olivetti AND LicenseRef-Intel
+
+SPDX-FileName: i386/i386at/kd.h
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1988, 1989 Ing. C. Olivetti & C. S.p.A.
+SPDX-FileCopyrightText: 1988, 1989 Olivetti Advanced Technology Center, Inc., Cupertino, California
+SPDX-FileContributor: Eugene Kuerner
+SPDX-FileContributor: Adrienne Jardetzky
+SPDX-FileContributor: Mike Kupfer
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-Olivetti
+
+SPDX-FileName: i386/i386at/kd_event.c
+SPDX-FileName: i386/i386at/kd_mouse.c
+SPDX-FileName: i386/i386at/kd_queue.c
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1989 Ing. C. Olivetti & C. S.p.A.
+SPDX-FileCopyrightText: 1988, 1989 Olivetti Advanced Technology Center, Inc., Cupertino, California
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-Olivetti
+
+SPDX-FileName: i386/i386at/kdasm.S
+SPDX-FileName: x86_64/kdasm.S
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1988, 1989 Ing. C. Olivetti & C. S.p.A.
+SPDX-FileCopyrightText: 1988, 1989 Olivetti Advanced Technology Center, Inc., Cupertino, California
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-Olivetti
+
+SPDX-FileName: i386/i386at/mbinfo.c
+SPDX-FileCopyrightText: 2024 Free Software Foundation, Inc.
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: i386/i386at/model_dep.c
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-FileCopyrightText: 1986 Avadis Tevanian, Jr., Michael Wayne Young
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-FileContributor: Michael Wayne Young
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: i386/i386at/model_dep.h
+SPDX-FileCopyrightText: 2013 Free Software Foundation
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: i386/i386at/rtc.c
+SPDX-FileName: i386/i386at/rtc.h
+SPDX-FileCopyrightText: 1991, 1990, 1989 Carnegie Mellon University
+SPDX-FileCopyrightText: 1988, 1989 Intel Corporation, Santa Clara, California
+SPDX-License-Identifier: CMU-Mach AND LicenseRef-Intel
+
+SPDX-FileName: i386/include/mach/i386/vm_param.h
+SPDX-FileCopyrightText: 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: i386/include/mach/i386/vm_types.h
+SPDX-FileCopyrightText: 1992, 1991, 1990, 1989, 1988 Carnegie Mellon University
+SPDX-FileContributor: Avadis Tevanian, Jr.
+SPDX-License-Identifier: CMU-Mach
+
+SPDX-FileName: x86_64/boothdr.S
+SPDX-FileCopyrightText: 2022 Free Software Foundation
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: x86_64/cpuboot.S
+SPDX-FileCopyrightText: 2025 Free Software Foundation
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SPDX-FileName: x86_64/locore.S
+SPDX-FileCopyrightText: 1993, 1992, 1991, 1990 Carnegie Mellon University
+SPDX-FileCopyrightText: 1991 IBM Corporation
+SPDX-License-Identifier: LicenseRef-CMU-IBM-nema
+
+SPDX-FileName: chips/busses.c
+SPDX-FileCopyrightText: 1993-1989 Carnegie Mellon University
+SPDX-FileContributor: Alessandro Forin
+SPDX-License-Identifier: CMU-Mach
+
+
+Copies
+------
+
+These files are kept as copies, with their upstream headers and
+licences, not rewritten:
+
+  crates/mach-mig-sys/mig/defs/, crates/mach-mig-sys/mig/srv/ and
+  crates/mach-mig-sys/mig/cli/
+      GNU Mach's MIG interface definitions, which GNU MIG compiles at
+      the MIG seam. Five are modified, each saying so at its top:
+      mach/mach4.defs, mach/mach_host.defs, mach/mach_types.defs,
+      mach/machine/machine_types.defs and
+      mach_debug/mach_debug.defs.
+
+  crates/mach/ldscript
+      GNU Mach's x86_64 linker script, byte-identical.
+
+  abi-test/x86_64.tar.gz
+      GNU Mach's test suite, built from its abi-tests branch at
+      commit 2fbf950f, with ABI tests added, frozen as binaries.

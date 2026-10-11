@@ -1,0 +1,1127 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
+//
+// Inspired by GNU Mach; see COPYRIGHT.
+
+//! The <`mach/mach_host.defs`> server entries, all 43 routines, which
+//! `kern/mach_host.srv` presents.
+//!
+//! The cores stay in the `crate::kern` and `crate::vm` modules.
+
+use crate::arch::types::{VmOffset, VmSize};
+use crate::arch::x86_64::platform::MachPlatform;
+use crate::config::{KERNEL_VERSION, KERNEL_VERSION_MAX, MAX_NCPUS};
+use crate::kern::error::Error;
+use crate::mig::code::{host_return, kern_return, task_return, vm_return};
+use crate::mig::copy_out;
+use crate::mig::time_value::{TimeValue, TimeValue64};
+use crate::vm::VmMap;
+use core::ffi::{c_int, c_uint, c_void};
+use core::ptr::{self, NonNull};
+use core::slice;
+use mach_host::host::{self, Host, processor_ports, processor_set_priv};
+use mach_host::info::{
+    self as host_info, HOST_INFO_MAX, HostBasicInfo, HostLoadInfo,
+    HostSchedInfo,
+};
+use mach_host::machine;
+use mach_host::processor_info::ProcessorBasicInfo;
+use mach_host::time as clock;
+use mach_thread::info::pset::{ProcessorSetBasicInfo, ProcessorSetSchedInfo};
+use mach_thread::ipc_processor;
+use mach_thread::processor::{self, Processor};
+use mach_thread::processor_action;
+use mach_thread::processor_set::ProcessorSet;
+use mach_thread::syscall_subr;
+use mach_thread::task::{self, Task};
+use mach_thread::thread::{Thread, default_pset};
+use mach_vm::types::VmProt;
+use mach_vm::vm_user;
+
+const _: () = assert!(KERNEL_VERSION.len() < KERNEL_VERSION_MAX);
+
+/// Reports `host`'s processors as send rights.
+///
+/// # Safety
+///
+/// `host` must be null or the live host the generated server converted the
+/// request port into; `processor_list` and `countp` must be valid
+/// out-parameters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_processors(
+    host: *mut Host,
+    processor_list: *mut *mut VmOffset,
+    countp: *mut c_uint,
+) -> c_int {
+    match host::processors::<MachPlatform>(NonNull::new(host)) {
+        Ok((list, count)) => {
+            unsafe {
+                *processor_list = list.as_ptr();
+                *countp = count;
+            }
+            0
+        }
+        Err(error) => host_return(error),
+    }
+}
+
+/// Starts the processor `pr`.
+///
+/// # Safety
+///
+/// `pr` must be null or point at a live `struct processor`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_start(
+    pr: *mut Processor<MachPlatform>,
+) -> c_int {
+    let Some(pr) = NonNull::new(pr) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match unsafe { (*pr.as_ptr()).start() } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Takes the processor `pr` out of service.
+///
+/// # Safety
+///
+/// `pr` must be null or point at a live `struct processor`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_exit(
+    pr: *mut Processor<MachPlatform>,
+) -> c_int {
+    let Some(pr) = NonNull::new(pr) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match unsafe { (*pr.as_ptr()).exit() } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Reports `host`'s default processor set.
+///
+/// # Safety
+///
+/// `host` must be null or point at a live `struct host`, and `pset` must be a
+/// valid out-parameter; MIG's `_Xprocessor_set_default` passes both.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_default(
+    host: *mut c_void,
+    pset: *mut *mut ProcessorSet<MachPlatform>,
+) -> c_int {
+    match unsafe { ipc_processor::set_default(host) } {
+        Ok(default) => {
+            unsafe { *pset = default };
+            0
+        }
+        Err(error) => task_return(error),
+    }
+}
+
+/// Creates a processor set, reporting its control and name ports.
+///
+/// # Safety
+///
+/// `host` must be null or the live host privilege object; `new_set` and
+/// `new_name` must be valid out-parameters, and the caller owns one reference
+/// through each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_create(
+    host: *mut c_void,
+    new_set: *mut *mut ProcessorSet<MachPlatform>,
+    new_name: *mut *mut ProcessorSet<MachPlatform>,
+) -> c_int {
+    match unsafe { processor::create(host) } {
+        Ok(pset) => {
+            unsafe {
+                *new_set = pset;
+                *new_name = pset;
+            }
+            0
+        }
+        Err(error) => task_return(error),
+    }
+}
+
+/// Destroys `pset`, moving its tasks, threads and processors to the default
+/// set.
+///
+/// # Safety
+///
+/// `pset` must be null or point at a live `struct processor_set` that the
+/// caller holds a reference to.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_destroy(
+    pset: *mut ProcessorSet<MachPlatform>,
+) -> c_int {
+    let Some(pset) = NonNull::new(pset) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match unsafe { (*pset.as_ptr()).destroy() } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Assigns `processor` to `new_pset`, waiting for the move when `wait` is set.
+///
+/// # Safety
+///
+/// `processor` must be null or a live processor and `new_pset` null or a live
+/// set; the caller must hold no lock, because the routine waits and may block.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_assign(
+    processor: *mut Processor<MachPlatform>,
+    new_pset: *mut ProcessorSet<MachPlatform>,
+    wait: c_int,
+) -> c_int {
+    match unsafe { processor_action::assign(processor, new_pset, wait != 0) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Reports the processor set `pr` belongs to.
+///
+/// # Safety
+///
+/// `pr` must be null or point at a live `struct processor`, and `pset` must be
+/// a valid out-parameter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_get_assignment(
+    pr: *mut Processor<MachPlatform>,
+    pset: *mut *mut ProcessorSet<MachPlatform>,
+) -> c_int {
+    let Some(pr) = NonNull::new(pr) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match unsafe { (*pr.as_ptr()).get_assignment() } {
+        Ok(assignment) => {
+            unsafe { *pset = assignment };
+            0
+        }
+        Err(error) => task_return(error),
+    }
+}
+
+/// Assigns `thread` to `new_pset`.
+///
+/// # Safety
+///
+/// `thread` must be null or a live thread the caller holds an extra reference
+/// to, `new_pset` must be null or a live processor set, and the caller must
+/// hold no locks: the routine waits and may block.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn thread_assign(
+    thread: *mut Thread<MachPlatform>,
+    new_pset: *mut ProcessorSet<MachPlatform>,
+) -> c_int {
+    match unsafe { Thread::<MachPlatform>::assign(thread, new_pset) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Assigns `thread` to the default processor set.
+///
+/// # Safety
+///
+/// `thread` must be null or a live thread the caller holds an extra reference
+/// to, and the caller must hold no locks: `thread_assign()` may block.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn thread_assign_default(
+    thread: *mut Thread<MachPlatform>,
+) -> c_int {
+    match unsafe { Thread::<MachPlatform>::assign(thread, default_pset()) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Reports the processor set `thread` belongs to.
+///
+/// # Safety
+///
+/// `thread` must be null or point at a live thread, and `pset` must be valid
+/// for a write; the MIG server passes the address of its own
+/// `processor_set_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn thread_get_assignment(
+    thread: *mut Thread<MachPlatform>,
+    pset: *mut *mut ProcessorSet<MachPlatform>,
+) -> c_int {
+    match unsafe { Thread::<MachPlatform>::assignment(thread) } {
+        Ok(assignment) => {
+            unsafe { *pset = assignment };
+            0
+        }
+        Err(error) => task_return(error),
+    }
+}
+
+/// Assigns `task` to `new_pset`, and its threads too when `assign_threads` is
+/// set.
+///
+/// # Safety
+///
+/// `task` must be a live task, `new_pset` must be a live processor set, and
+/// the caller must hold no locks: the routine waits and may block.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn task_assign(
+    task: *mut c_void,
+    new_pset: *mut ProcessorSet<MachPlatform>,
+    assign_threads: c_int,
+) -> c_int {
+    match unsafe { task::assign(task.cast(), new_pset, assign_threads != 0) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Assigns `task` to the default processor set, and its threads too when
+/// `assign_threads` is set.
+///
+/// # Safety
+///
+/// `task` must be a live task, and the caller must hold no locks: `assign()`
+/// waits and may block.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn task_assign_default(
+    task: *mut c_void,
+    assign_threads: c_int,
+) -> c_int {
+    let default_pset = processor::default_pset::<MachPlatform>();
+    match unsafe {
+        task::assign(task.cast(), default_pset, assign_threads != 0)
+    } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Reports the processor set `task` belongs to.
+///
+/// # Safety
+///
+/// `task` must be a live task, and `pset` must be writable for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn task_get_assignment(
+    task: *mut c_void,
+    pset: *mut *mut ProcessorSet<MachPlatform>,
+) -> c_int {
+    match unsafe { task::get_assignment(task.cast()) } {
+        Ok(assigned) => {
+            unsafe { pset.write(assigned) };
+            0
+        }
+        Err(error) => task_return(error),
+    }
+}
+
+/// Sets `thread`'s priority, and its maximum too when `set_max` is set.
+///
+/// # Safety
+///
+/// `thread` must be null or point at a live thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn thread_priority(
+    thread: *mut Thread<MachPlatform>,
+    priority: c_int,
+    set_max: c_int,
+) -> c_int {
+    match unsafe {
+        Thread::<MachPlatform>::priority(thread, priority, set_max != 0)
+    } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Sets `thread`'s maximum priority, under the control port of its set `pset`.
+///
+/// # Safety
+///
+/// `thread` and `pset` must be null or point at live objects.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn thread_max_priority(
+    thread: *mut Thread<MachPlatform>,
+    pset: *mut ProcessorSet<MachPlatform>,
+    max_priority: c_int,
+) -> c_int {
+    match unsafe {
+        Thread::<MachPlatform>::max_priority(thread, pset, max_priority)
+    } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Sets `task`'s priority for new threads, and its threads' too when
+/// `change_threads` is set.
+///
+/// # Safety
+///
+/// `task` must be a live task, and the caller must hold no locks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn task_priority(
+    task: *mut c_void,
+    priority: c_int,
+    change_threads: c_int,
+) -> c_int {
+    match unsafe {
+        task::priority::<MachPlatform>(
+            task.cast(),
+            priority,
+            change_threads != 0,
+        )
+    } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Sets `pset`'s maximum priority, and lowers its threads' when
+/// `change_threads` is set.
+///
+/// # Safety
+///
+/// `pset` must be null or point at a live `struct processor_set`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_max_priority(
+    pset: *mut ProcessorSet<MachPlatform>,
+    max_priority: c_int,
+    change_threads: c_int,
+) -> c_int {
+    let Some(pset) = NonNull::new(pset) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match unsafe {
+        (*pset.as_ptr()).max_priority(max_priority, change_threads)
+    } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Sets `thread`'s scheduling policy, with `data` as the quantum of a
+/// fixed-priority policy.
+///
+/// # Safety
+///
+/// `thread` must be null or point at a live thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn thread_policy(
+    thread: *mut Thread<MachPlatform>,
+    policy: c_int,
+    data: c_int,
+) -> c_int {
+    match unsafe { Thread::<MachPlatform>::policy(thread, policy, data) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Enables the scheduling policy `policy` in `pset`.
+///
+/// # Safety
+///
+/// `pset` must be null or point at a live `struct processor_set`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_policy_enable(
+    pset: *mut ProcessorSet<MachPlatform>,
+    policy: c_int,
+) -> c_int {
+    let Some(pset) = NonNull::new(pset) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match unsafe { (*pset.as_ptr()).policy_enable(policy) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Disables the scheduling policy `policy` in `pset`, moving its threads back
+/// to timesharing when `change_threads` is set.
+///
+/// # Safety
+///
+/// `pset` must be null or point at a live `struct processor_set`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_policy_disable(
+    pset: *mut ProcessorSet<MachPlatform>,
+    policy: c_int,
+    change_threads: c_int,
+) -> c_int {
+    let Some(pset) = NonNull::new(pset) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match unsafe { (*pset.as_ptr()).policy_disable(policy, change_threads) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Reports `pset`'s tasks as send rights.
+///
+/// # Safety
+///
+/// `pset` must be null or point at a live `struct processor_set`; `task_list`
+/// must be a valid out-parameter for the port array, and `count` for its
+/// length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_tasks(
+    pset: *mut ProcessorSet<MachPlatform>,
+    task_list: *mut *mut Task<MachPlatform>,
+    count: *mut c_uint,
+) -> c_int {
+    match unsafe { processor::tasks(pset) } {
+        Ok((list, length)) => {
+            unsafe {
+                *task_list = list.cast::<Task<MachPlatform>>();
+                *count = length;
+            }
+            0
+        }
+        Err(error) => task_return(error),
+    }
+}
+
+/// Reports `pset`'s threads as send rights.
+///
+/// # Safety
+///
+/// `pset` must be null or point at a live `struct processor_set`;
+/// `thread_list` must be a valid out-parameter for the port array, and
+/// `count` for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_threads(
+    pset: *mut ProcessorSet<MachPlatform>,
+    thread_list: *mut *mut Thread<MachPlatform>,
+    count: *mut c_uint,
+) -> c_int {
+    match unsafe { processor::threads(pset) } {
+        Ok((list, length)) => {
+            unsafe {
+                *thread_list = list.cast::<Thread<MachPlatform>>();
+                *count = length;
+            }
+            0
+        }
+        Err(error) => task_return(error),
+    }
+}
+
+/// Reports `host`'s processor sets as name ports.
+///
+/// # Safety
+///
+/// `host` must be null or the live host the generated server converted the
+/// request port into; `pset_list` and `count` must be valid out-parameters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_processor_sets(
+    host: *mut Host,
+    pset_list: *mut *mut c_void,
+    count: *mut c_uint,
+) -> c_int {
+    let Some(host) = NonNull::new(host) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match unsafe { host::processor_sets::<MachPlatform>(Some(host.as_ref())) }
+    {
+        Ok((list, actual)) => {
+            unsafe {
+                *pset_list = list.cast();
+                *count = actual;
+            }
+            0
+        }
+        Err(error) => host_return(error),
+    }
+}
+
+/// Reports the processor set `pset_name` names, for the privileged `host`.
+#[unsafe(no_mangle)]
+pub extern "C" fn host_processor_set_priv(
+    host: Option<NonNull<Host>>,
+    pset_name: Option<&mut ProcessorSet<MachPlatform>>,
+    pset: Option<&mut Option<NonNull<ProcessorSet<MachPlatform>>>>,
+) -> c_int {
+    let Some(out) = pset else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match processor_set_priv(host, pset_name) {
+        Ok(set) => {
+            *out = Some(set);
+            0
+        }
+        Err(error) => {
+            *out = None;
+            host_return(error)
+        }
+    }
+}
+
+/// Ends `thread`'s priority depression.
+///
+/// # Safety
+///
+/// `thread` must be null or a live thread; the routine takes splsched and the
+/// thread lock itself.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn thread_depress_abort(
+    thread: *mut Thread<MachPlatform>,
+) -> c_int {
+    kern_return(
+        unsafe { syscall_subr::depress_abort(thread) }.map_err(task_return),
+    )
+}
+
+/// Sets the time of day; the deprecated 32-bit form of [`host_set_time64`].
+///
+/// # Safety
+///
+/// `host` must be null or point at a live `struct host`; MIG's
+/// `_Xhost_set_time` passes the host private port's host.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_set_time(
+    host: *mut c_void,
+    new_time: TimeValue,
+) -> c_int {
+    match clock::set_time64::<MachPlatform>(host, TimeValue64::from(new_time))
+    {
+        Ok(()) => 0,
+        Err(error) => host_return(error),
+    }
+}
+
+/// Adjusts the time of day gradually; the deprecated 32-bit form of
+/// [`host_adjust_time64`].
+///
+/// # Safety
+///
+/// `host` must be null or point at a live `struct host`, and `old_adjustment`
+/// must be valid for a write on success; MIG's `_Xhost_adjust_time` passes its
+/// reply field, which is.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_adjust_time(
+    host: *mut c_void,
+    new_adjustment: TimeValue,
+    old_adjustment: *mut TimeValue,
+) -> c_int {
+    match clock::adjust_time::<MachPlatform>(
+        host,
+        TimeValue64::from(new_adjustment),
+    ) {
+        Ok(old) => {
+            unsafe { copy_out(old_adjustment, &TimeValue::from(old)) };
+            0
+        }
+        Err(error) => host_return(error),
+    }
+}
+
+/// Reports the time of day.
+///
+/// # Safety
+///
+/// `host` must be null or a live host, and `current_time` must be valid for
+/// a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_get_time(
+    host: *mut c_void,
+    current_time: *mut TimeValue,
+) -> c_int {
+    match clock::get_time::<MachPlatform>(host) {
+        Ok(value) => {
+            unsafe { copy_out(current_time, &value) };
+            0
+        }
+        Err(error) => host_return(error),
+    }
+}
+
+/// Reboots or halts the machine, per `options`.
+///
+/// # Safety
+///
+/// `host_priv` must be null or the live host the MIG stub converted the
+/// privileged request port into.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_reboot(
+    host_priv: *mut c_void,
+    options: c_int,
+) -> c_int {
+    match machine::host_reboot::<MachPlatform>(host_priv, options) {
+        Ok(()) => 0,
+        Err(error) => host_return(error),
+    }
+}
+
+/// Wires the range of `map` at `start` for `access`, or unwires it when
+/// `access` is none.
+///
+/// # Safety
+///
+/// `port` must be `IP_NULL`, `IP_DEAD` or a live port; `map` must be null or
+/// a live, unlocked map.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_wire(
+    port: *mut c_void,
+    map: *mut VmMap,
+    start: VmOffset,
+    size: VmSize,
+    access: VmProt,
+) -> c_int {
+    kern_return(
+        unsafe { vm_user::wire(port, map, start, size, access) }
+            .map_err(vm_return),
+    )
+}
+
+/// Sets whether `thread` may draw on the reserved page pool, per `wired`.
+///
+/// # Safety
+///
+/// `host` must be null or a live `struct host`; `thread` must be null or point
+/// at a live thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn thread_wire(
+    host: *mut c_void,
+    thread: *mut Thread<MachPlatform>,
+    wired: c_int,
+) -> c_int {
+    if host.is_null() {
+        return c_int::from(Error::InvalidArgument);
+    }
+
+    match unsafe { Thread::<MachPlatform>::wire(thread, wired != 0) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// The `flavor` argument of `host_info()`.
+///
+/// A transparent `c_int`: the generated stub forwards the caller's int
+/// unchecked, so unlike an enum every value must be valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct HostFlavor(c_int);
+
+impl HostFlavor {
+    /// `HOST_BASIC_INFO`.
+    const BASIC_INFO: Self = Self(1);
+    /// `HOST_PROCESSOR_SLOTS`.
+    const PROCESSOR_SLOTS: Self = Self(2);
+    /// `HOST_SCHED_INFO`.
+    const SCHED_INFO: Self = Self(3);
+    /// `HOST_LOAD_INFO`.
+    const LOAD_INFO: Self = Self(4);
+}
+
+/// Reports `host`'s information of `flavor`.
+///
+/// # Safety
+///
+/// `host` must be null or the live host the generated server converted the
+/// request port into; `info` must be readable and writable for `*count`
+/// integers, and `count` must be valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_info(
+    host: *mut Host,
+    flavor: HostFlavor,
+    info: *mut c_int,
+    count: *mut c_uint,
+) -> c_int {
+    let (Some(host), Some(count)) = (NonNull::new(host), NonNull::new(count))
+    else {
+        return c_int::from(Error::InvalidArgument);
+    };
+    let Some(info) = NonNull::new(info) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    let capacity = unsafe { count.as_ptr().read() as usize };
+    let capacity = capacity.min(HOST_INFO_MAX);
+    let host = unsafe { host.as_ref() };
+
+    let written = match flavor {
+        HostFlavor::BASIC_INFO => {
+            if capacity < HostBasicInfo::WORDS as usize {
+                return c_int::from(Error::Failure);
+            }
+            // SAFETY: the capacity check above covers the record, and the
+            // MIG buffer is only `integer_t`-aligned.
+            unsafe {
+                copy_out(
+                    info.as_ptr().cast::<HostBasicInfo>(),
+                    &HostBasicInfo::of::<MachPlatform>(host),
+                );
+            }
+            HostBasicInfo::WORDS
+        }
+        HostFlavor::PROCESSOR_SLOTS => {
+            if capacity < MAX_NCPUS {
+                return c_int::from(Error::InvalidArgument);
+            }
+            // SAFETY: the capacity check above holds `MAX_NCPUS` slots.
+            unsafe { host_info::processor_slots(host, info.as_ptr()) }
+        }
+        HostFlavor::SCHED_INFO => {
+            if capacity < HostSchedInfo::WORDS as usize {
+                return c_int::from(Error::Failure);
+            }
+            // SAFETY: the capacity check above covers the record, and the
+            // MIG buffer is only `integer_t`-aligned.
+            unsafe {
+                copy_out(
+                    info.as_ptr().cast::<HostSchedInfo>(),
+                    &HostSchedInfo::from(host),
+                );
+            }
+            HostSchedInfo::WORDS
+        }
+        HostFlavor::LOAD_INFO => {
+            if capacity < HostLoadInfo::WORDS as usize {
+                return c_int::from(Error::Failure);
+            }
+            // SAFETY: the capacity check above covers the record, and the
+            // MIG buffer is only `integer_t`-aligned.
+            unsafe {
+                copy_out(
+                    info.as_ptr().cast::<HostLoadInfo>(),
+                    &HostLoadInfo::from(host),
+                );
+            }
+            HostLoadInfo::WORDS
+        }
+        _ => return c_int::from(Error::InvalidArgument),
+    };
+
+    unsafe { count.as_ptr().write(written) };
+    0
+}
+
+/// The `flavor` argument of `processor_info()`.
+///
+/// A transparent `c_int`: the generated stub forwards the caller's int
+/// unchecked, so unlike an enum every value must be valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ProcessorFlavor(c_int);
+
+impl ProcessorFlavor {
+    /// `PROCESSOR_BASIC_INFO`.
+    const BASIC_INFO: Self = Self(1);
+}
+
+/// Reports `processor`'s information of `flavor`, and its host.
+///
+/// # Safety
+///
+/// `processor` must be null or point at a live `struct processor`; `host` and
+/// `count` must be valid out-parameters, and `info` must be writable for the
+/// `processor_basic_info` that `*count` reports.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_info(
+    processor: *mut Processor<MachPlatform>,
+    flavor: ProcessorFlavor,
+    host: *mut *mut c_void,
+    info: *mut c_int,
+    count: *mut c_uint,
+) -> c_int {
+    let Some(processor) = NonNull::new(processor) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    let capacity = unsafe { *count };
+    if flavor != ProcessorFlavor::BASIC_INFO
+        || capacity < ProcessorBasicInfo::WORDS
+    {
+        return c_int::from(Error::Failure);
+    }
+
+    // SAFETY: the port holds a live processor, as the generated stub's port
+    // conversion guarantees.
+    let basic = ProcessorBasicInfo::from(unsafe { processor.as_ref() });
+    // SAFETY: the count check above guarantees the caller's buffer is at
+    // least a `processor_basic_info` (and the MIG buffer is only
+    // `integer_t`-aligned), and the caller promises the other two
+    // out-parameters.
+    unsafe {
+        copy_out(info.cast::<ProcessorBasicInfo>(), &basic);
+        *count = ProcessorBasicInfo::WORDS;
+        *host = host::realhost().cast::<c_void>();
+    }
+    0
+}
+
+/// The `flavor` argument of `processor_set_info()`.
+///
+/// A transparent `c_int`: the generated stub forwards the caller's int
+/// unchecked, so unlike an enum every value must be valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ProcessorSetFlavor(c_int);
+
+impl ProcessorSetFlavor {
+    /// `PROCESSOR_SET_BASIC_INFO`.
+    const BASIC_INFO: Self = Self(1);
+    /// `PROCESSOR_SET_SCHED_INFO`.
+    const SCHED_INFO: Self = Self(2);
+}
+
+/// Reports `pset`'s information of `flavor`, and its host.
+///
+/// # Safety
+///
+/// `pset` must be null or point at a live `struct processor_set`; `host` and
+/// `count` must be valid out-parameters, and `info` must be writable for the
+/// record the flavor and `*count` call for.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_set_info(
+    pset: *mut ProcessorSet<MachPlatform>,
+    flavor: ProcessorSetFlavor,
+    host: *mut *mut c_void,
+    info: *mut c_int,
+    count: *mut c_uint,
+) -> c_int {
+    let Some(pset) = NonNull::new(pset) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    let capacity = unsafe { *count };
+    match flavor {
+        ProcessorSetFlavor::BASIC_INFO => {
+            if capacity < ProcessorSetBasicInfo::WORDS {
+                return c_int::from(Error::Failure);
+            }
+
+            // SAFETY: the port holds a live set, as the generated stub's
+            // port conversion guarantees.
+            let basic = ProcessorSetBasicInfo::from(unsafe { pset.as_ref() });
+            // SAFETY: the count check above guarantees the caller's buffer
+            // is at least a `processor_set_basic_info` (and the MIG buffer
+            // is only `integer_t`-aligned), and the caller promises the
+            // other two out-parameters.
+            unsafe {
+                copy_out(info.cast::<ProcessorSetBasicInfo>(), &basic);
+                *count = ProcessorSetBasicInfo::WORDS;
+                *host = host::realhost().cast::<c_void>();
+            }
+            0
+        }
+        ProcessorSetFlavor::SCHED_INFO => {
+            if capacity < ProcessorSetSchedInfo::WORDS {
+                return c_int::from(Error::Failure);
+            }
+
+            // SAFETY: the port holds a live set, as the generated stub's
+            // port conversion guarantees.
+            let sched = ProcessorSetSchedInfo::from(unsafe { pset.as_ref() });
+            // SAFETY: the count check above guarantees the caller's buffer
+            // is at least a `processor_set_sched_info` (and the MIG buffer
+            // is only `integer_t`-aligned), and the caller promises the
+            // other two out-parameters.
+            unsafe {
+                copy_out(info.cast::<ProcessorSetSchedInfo>(), &sched);
+                *count = ProcessorSetSchedInfo::WORDS;
+                *host = host::realhost().cast::<c_void>();
+            }
+            0
+        }
+        _ => {
+            // The C cleared the host out-parameter it leaves untouched on
+            // the other failures.
+            unsafe {
+                *host = ptr::null_mut();
+            }
+            c_int::from(Error::InvalidArgument)
+        }
+    }
+}
+
+/// Passes the machine-dependent control `info` to the processor `pr`.
+///
+/// # Safety
+///
+/// `pr` must be null or point at a live `struct processor`, and `info` must be
+/// readable for `count` integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn processor_control(
+    pr: *mut Processor<MachPlatform>,
+    info: *mut c_int,
+    count: c_uint,
+) -> c_int {
+    let Some(pr) = NonNull::new(pr) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    let info: &[c_int] = if count == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(info, count as usize) }
+    };
+
+    match unsafe { (*pr.as_ptr()).control(info) } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}
+
+/// Reports the time of day.
+///
+/// # Safety
+///
+/// `host` must be null or a live host, and `current_time` must be valid for
+/// a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_get_time64(
+    host: *mut c_void,
+    current_time: *mut TimeValue64,
+) -> c_int {
+    match clock::get_time64::<MachPlatform>(host) {
+        Ok(value) => {
+            unsafe { copy_out(current_time, &value) };
+            0
+        }
+        Err(error) => host_return(error),
+    }
+}
+
+/// Sets the time of day.
+#[unsafe(no_mangle)]
+pub extern "C" fn host_set_time64(
+    host: *mut c_void,
+    new_time: TimeValue64,
+) -> c_int {
+    match clock::set_time64::<MachPlatform>(host, new_time) {
+        Ok(()) => 0,
+        Err(error) => host_return(error),
+    }
+}
+
+/// Adjusts the time of day gradually by `new_adjustment`, reporting the
+/// outstanding adjustment in `old_adjustment`.
+///
+/// # Safety
+///
+/// `host` must be null or point at a live `struct host`, and `old_adjustment`
+/// must be valid for a write on success; MIG's `_Xhost_adjust_time64` passes
+/// its reply field, which is.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_adjust_time64(
+    host: *mut c_void,
+    new_adjustment: TimeValue64,
+    old_adjustment: *mut TimeValue64,
+) -> c_int {
+    match clock::adjust_time::<MachPlatform>(host, new_adjustment) {
+        Ok(old) => {
+            unsafe { copy_out(old_adjustment, &old) };
+            0
+        }
+        Err(error) => host_return(error),
+    }
+}
+
+/// Both the name and the 512 come from <`mach/mach_host.defs`>, whose reply is a
+/// `c_string[512]`.
+#[unsafe(no_mangle)]
+pub extern "C" fn host_get_kernel_version(
+    host: Option<NonNull<Host>>,
+    out_version: Option<&mut [u8; KERNEL_VERSION_MAX]>,
+) -> c_int {
+    let (Some(_), Some(out)) = (host, out_version) else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    let (version, pad) = out.split_at_mut(KERNEL_VERSION.len());
+    version.copy_from_slice(KERNEL_VERSION.as_bytes());
+    pad.fill(0);
+
+    0
+}
+
+/// Reports the time since boot.
+///
+/// # Safety
+///
+/// `host` must be null or a live host, and `uptime` must be valid for a
+/// write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn host_get_uptime64(
+    host: *mut c_void,
+    uptime: *mut TimeValue64,
+) -> c_int {
+    match clock::get_uptime64::<MachPlatform>(host) {
+        Ok(value) => {
+            unsafe { copy_out(uptime, &value) };
+            0
+        }
+        Err(error) => host_return(error),
+    }
+}
+
+/// Reports `pset`'s processors as send rights.
+#[unsafe(no_mangle)]
+pub extern "C" fn processor_set_processors(
+    pset: Option<&mut ProcessorSet<MachPlatform>>,
+    processor_list: Option<&mut Option<NonNull<VmOffset>>>,
+    countp: Option<&mut c_uint>,
+) -> c_int {
+    let (Some(pset), Some(out_list), Some(out_count)) =
+        (pset, processor_list, countp)
+    else {
+        return c_int::from(Error::InvalidArgument);
+    };
+
+    match processor_ports(pset) {
+        Ok((list, count)) => {
+            *out_list = Some(list);
+            *out_count = count;
+            0
+        }
+        Err(error) => host_return(error),
+    }
+}
+
+/// Sets `task`'s maximum priority, and its priority and its threads' when
+/// `set_priority` and `change_threads` ask.
+///
+/// # Safety
+///
+/// `host` must be the port MIG converted from the request, `task` must be a
+/// live task, and the caller must hold no locks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn task_max_priority(
+    host: *mut c_void,
+    task: *mut c_void,
+    max_priority: c_int,
+    set_priority: c_int,
+    change_threads: c_int,
+) -> c_int {
+    match unsafe {
+        task::max_priority::<MachPlatform>(
+            host,
+            task.cast(),
+            max_priority,
+            set_priority != 0,
+            change_threads != 0,
+        )
+    } {
+        Ok(()) => 0,
+        Err(error) => task_return(error),
+    }
+}

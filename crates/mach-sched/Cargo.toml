@@ -1,0 +1,24 @@
+[package]
+name = "mach-sched"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The scheduler's records: run queues, priorities, policies, ASTs and the CPU timers"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitflags.workspace = true
+clock.workspace = true
+collections.workspace = true
+mach-page.workspace = true
+zerocopy.workspace = true
+
+[lints]
+workspace = true

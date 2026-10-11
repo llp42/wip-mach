@@ -1,0 +1,28 @@
+[package]
+name = "mach-ipc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mach IPC above mach-vm: ports, spaces, message queues and kernel messages"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitfield.workspace = true
+bitflags.workspace = true
+kmem.workspace = true
+lock.workspace = true
+mach-vm.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+mach-fake.workspace = true
+
+[lints]
+workspace = true

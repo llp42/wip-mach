@@ -1,0 +1,26 @@
+[package]
+name = "mach-host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mach's host above mach-thread: the host object and ports, host time, the machine slots, reboot and the host and processor reports"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+mach-sched.workspace = true
+bitflags.workspace = true
+clock.workspace = true
+mach-ipc.workspace = true
+mach-thread.workspace = true
+mach-vm.workspace = true
+zerocopy.workspace = true
+
+[lints]
+workspace = true

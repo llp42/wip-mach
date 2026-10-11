@@ -1,0 +1,26 @@
+[package]
+name = "mach-boot"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mach's bootstrap above mach-thread: the boot script and the load of the first user tasks from the boot modules"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+elf-load = { path = "../elf-load" }
+itoa.workspace = true
+kmem.workspace = true
+mach-ipc.workspace = true
+mach-task.workspace = true
+mach-thread.workspace = true
+mach-vm.workspace = true
+
+[lints]
+workspace = true

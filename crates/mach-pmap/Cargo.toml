@@ -1,0 +1,23 @@
+[package]
+name = "mach-pmap"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The x86_64 physical map below mach-vm: page tables, pv lists and TLB shootdown"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitflags.workspace = true
+lock.workspace = true
+mach-page.workspace = true
+x86_64.workspace = true
+
+[lints]
+workspace = true

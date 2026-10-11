@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
+//
+// Inspired by GNU Mach; see COPYRIGHT.
+
+//! The kernel's copy of a user message.
+
+use crate::MachMsgHeader;
+use crate::platform::Platform;
+use core::ffi::c_void;
+use core::mem::size_of;
+
+/// The C's `msgh_*_port &= 0xFFFFFFFF`: the pointer-wide unions carry a
+/// 32-bit port name.
+const PORT_NAME_MASK: usize = 0xFFFF_FFFF;
+
+/// A message copy-in that did not copy the message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CopyError {
+    /// `copyin()` faulted on the user buffer.
+    UserFault,
+    /// The user size names fewer bytes than a message header.
+    TooSmall,
+}
+
+/// Copies the whole user message into the kernel buffer and narrows the header
+/// fields the kernel widened.
+///
+/// # Safety
+///
+/// `user` must be readable for `size` bytes, and `kernel` must point at a
+/// writable buffer of `size` bytes holding at least one [`MachMsgHeader`].
+pub(crate) unsafe fn copy_in<P: Platform>(
+    user: *const c_void,
+    kernel: *mut MachMsgHeader,
+    size: usize,
+) -> Result<(), CopyError> {
+    if size < size_of::<MachMsgHeader>() {
+        return Err(CopyError::TooSmall);
+    }
+
+    if unsafe { P::copyin(user, kernel.cast(), size) }.is_err() {
+        return Err(CopyError::UserFault);
+    }
+
+    // SAFETY: the successful copy initialized the whole buffer, and `size` is
+    // at least one header.
+    let header = unsafe { &mut *kernel };
+    // The C stores the low 32 bits of the `size_t` argument into the 32-bit
+    // `msgh_size`; every in-tree caller passes a `mach_msg_size_t`.
+    header.set_size(size as u32);
+    // The user wrote 32-bit port names into the pointer-wide unions, so only
+    // their low half is meaningful.
+    header.set_remote(header.remote() & PORT_NAME_MASK);
+    header.set_local(header.local() & PORT_NAME_MASK);
+    Ok(())
+}

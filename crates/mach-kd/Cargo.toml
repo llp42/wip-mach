@@ -1,0 +1,48 @@
+[package]
+name = "mach-kd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The kd console's terminal, keyboard and mouse decoders, and input event records"
+repository.workspace = true
+publish = false
+
+[dependencies]
+bitflags.workspace = true
+oem_cp.workspace = true
+vte.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+mach-fake.workspace = true
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unfulfilled_lint_expectations = "deny"
+missing_docs = "deny"
+elided_lifetimes_in_paths = "deny"
+unused_qualifications = "deny"
+trivial_numeric_casts = "deny"
+non_ascii_idents = "deny"
+meta_variable_misuse = "deny"
+let_underscore_drop = "deny"
+macro_use_extern_crate = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+missing_safety_doc = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"

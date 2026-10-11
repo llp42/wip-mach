@@ -1,0 +1,26 @@
+[package]
+name = "mach-device"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mach's machine-independent device dispatch: the device server, the device lookup, the device pager and the I/O request"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitflags.workspace = true
+collections.workspace = true
+kmem.workspace = true
+lock.workspace = true
+mach-ipc.workspace = true
+mach-thread.workspace = true
+mach-vm.workspace = true
+
+[lints]
+workspace = true

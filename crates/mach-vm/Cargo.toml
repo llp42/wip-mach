@@ -1,0 +1,28 @@
+[package]
+name = "mach-vm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Machine-independent Mach virtual memory above the pmap"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitfield.workspace = true
+bitflags.workspace = true
+collections.workspace = true
+lock.workspace = true
+mach-page.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+mach-fake.workspace = true
+
+[lints]
+workspace = true

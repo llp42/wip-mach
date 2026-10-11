@@ -1,0 +1,28 @@
+[package]
+name = "clock"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The machine clock and Scheme 6 hashed timer wheels"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+collections.workspace = true
+lock.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "timers"
+harness = false
+
+[lints]
+workspace = true

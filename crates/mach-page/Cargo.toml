@@ -1,0 +1,23 @@
+[package]
+name = "mach-page"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The physical pages: the page descriptor, the segments, their buddy allocator and the per-CPU pools"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitfield.workspace = true
+bitflags.workspace = true
+collections.workspace = true
+lock.workspace = true
+
+[lints]
+workspace = true

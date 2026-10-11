@@ -1,0 +1,861 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
+//
+// Inspired by GNU Mach; see COPYRIGHT.
+
+//! The system-call trap table.
+//!
+//! The assembly syscall entry points index [`MACH_TRAP_TABLE`] at the stride
+//! of [`MachTrap`], so the table and its entries keep a fixed layout.
+
+use crate::arch::x86_64::platform::MachPlatform;
+use crate::kern::console::mach_print;
+use crate::kern::debug::soft_debugger;
+use crate::kern::error::Error;
+use crate::kern::eventcount::{evc_wait, evc_wait_clear};
+use crate::kern::ipc_mig::thread_switch_entry;
+use crate::kern::ipc_mig::{
+    mach_msg_trap, syscall_device_write_request_entry,
+    syscall_device_writev_request_entry, syscall_mach_port_allocate_entry,
+    syscall_mach_port_allocate_name_entry, syscall_mach_port_deallocate_entry,
+    syscall_mach_port_insert_right_entry, syscall_task_create_entry,
+    syscall_task_set_special_port_entry, syscall_task_suspend_entry,
+    syscall_task_terminate_entry, syscall_thread_depress_abort_entry,
+    syscall_vm_allocate_entry, syscall_vm_deallocate_entry,
+    syscall_vm_map_entry, thread_set_self_state,
+};
+use core::ffi::{c_char, c_int, c_uint, c_void};
+use core::mem::{align_of, offset_of, size_of, transmute};
+use core::sync::atomic::{AtomicI32, Ordering};
+use mach_host::port::mach_host_self_entry;
+use mach_thread::ipc_tt::{
+    mach_reply_port_entry, mach_task_self_entry, mach_thread_self_entry,
+};
+use mach_thread::syscall_subr::{swtch_entry, swtch_pri_entry};
+
+/// The null name `null_port()` returns.
+const MACH_PORT_NULL: c_uint = 0;
+
+/// One entry of the syscall table the assembly indexes.
+#[repr(C)]
+#[allow(missing_docs)]
+pub struct MachTrap {
+    pub mach_trap_arg_count: c_int,
+    pub mach_trap_function: Option<unsafe extern "C" fn()>,
+    pub mach_trap_stack: c_int,
+    pub mach_trap_name: *const c_char,
+}
+
+const _: () = {
+    assert!(size_of::<MachTrap>() == 32);
+    assert!(align_of::<MachTrap>() == align_of::<u64>());
+    assert!(offset_of!(MachTrap, mach_trap_arg_count) == 0);
+    assert!(offset_of!(MachTrap, mach_trap_function) == 8);
+    assert!(offset_of!(MachTrap, mach_trap_stack) == 16);
+    assert!(offset_of!(MachTrap, mach_trap_name) == 24);
+};
+
+// SAFETY: The table and every function and string it points at are immutable
+// once the static is initialized, so sharing an entry between CPUs only ever
+// reads it.
+unsafe impl Sync for MachTrap {}
+
+/// When set, an invalid system call traps into the debugger.
+///
+/// The C read and wrote the flag without synchronization; `Relaxed` is that
+/// plain access, and the flag gates a debugger message and nothing else.
+static KERN_INVALID_DEBUG: AtomicI32 = AtomicI32::new(0);
+
+/// The entry for the reserved port traps 10 through 13 and 55 through 56.
+unsafe extern "C" fn null_port() -> c_uint {
+    if KERN_INVALID_DEBUG.load(Ordering::Relaxed) != 0 {
+        soft_debugger(c"null_port mach trap");
+    }
+    MACH_PORT_NULL
+}
+
+/// The entry for every unimplemented system call.
+unsafe extern "C" fn kern_invalid() -> c_int {
+    if KERN_INVALID_DEBUG.load(Ordering::Relaxed) != 0 {
+        soft_debugger(c"kern_invalid mach trap");
+    }
+    c_int::from(Error::InvalidArgument)
+}
+
+/// One table entry, with the routine cast to the type-erased function pointer
+/// the assembly calls.
+const fn trap(
+    function: *const c_void,
+    arg_count: c_int,
+    stack: c_int,
+    name: *const c_char,
+) -> MachTrap {
+    MachTrap {
+        mach_trap_arg_count: arg_count,
+        // SAFETY: Every caller passes the address of a function with the C
+        // calling convention, and a function address is a non-null pointer of
+        // the erased function pointer's width.
+        mach_trap_function: unsafe {
+            transmute::<*const c_void, Option<unsafe extern "C" fn()>>(
+                function,
+            )
+        },
+        mach_trap_stack: stack,
+        mach_trap_name: name,
+    }
+}
+
+/// The C `sizeof(mach_trap_table) / sizeof(mach_trap_table[0])`, and the
+/// table's length.
+const MACH_TRAP_TABLE_LEN: usize = 130;
+
+const _: () = assert!(MACH_TRAP_TABLE_LEN <= c_int::MAX as usize);
+
+/// One entry per syscall number, read by the system-call entries.
+pub static MACH_TRAP_TABLE: [MachTrap; MACH_TRAP_TABLE_LEN] = [
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(null_port as *const c_void, 0, 0, c"null_port".as_ptr()),
+    trap(null_port as *const c_void, 0, 0, c"null_port".as_ptr()),
+    trap(null_port as *const c_void, 0, 0, c"null_port".as_ptr()),
+    trap(null_port as *const c_void, 0, 0, c"null_port".as_ptr()),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(evc_wait as *const c_void, 1, 1, c"evc_wait".as_ptr()),
+    trap(
+        evc_wait_clear as *const c_void,
+        1,
+        1,
+        c"evc_wait_clear".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        mach_msg_trap as *const c_void,
+        7,
+        1,
+        c"mach_msg_trap".as_ptr(),
+    ),
+    trap(
+        mach_reply_port_entry::<MachPlatform> as *const c_void,
+        0,
+        0,
+        c"mach_reply_port".as_ptr(),
+    ),
+    trap(
+        mach_thread_self_entry::<MachPlatform> as *const c_void,
+        0,
+        0,
+        c"mach_thread_self".as_ptr(),
+    ),
+    trap(
+        mach_task_self_entry::<MachPlatform> as *const c_void,
+        0,
+        0,
+        c"mach_task_self".as_ptr(),
+    ),
+    trap(
+        mach_host_self_entry::<MachPlatform> as *const c_void,
+        0,
+        0,
+        c"mach_host_self".as_ptr(),
+    ),
+    trap(mach_print as *const c_void, 1, 1, c"mach_print".as_ptr()),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        syscall_device_writev_request_entry as *const c_void,
+        6,
+        0,
+        c"syscall_device_writev_request".as_ptr(),
+    ),
+    trap(
+        syscall_device_write_request_entry as *const c_void,
+        6,
+        0,
+        c"syscall_device_write_request".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(null_port as *const c_void, 0, 0, c"null_port".as_ptr()),
+    trap(null_port as *const c_void, 0, 0, c"null_port".as_ptr()),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        swtch_pri_entry::<MachPlatform> as *const c_void,
+        1,
+        1,
+        c"swtch_pri".as_ptr(),
+    ),
+    trap(
+        swtch_entry::<MachPlatform> as *const c_void,
+        0,
+        1,
+        c"swtch".as_ptr(),
+    ),
+    trap(
+        thread_switch_entry as *const c_void,
+        3,
+        1,
+        c"thread_switch".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        syscall_vm_map_entry as *const c_void,
+        11,
+        0,
+        c"syscall_vm_map".as_ptr(),
+    ),
+    trap(
+        syscall_vm_allocate_entry as *const c_void,
+        4,
+        0,
+        c"syscall_vm_allocate".as_ptr(),
+    ),
+    trap(
+        syscall_vm_deallocate_entry as *const c_void,
+        3,
+        0,
+        c"syscall_vm_deallocate".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        syscall_task_create_entry as *const c_void,
+        3,
+        0,
+        c"syscall_task_create".as_ptr(),
+    ),
+    trap(
+        syscall_task_terminate_entry as *const c_void,
+        1,
+        0,
+        c"syscall_task_terminate".as_ptr(),
+    ),
+    trap(
+        syscall_task_suspend_entry as *const c_void,
+        1,
+        0,
+        c"syscall_task_suspend".as_ptr(),
+    ),
+    trap(
+        syscall_task_set_special_port_entry as *const c_void,
+        3,
+        0,
+        c"syscall_task_set_special_port".as_ptr(),
+    ),
+    trap(
+        syscall_mach_port_allocate_entry as *const c_void,
+        3,
+        0,
+        c"syscall_mach_port_allocate".as_ptr(),
+    ),
+    trap(
+        syscall_mach_port_deallocate_entry as *const c_void,
+        2,
+        0,
+        c"syscall_mach_port_deallocate".as_ptr(),
+    ),
+    trap(
+        syscall_mach_port_insert_right_entry as *const c_void,
+        4,
+        0,
+        c"syscall_mach_port_insert_right".as_ptr(),
+    ),
+    trap(
+        syscall_mach_port_allocate_name_entry as *const c_void,
+        3,
+        0,
+        c"syscall_mach_port_allocate_name".as_ptr(),
+    ),
+    trap(
+        syscall_thread_depress_abort_entry as *const c_void,
+        1,
+        0,
+        c"syscall_thread_depress_abort".as_ptr(),
+    ),
+    trap(
+        thread_set_self_state as *const c_void,
+        3,
+        0,
+        c"thread_set_self_state".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+    trap(
+        kern_invalid as *const c_void,
+        0,
+        0,
+        c"kern_invalid".as_ptr(),
+    ),
+];
+
+const _: () = assert!(MACH_TRAP_TABLE.len() == MACH_TRAP_TABLE_LEN);
+
+/// The number of syscall entries.
+pub static MACH_TRAP_COUNT: c_int = MACH_TRAP_TABLE_LEN as c_int;

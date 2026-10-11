@@ -1,0 +1,31 @@
+[package]
+name = "mach-thread"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mach tasks, threads and the scheduler above mach-ipc, with processors, processor sets and the ports that name them"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitfield.workspace = true
+bitflags.workspace = true
+clock.workspace = true
+mach-emulation.workspace = true
+mach-page.workspace = true
+mach-sched.workspace = true
+mach-task.workspace = true
+collections.workspace = true
+lock.workspace = true
+mach-ipc.workspace = true
+mach-vm.workspace = true
+zerocopy.workspace = true
+
+[lints]
+workspace = true

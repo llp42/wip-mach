@@ -1,0 +1,397 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
+//
+// Inspired by GNU Mach; see COPYRIGHT.
+
+//! The device lookup table.
+//!
+//! The C table's number lock was a file `static`; the Rust one is a
+//! `SpinMutex`, still held before any device's `ref_lock`.
+
+use crate::dev_name;
+use crate::ds_routines::DeviceFlags;
+use crate::ds_routines::{
+    DevOps, Device, MachDevice, MachDeviceNumberAdapter,
+};
+use crate::platform::Platform;
+use crate::types::DeviceCache;
+use collections::list::{self, List};
+use core::ffi::{c_char, c_int, c_short, c_uint, c_void};
+use core::mem::size_of;
+use core::pin::Pin;
+use core::ptr::{self, NonNull};
+use mach_ipc::IpcPort;
+use mach_vm::simple_lock::SimpleLock;
+
+/// The device-number buckets.
+pub(crate) const NDEVHASH: usize = 8;
+
+/// The device block size.
+const DEV_BSIZE: c_int = 512;
+
+/// The state of a device that is not open yet.
+const DEV_STATE_INIT: c_short = 0;
+
+/// The kernel-object type of a device port.
+const IKOT_DEVICE: c_uint = 10;
+
+/// The kernel-object type of a port bound to no kernel object.
+const IKOT_NONE: c_uint = 0;
+
+/// A bucket of the device-number table. Keys are unique, so the order within
+/// a bucket is unobservable.
+pub(crate) type NumberBucket<P> = List<'static, MachDeviceNumberAdapter<P>>;
+
+/// The bucket of `dev_number`.
+const fn number_hash(dev_number: c_int) -> usize {
+    // The mask leaves a value below `NDEVHASH`, so the cast cannot lose
+    // anything that matters.
+    (dev_number & (NDEVHASH as c_int - 1)) as usize
+}
+
+/// The bucket `dev_number` hashes to.
+///
+/// # Safety
+///
+/// The caller must hold the number lock for as long as it uses the
+/// bucket.
+unsafe fn number_bucket<P: Platform>(
+    dev_number: c_int,
+) -> Pin<&'static mut NumberBucket<P>> {
+    // SAFETY: `number_hash()` is below the array bound, so the element is in
+    // bounds; the static never moves, and the lock the caller holds keeps
+    // anything else from reaching the bucket.
+    unsafe {
+        Pin::new_unchecked(
+            &mut *P::device_state()
+                .number_hash
+                .get()
+                .cast::<NumberBucket<P>>()
+                .add(number_hash(dev_number)),
+        )
+    }
+}
+
+/// Allocates a device record for `dev_ops` and `dev_number`, with one
+/// reference, not open.
+///
+/// # Safety
+///
+/// The cache must be initialized, and the caller must not hold
+/// the number lock.
+unsafe fn alloc_device<P: Platform>(
+    dev_ops: *mut DevOps<P>,
+    dev_number: c_int,
+) -> Option<NonNull<MachDevice<P>>> {
+    // SAFETY: the cache is live after `init()`.
+    let buf = unsafe { P::device_cache_alloc(DeviceCache::Device) }?;
+    let device = buf.as_ptr().cast::<MachDevice<P>>();
+    // SAFETY: the cache object is a fresh, unshared `MachDevice`, and every
+    // field of it is written.
+    unsafe {
+        ptr::write(
+            device,
+            MachDevice::<P> {
+                ref_lock: SimpleLock::new(),
+                ref_count: 1,
+                lock: SimpleLock::new(),
+                state: DEV_STATE_INIT,
+                flag: DeviceFlags::empty(),
+                open_count: 0,
+                io_in_progress: 0,
+                io_wait: 0,
+                port: ptr::null_mut(),
+                number_chain: list::Link::new(),
+                dev_number,
+                bsize: DEV_BSIZE,
+                dev_ops,
+                dev: Device {
+                    emul_ops: ptr::null_mut(),
+                    emul_data: ptr::null_mut(),
+                },
+            },
+        );
+    }
+    NonNull::new(device)
+}
+
+/// Returns `device` to the cache.
+///
+/// # Safety
+///
+/// `device` must be a dead device from [`alloc_device()`] with no holder
+/// left.
+unsafe fn free_device<P: Platform>(device: *mut MachDevice<P>) {
+    unsafe {
+        P::device_cache_free(
+            DeviceCache::Device,
+            NonNull::new_unchecked(device.cast::<u8>()),
+        );
+    }
+}
+
+/// Enters `device` in the number table.
+///
+/// # Safety
+///
+/// the number lock must be held, and `device` must be live and not
+/// linked into the table.
+unsafe fn number_enter<P: Platform>(device: *mut MachDevice<P>) {
+    // SAFETY: the table lock is held.
+    let mut head = unsafe { number_bucket((*device).dev_number) };
+    // SAFETY: `device` is live and unlinked, and only the table reaches it
+    // until `number_remove()` unlinks it.
+    unsafe { head.as_mut().push_front_ptr(NonNull::new_unchecked(device)) };
+}
+
+/// Removes `device` from the number table.
+///
+/// # Safety
+///
+/// the number lock must be held, and `device` must be linked into the
+/// table.
+unsafe fn number_remove<P: Platform>(device: *mut MachDevice<P>) {
+    // SAFETY: `device` is on its bucket, and the table lock keeps anything
+    // else from reaching it.
+    unsafe { NumberBucket::<P>::remove_ptr(NonNull::new_unchecked(device)) };
+}
+
+/// The device of `dev_ops` and `dev_number`, or null.
+///
+/// # Safety
+///
+/// the number lock must be held, and every linked device live.
+unsafe fn number_lookup<P: Platform>(
+    dev_ops: *mut DevOps<P>,
+    dev_number: c_int,
+) -> *mut MachDevice<P> {
+    // SAFETY: the table lock is held.
+    let head = unsafe { number_bucket(dev_number) };
+    let mut cursor = head.cursor_front();
+    while let Some(device) = cursor.current() {
+        if device.dev_ops == dev_ops && device.dev_number == dev_number {
+            return cursor
+                .current_ptr()
+                .map_or(ptr::null_mut(), NonNull::as_ptr);
+        }
+        cursor.move_next();
+    }
+    ptr::null_mut()
+}
+
+/// The device `name` names, with a reference, created when it does not exist
+/// yet.
+///
+/// # Safety
+///
+/// `name` must be a NUL-terminated string readable by the caller, and the
+/// device package must be initialized. The returned device carries one
+/// reference.
+pub(crate) unsafe fn lookup<P: Platform>(
+    name: *const c_char,
+) -> Option<NonNull<MachDevice<P>>> {
+    let (dev_ops, dev_number) = unsafe { dev_name::lookup(name) }?;
+    let dev_ops = dev_ops.as_ptr();
+
+    let mut new_device: *mut MachDevice<P> = ptr::null_mut();
+    loop {
+        let guard = P::device_state().number_lock.lock();
+        // SAFETY: the lock is held and the table initialized.
+        let found = unsafe { number_lookup(dev_ops, dev_number) };
+        if !found.is_null() {
+            // SAFETY: the found device is live under the lock.
+            unsafe {
+                reference(found);
+                drop(guard);
+                if !new_device.is_null() {
+                    free_device(new_device);
+                }
+            }
+            return NonNull::new(found);
+        }
+        if !new_device.is_null() {
+            // SAFETY: the fresh device is unshared and the lock is held.
+            unsafe {
+                number_enter(new_device);
+                drop(guard);
+            }
+            return NonNull::new(new_device);
+        }
+        drop(guard);
+
+        // SAFETY: the cache is initialized, and the C allocated without the
+        // table lock too.
+        let device = (unsafe { alloc_device(dev_ops, dev_number) })?;
+        new_device = device.as_ptr();
+    }
+}
+
+/// Takes a reference on `device`.
+///
+/// # Safety
+///
+/// `device` must be a live mach device.
+pub(crate) unsafe fn reference<P: Platform>(device: *mut MachDevice<P>) {
+    unsafe {
+        (*device).ref_lock.lock();
+        (*device).ref_count += 1;
+        (*device).ref_lock.unlock();
+    }
+}
+
+/// Drops a reference on `device`, removing and freeing it on the last one.
+///
+/// # Safety
+///
+/// `device` must be a live mach device the caller holds a reference on, and
+/// nothing may touch it once its last reference goes.
+pub unsafe fn deallocate<P: Platform>(device: *mut MachDevice<P>) {
+    unsafe {
+        (*device).ref_lock.lock();
+        (*device).ref_count -= 1;
+        if (*device).ref_count > 0 {
+            (*device).ref_lock.unlock();
+            return;
+        }
+        (*device).ref_count = 1;
+        (*device).ref_lock.unlock();
+
+        let guard = P::device_state().number_lock.lock();
+        (*device).ref_lock.lock();
+        (*device).ref_count -= 1;
+        if (*device).ref_count > 0 {
+            (*device).ref_lock.unlock();
+            drop(guard);
+            return;
+        }
+        number_remove(device);
+        (*device).ref_lock.unlock();
+        drop(guard);
+    }
+
+    // SAFETY: the last reference is gone, and the caller must not touch the
+    // device again.
+    unsafe { free_device(device) };
+}
+
+/// [`reference()`] over an untyped pointer.
+///
+/// # Safety
+///
+/// `device` must be a live mach device.
+pub(crate) unsafe fn mach_device_reference<P: Platform>(device: *mut c_void) {
+    unsafe { reference::<P>(device.cast()) };
+}
+
+/// [`deallocate`] over an untyped pointer.
+///
+/// # Safety
+///
+/// `device` must be a live mach device the caller holds a reference on.
+pub(crate) unsafe fn mach_device_deallocate<P: Platform>(device: *mut c_void) {
+    unsafe { deallocate::<P>(device.cast()) };
+}
+
+/// Binds `device` to its port, taking a reference for the binding.
+///
+/// # Safety
+///
+/// `device` must be a live device whose port is a live port, and the caller
+/// must own a device reference for the mapping to take.
+pub(crate) unsafe fn port_enter<P: Platform>(device: *mut MachDevice<P>) {
+    unsafe {
+        reference(device);
+        P::kobject_set(
+            (*device).port,
+            ptr::addr_of_mut!((*device).dev).expose_provenance(),
+            IKOT_DEVICE,
+        );
+        (*device).dev.emul_data = device.cast::<c_void>();
+        (*device).dev.emul_ops = P::device_state().emulation.get();
+    }
+}
+
+/// Unbinds `device` from its port.
+///
+/// # Safety
+///
+/// `device` must be a live device whose port carries the mapping, and the
+/// caller's reference moves into the call.
+pub(crate) unsafe fn port_remove<P: Platform>(device: *mut MachDevice<P>) {
+    unsafe {
+        P::kobject_set((*device).port, 0, IKOT_NONE);
+        deallocate(device);
+    }
+}
+
+/// The device the port `port` names, with a reference, or null.
+///
+/// # Safety
+///
+/// `port` must be null, dead, or a live port.
+pub unsafe fn port_lookup(port: *mut c_void) -> *mut Device {
+    let Some(port) = IpcPort::valid(port) else {
+        return ptr::null_mut();
+    };
+
+    // SAFETY: the live port's lock serializes the kernel-object read, and a
+    // device-port kernel object is the embedded `Device` of a live
+    // `MachDevice`.
+    unsafe {
+        port.lock();
+        let device = if port.is_active() && port.kotype() == IKOT_DEVICE {
+            let device = port.kobject().cast::<Device>();
+            let ops = (*device).emul_ops;
+            if !ops.is_null()
+                && let Some(reference) = (*ops).reference
+            {
+                reference((*device).emul_data);
+            }
+            device
+        } else {
+            ptr::null_mut()
+        };
+        port.unlock();
+        device
+    }
+}
+
+/// A send right for `device`'s port, through its emulation, or null.
+///
+/// # Safety
+///
+/// A non-null `device` must name a live `struct device`, and its emulation
+/// must be one whose `dev_to_port` takes the reference the caller consumed.
+#[must_use]
+pub unsafe fn convert_to_port(device: Option<NonNull<Device>>) -> *mut c_void {
+    let Some(device) = device else {
+        return ptr::null_mut();
+    };
+    let device = device.as_ptr();
+
+    unsafe {
+        let ops = (*device).emul_ops;
+        if ops.is_null() {
+            return ptr::null_mut();
+        }
+        (*ops).dev_to_port.map_or(ptr::null_mut(), |dev_to_port| {
+            dev_to_port((*device).emul_data)
+        })
+    }
+}
+
+/// Creates the device record cache.
+///
+/// # Safety
+///
+/// Runs once from the boot sequence, before any device exists.
+pub(crate) unsafe fn init<P: Platform>() {
+    // SAFETY: this call builds the cache before any device is looked up.
+    unsafe {
+        P::device_cache_init(
+            DeviceCache::Device,
+            b"mach_device",
+            size_of::<MachDevice<P>>(),
+        );
+    }
+}

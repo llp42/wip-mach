@@ -1,0 +1,21 @@
+[package]
+name = "mach-emulation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "A task's system-call emulation vector, above mach-vm"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+mach-page.workspace = true
+mach-vm.workspace = true
+
+[lints]
+workspace = true

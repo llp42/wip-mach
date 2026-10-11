@@ -1,0 +1,24 @@
+[package]
+name = "mach-trap"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The bodies of Mach's traps above mach-thread and mach-device, with the exception up-call"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+mach-sched.workspace = true
+mach-ipc.workspace = true
+mach-thread.workspace = true
+mach-vm.workspace = true
+mach-device.workspace = true
+
+[lints]
+workspace = true

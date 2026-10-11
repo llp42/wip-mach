@@ -1,0 +1,26 @@
+[package]
+name = "mach-gsync"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GNU Mach's address-based synchronization above mach-vm"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitflags.workspace = true
+collections.workspace = true
+lock.workspace = true
+mach-vm.workspace = true
+
+[dev-dependencies]
+mach-fake.workspace = true
+
+[lints]
+workspace = true

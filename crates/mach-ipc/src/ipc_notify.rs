@@ -1,0 +1,363 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-FileCopyrightText: 2026 Leonardo Lopes Pereira <leonardolopespereira@outlook.com>
+//
+// Inspired by GNU Mach; see COPYRIGHT.
+
+//! The notification-sending routines.
+//!
+//! The notification layouts are fixed, so each sender builds its message where
+//! it sends it, and `init` has nothing to initialize.
+
+use crate::ipc_kmsg::{self, Kmsg};
+use crate::ipc_mqueue;
+use crate::ipc_port;
+use crate::platform::Platform;
+use crate::types::MsghBits;
+use crate::{IpcPort, MachMsgHeader};
+use core::ffi::{c_int, c_uint, c_void};
+use core::mem::{offset_of, size_of};
+use core::ptr::{self, NonNull};
+
+/// The message id of a port-deleted notification.
+const PORT_DELETED: c_int = 0o101;
+/// The message id of a msg-accepted notification.
+const MSG_ACCEPTED: c_int = 0o102;
+/// The message id of a port-destroyed notification.
+const PORT_DESTROYED: c_int = 0o105;
+/// The message id of a no-senders notification.
+const NO_SENDERS: c_int = 0o106;
+/// The message id of a send-once notification.
+const SEND_ONCE: c_int = 0o107;
+/// The message id of a dead-name notification.
+const DEAD_NAME: c_int = 0o110;
+
+/// The sequence number a notification's header carries.
+const NOTIFY_MSGH_SEQNO: c_uint = 0;
+
+/// The type of a port name in a message body.
+const MACH_MSG_TYPE_PORT_NAME: c_uint = 15;
+/// The type of a receive right in a message body.
+const MACH_MSG_TYPE_PORT_RECEIVE: c_uint = 16;
+/// The type of a 32-bit integer in a message body.
+const MACH_MSG_TYPE_INTEGER_32: c_uint = 2;
+/// The header bits of a message to a send-once right: a remote
+/// `MACH_MSG_TYPE_PORT_SEND_ONCE`.
+const MACH_SEND_ONCE_BITS: MsghBits = MsghBits::new(18, 0);
+
+/// The size of a port name in a message body, in bits.
+const PORT_NAME_T_SIZE_IN_BITS: c_uint = 32;
+/// The size of a port in a message body, in bits.
+const PORT_T_SIZE_IN_BITS: c_uint = 8 * size_of::<*mut c_void>() as c_uint;
+
+/// `mach_msg_type_t`: the bitfield word and the `msgt_number` member that
+/// follows it.
+#[repr(C)]
+#[allow(missing_docs)]
+struct MsgType {
+    /// The packed `msgt_name`, `msgt_size` and inline-flag bits;
+    /// [`MsgType::inline()`] builds it.
+    word: u32,
+    number: u32,
+}
+
+impl MsgType {
+    /// The descriptor of one inline, short-form datum of `size` bits.
+    const fn inline(name: u32, size: u32, number: u32) -> Self {
+        let word = name | (size << 8) | (1 << 29);
+
+        Self { word, number }
+    }
+}
+
+/// A notification message: the header and the type descriptor and payload that
+/// follow it.
+#[repr(C)]
+#[allow(missing_docs)]
+struct Notification {
+    header: MachMsgHeader,
+    type_descriptor: MsgType,
+    /// `not_port` or `not_count`, one pointer-wide word; the C stores a port
+    /// name, a count or a receive right here.
+    payload: usize,
+}
+
+const _: () = {
+    assert!(size_of::<MsgType>() == 8);
+    assert!(align_of::<MsgType>() == 4);
+    assert!(offset_of!(MsgType, word) == 0);
+    assert!(offset_of!(MsgType, number) == 4);
+
+    assert!(size_of::<Notification>() == 48);
+    assert!(align_of::<Notification>() == 8);
+    assert!(offset_of!(Notification, header) == 0);
+    assert!(offset_of!(Notification, type_descriptor) == 32);
+    assert!(offset_of!(Notification, payload) == 40);
+};
+
+/// The payload a notification carries after its type descriptor.
+#[derive(Clone, Copy)]
+enum Body {
+    /// `mach_send_once_notification_t`: the header alone.
+    Bare,
+    /// A port name, as `mach_port_deleted_notification_t`,
+    /// `mach_msg_accepted_notification_t` and
+    /// `mach_dead_name_notification_t` carry.
+    Name(c_uint),
+    /// `mach_no_senders_notification_t`: the send-right count.
+    Count(c_uint),
+    /// `mach_port_destroyed_notification_t`: the receive right itself.
+    Receive(*mut c_void),
+}
+
+impl Body {
+    /// `sizeof *n` for the notification this body belongs to.
+    const fn size(&self) -> usize {
+        match self {
+            Self::Bare => size_of::<MachMsgHeader>(),
+            Self::Name(_) | Self::Count(_) | Self::Receive(_) => {
+                size_of::<Notification>()
+            }
+        }
+    }
+
+    /// The value of `not_port`/`not_count`.
+    fn payload(&self) -> usize {
+        match self {
+            Self::Bare => 0,
+            Self::Name(name) | Self::Count(name) => *name as usize,
+            Self::Receive(port) => *port as usize,
+        }
+    }
+
+    /// The `msgt_name` of the body's type descriptor.
+    const fn type_name(&self) -> c_uint {
+        match self {
+            Self::Bare | Self::Name(_) => MACH_MSG_TYPE_PORT_NAME,
+            Self::Count(_) => MACH_MSG_TYPE_INTEGER_32,
+            Self::Receive(_) => MACH_MSG_TYPE_PORT_RECEIVE,
+        }
+    }
+
+    /// The `msgt_size` of the body's type descriptor.
+    const fn type_size(&self) -> c_uint {
+        match self {
+            Self::Bare | Self::Name(_) => PORT_NAME_T_SIZE_IN_BITS,
+            Self::Count(_) => 32,
+            Self::Receive(_) => PORT_T_SIZE_IN_BITS,
+        }
+    }
+
+    /// The `msgh_bits` of the notification this body belongs to.
+    const fn bits(&self) -> MsghBits {
+        match self {
+            Self::Receive(_) => MACH_SEND_ONCE_BITS.union(MsghBits::COMPLEX),
+            _ => MACH_SEND_ONCE_BITS,
+        }
+    }
+}
+
+/// Builds the notification message `id`, addressed to `port`, carrying
+/// `body`.
+///
+/// # Safety
+///
+/// `port` must be a live port holding the send-once right the notification
+/// consumes, and the caller permits an allocation.  The result, when `Some`,
+/// is a live message this call owns.
+unsafe fn build<P: Platform>(
+    id: c_int,
+    port: *mut c_void,
+    body: Body,
+) -> Option<Kmsg> {
+    let size = body.size();
+    let kmsg = unsafe { ipc_kmsg::alloc::<P>(size) }?;
+    // SAFETY: the fresh message is owned by this call.
+    let header = unsafe { kmsg.header() };
+
+    // The C copied a zero-initialized template over the buffer; zeroing
+    // first and writing the fields below leaves the same bytes, padding
+    // included.
+    // SAFETY: the message's buffer holds `size` writable bytes.
+    unsafe { ptr::write_bytes(header.cast::<u8>(), 0, size) };
+
+    // SAFETY: the message is live and this call owns it; the size is one of
+    // the two `sizeof` values above, so the narrowing cannot lose anything.
+    unsafe {
+        (*header).set_bits(body.bits());
+        (*header).size = size as u32;
+        (*header).remote_port = port.addr();
+        (*header).seqno = NOTIFY_MSGH_SEQNO;
+        (*header).id = id;
+    }
+
+    if !matches!(body, Body::Bare) {
+        // SAFETY: the buffer's layout is `Notification`, most of it already
+        // written as the header.
+        unsafe {
+            let notification = header.cast::<Notification>();
+            (*notification).type_descriptor =
+                MsgType::inline(body.type_name(), body.type_size(), 1);
+            (*notification).payload = body.payload();
+        }
+    }
+
+    Some(kmsg)
+}
+
+/// Initializes the notifications; there is nothing to do.
+pub(crate) const fn init() {}
+
+/// Tells `port` that `name` was deleted.
+///
+/// # Safety
+///
+/// `port` must be a live port holding the send-once right the notification
+/// consumes; nothing may be locked.
+pub(crate) unsafe fn port_deleted<P: Platform>(
+    port: *mut c_void,
+    name: c_uint,
+) {
+    let Some(kmsg) =
+        (unsafe { build::<P>(PORT_DELETED, port, Body::Name(name)) })
+    else {
+        P::print(format_args!(
+            "dropped port-deleted (0x{:x}, 0x{:x})\n",
+            port.expose_provenance(),
+            name,
+        ));
+        unsafe { ipc_port::release_sonce::<P>(IpcPort::from_raw(port)) };
+        return;
+    };
+
+    // SAFETY: the message holds the right the queue consumes.
+    let _ = unsafe { ipc_mqueue::send_always::<P>(kmsg.as_ptr()) };
+}
+
+/// Tells `port` that the queue of `name` accepted a message.
+///
+/// # Safety
+///
+/// `port` must be a live port holding the send-once right the notification
+/// consumes; nothing may be locked.
+pub(crate) unsafe fn msg_accepted<P: Platform>(
+    port: *mut c_void,
+    name: c_uint,
+) {
+    let Some(kmsg) =
+        (unsafe { build::<P>(MSG_ACCEPTED, port, Body::Name(name)) })
+    else {
+        P::print(format_args!(
+            "dropped msg-accepted (0x{:x}, 0x{:x})\n",
+            port.expose_provenance(),
+            name,
+        ));
+        unsafe { ipc_port::release_sonce::<P>(IpcPort::from_raw(port)) };
+        return;
+    };
+
+    // SAFETY: the message holds the right the queue consumes.
+    let _ = unsafe { ipc_mqueue::send_always::<P>(kmsg.as_ptr()) };
+}
+
+/// Hands `port` the receive right `right` of a destroyed port.
+///
+/// # Safety
+///
+/// `port` must be a live port holding the send-once right the notification
+/// consumes, and `right` a receive right the message takes over; nothing may
+/// be locked.
+pub(crate) unsafe fn port_destroyed<P: Platform>(
+    port: *mut c_void,
+    right: *mut c_void,
+) {
+    let Some(kmsg) =
+        (unsafe { build::<P>(PORT_DESTROYED, port, Body::Receive(right)) })
+    else {
+        P::print(format_args!(
+            "dropped port-destroyed (0x{:x}, 0x{:x})\n",
+            port.expose_provenance(),
+            right.expose_provenance(),
+        ));
+        unsafe {
+            ipc_port::release_sonce::<P>(IpcPort::from_raw(port));
+            ipc_port::release_receive::<P>(IpcPort::from_raw(right));
+        }
+        return;
+    };
+
+    // SAFETY: the message holds the right the queue consumes.
+    let _ = unsafe { ipc_mqueue::send_always::<P>(kmsg.as_ptr()) };
+}
+
+/// Tells `port` that it has no more senders, with its make-send count
+/// `mscount`.
+///
+/// # Safety
+///
+/// `port` must be a live port holding the send-once right the notification
+/// consumes; nothing may be locked.
+pub unsafe fn no_senders<P: Platform>(port: NonNull<c_void>, mscount: c_uint) {
+    let Some(kmsg) = (unsafe {
+        build::<P>(NO_SENDERS, port.as_ptr(), Body::Count(mscount))
+    }) else {
+        P::print(format_args!(
+            "dropped no-senders (0x{:x}, {})\n",
+            port.as_ptr().expose_provenance(),
+            mscount,
+        ));
+        unsafe {
+            ipc_port::release_sonce::<P>(IpcPort::from_raw(port.as_ptr()));
+        };
+        return;
+    };
+
+    // SAFETY: the message holds the right the queue consumes.
+    let _ = unsafe { ipc_mqueue::send_always::<P>(kmsg.as_ptr()) };
+}
+
+/// Sends the send-once notification to `port`, whose right died unused.
+///
+/// # Safety
+///
+/// `port` must be a live port holding the send-once right the notification
+/// consumes; nothing may be locked.
+pub(crate) unsafe fn send_once<P: Platform>(port: NonNull<c_void>) {
+    let Some(kmsg) =
+        (unsafe { build::<P>(SEND_ONCE, port.as_ptr(), Body::Bare) })
+    else {
+        P::print(format_args!(
+            "dropped send-once (0x{:x})\n",
+            port.as_ptr().expose_provenance(),
+        ));
+        unsafe {
+            ipc_port::release_sonce::<P>(IpcPort::from_raw(port.as_ptr()));
+        };
+        return;
+    };
+
+    // SAFETY: the message holds the right the queue consumes.
+    let _ = unsafe { ipc_mqueue::send_always::<P>(kmsg.as_ptr()) };
+}
+
+/// Tells `port` that `name` became a dead name.
+///
+/// # Safety
+///
+/// `port` must be a live port holding the send-once right the notification
+/// consumes; nothing may be locked.
+pub(crate) unsafe fn dead_name<P: Platform>(port: *mut c_void, name: c_uint) {
+    let Some(kmsg) =
+        (unsafe { build::<P>(DEAD_NAME, port, Body::Name(name)) })
+    else {
+        P::print(format_args!(
+            "dropped dead-name (0x{:x}, 0x{:x})\n",
+            port.expose_provenance(),
+            name,
+        ));
+        unsafe { ipc_port::release_sonce::<P>(IpcPort::from_raw(port)) };
+        return;
+    };
+
+    // SAFETY: the message holds the right the queue consumes.
+    let _ = unsafe { ipc_mqueue::send_always::<P>(kmsg.as_ptr()) };
+}

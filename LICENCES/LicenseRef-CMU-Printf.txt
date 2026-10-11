@@ -1,0 +1,4 @@
+Copyright (c) <year> <owner>.
+
+Permission is granted to use, modify, or propagate this code as
+long as this notice is incorporated.

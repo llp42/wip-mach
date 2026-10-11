@@ -1,0 +1,25 @@
+[package]
+name = "mach-task"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The Mach task record, above mach-ipc and mach-emulation"
+repository.workspace = true
+publish = false
+
+[lib]
+# Tests reproduce bugs as integration tests.
+test = false
+doctest = false
+
+[dependencies]
+bitflags.workspace = true
+collections.workspace = true
+mach-emulation.workspace = true
+mach-ipc.workspace = true
+mach-sched.workspace = true
+mach-vm.workspace = true
+
+[lints]
+workspace = true

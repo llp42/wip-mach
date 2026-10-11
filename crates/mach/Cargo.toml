@@ -1,0 +1,48 @@
+[package]
+name = "mach"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "A work-in-progress Mach microkernel implementation in Rust"
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "mach"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+acpi.workspace = true
+bitfield.workspace = true
+bitflags.workspace = true
+clock.workspace = true
+collections.workspace = true
+kmem.workspace = true
+lock.workspace = true
+mach-boot.workspace = true
+mach-mig-sys = { path = "../mach-mig-sys" }
+mach-gsync.workspace = true
+mach-host.workspace = true
+mach-ipc.workspace = true
+mach-kd.workspace = true
+mach-page.workspace = true
+mach-sched.workspace = true
+mach-slab.workspace = true
+mach-pmap.workspace = true
+mach-task.workspace = true
+mach-thread.workspace = true
+mach-trap.workspace = true
+mach-tty.workspace = true
+mach-vm.workspace = true
+raw-cpuid.workspace = true
+volatile.workspace = true
+x86_64.workspace = true
+mach-device.workspace = true
+mach-emulation.workspace = true
+zerocopy.workspace = true
+
+[lints]
+workspace = true
